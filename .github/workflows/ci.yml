@@ -12,6 +12,7 @@ jobs:
   engine:
     name: Engine (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -22,9 +23,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install ffmpeg and yt-dlp
+        # Un miroir APT lent peut sinon bloquer le job pendant des heures.
+        timeout-minutes: 8
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
+          sudo apt-get $APT_OPTS update -qq
+          sudo apt-get $APT_OPTS install -y -qq --no-install-recommends ffmpeg
           python -m pip install --quiet yt-dlp
       - name: Run engine, daemon and yt-dlp tests
         run: python -m unittest discover -s tests -v
@@ -32,6 +36,7 @@ jobs:
   extension:
     name: Extension (Node 22)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,6 +50,7 @@ jobs:
   scripts:
     name: Install scripts
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
