@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PDM – Réglages</title>
+    <link rel="icon" href="../icons/icon32.png" />
+    <link rel="stylesheet" href="../theme.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <header>
+      <img src="../icons/icon32.png" alt="" width="28" height="28" />
+      <h1>Réglages de PDM</h1>
+    </header>
+
+    <main>
+      <section>
+        <h2>Moteur de téléchargement</h2>
+        <p id="engine-status" class="engine-status" data-state="pending">Connexion au moteur…</p>
+        <div id="install-help" class="callout" hidden>
+          <p>
+            Le moteur apporte les connexions multiples, la reprise après coupure, les vidéos en
+            streaming et la continuité navigateur fermé. Pour l'installer, ouvre un terminal dans
+            le dossier de PDM et lance :
+          </p>
+          <pre><code>./install.sh</code></pre>
+          <p>Puis recharge cette page.</p>
+        </div>
+      </section>
+
+      <form id="engine-form" hidden>
+        <section>
+          <h2>Téléchargements</h2>
+          <label class="field">
+            <span>Dossier de destination</span>
+            <input id="download-dir" type="text" spellcheck="false" />
+            <small>Laisse vide pour utiliser ton dossier Téléchargements.</small>
+          </label>
+          <div class="grid">
+            <label class="field">
+              <span>Connexions par fichier</span>
+              <input id="connections" type="number" min="1" max="32" required />
+              <small>8 convient à la plupart des serveurs. Plus n'aide que si le serveur limite chaque connexion.</small>
+            </label>
+            <label class="field">
+              <span>Téléchargements simultanés</span>
+              <input id="max-parallel" type="number" min="1" max="10" required />
+              <small>Les suivants attendent dans la file.</small>
+            </label>
+          </div>
+          <label class="check"><input id="categorize" type="checkbox" /> Ranger par catégorie (Videos/, Musique/, Archives/…)</label>
+          <label class="check"><input id="notify" type="checkbox" /> Notification du bureau à la fin de chaque téléchargement</label>
+          <label class="check"><input id="auto-resume" type="checkbox" /> Reprendre automatiquement les téléchargements interrompus</label>
+          <div class="actions">
+            <button type="submit" class="primary">Enregistrer</button>
+            <span id="saved" class="saved" role="status"></span>
+          </div>
+        </section>
+
+        <section>
+          <h2>Outils vidéo</h2>
+          <ul id="tools" class="tools"></ul>
+        </section>
+      </form>
+
+      <section>
+        <h2>Navigateur</h2>
+        <label class="check"><input id="take-over" type="checkbox" /> Prendre le contrôle des téléchargements de Chrome</label>
+        <label class="check"><input id="open-manager" type="checkbox" /> Ouvrir le gestionnaire à chaque nouveau téléchargement</label>
+        <label class="check"><input id="video-button" type="checkbox" /> Afficher « Télécharger cette vidéo » au survol des lecteurs</label>
+      </section>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

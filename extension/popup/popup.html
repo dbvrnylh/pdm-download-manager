@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>PDM</title>
+    <link rel="stylesheet" href="../theme.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="../icons/icon32.png" alt="" width="20" height="20" />
+      <h1>PDM</h1>
+      <nav>
+        <button id="open-manager" class="link">Gestionnaire</button>
+        <button id="open-options" class="link">Réglages</button>
+      </nav>
+    </header>
+
+    <p id="engine-status" class="engine-status" data-state="pending">Connexion au moteur…</p>
+
+    <main>
+      <section id="page-video" hidden>
+        <h2>Vidéo de cette page</h2>
+        <div class="row">
+          <select id="preset" aria-label="Qualité"></select>
+          <button id="grab-page" class="primary">Télécharger</button>
+        </div>
+        <p class="hint">YouTube, Vimeo, Dailymotion et des centaines d'autres sites, via yt-dlp.</p>
+      </section>
+
+      <section>
+        <h2>Médias détectés</h2>
+        <ul id="media-list"></ul>
+        <div id="empty" class="empty" hidden>
+          <p>Aucun fichier média détecté pour l'instant.</p>
+          <p class="hint">Lance la lecture de la vidéo, puis rouvre ce menu.</p>
+        </div>
+      </section>
+      <p id="status" class="status" role="status"></p>
+    </main>
+
+    <footer>
+      <label><input type="checkbox" id="take-over" /> Prendre le contrôle des téléchargements</label>
+      <label><input type="checkbox" id="open-manager-setting" /> Ouvrir le gestionnaire à chaque téléchargement</label>
+      <label><input type="checkbox" id="video-button" /> Bouton « Télécharger cette vidéo » sur les lecteurs</label>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

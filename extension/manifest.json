@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "PDM – Gestionnaire de téléchargements",
+  "short_name": "PDM",
+  "version": "2.0.4",
+  "description": "Gestionnaire de téléchargements façon IDM : moteur multi-connexions, détection des vidéos, prise de contrôle des téléchargements.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwDFISdv/GqZfxvfzKtzVEHAnlcfVD+F1GKX9ZYsubPNHIzlBWTfN3dyWEw8jXOL5qzuclZZfcwpKy2heikinwZsG78lXPOmX5kQlSWPbv6xGPjw6Wd/17+MoZ3gGrBmPo+LTgg7Re6T6duRH/+U85wMMH/x74LK1V2VYJvoxUokxrNdSjHXcV0BakNzzY3BkGsux1nf8S1u1gZv5pCFMN9toLSBZKQJZ/pNBV97HeFPJKH8yM6mA4zk+3g5LE9A6NAq1GYwblIYNST+0LSRg8tE8qT+b7IusujKcH8FBnZH+uIjGcgMiRKLeW/BY8tlw7eQM9e4yf4RIWPEKefrm7wIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "downloads",
+    "downloads.open",
+    "downloads.ui",
+    "webRequest",
+    "webNavigation",
+    "storage",
+    "contextMenus",
+    "cookies",
+    "nativeMessaging",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "PDM",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content/grab.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

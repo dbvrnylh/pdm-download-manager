@@ -1,0 +1,130 @@
+/* Couleurs et styles communs à la popup et au gestionnaire. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --surface: #f4f5f7;
+  --border: #e2e4e9;
+  --text: #1b1d22;
+  --muted: #5f6573;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --on-accent: #ffffff;
+  --danger: #c2410c;
+  --success: #15803d;
+
+  --cat-video: #7c3aed;
+  --cat-audio: #db2777;
+  --cat-document: #2563eb;
+  --cat-archive: #b45309;
+  --cat-program: #0f766e;
+  --cat-image: #0e7490;
+  --cat-other: #6b7280;
+  --kind-stream: #c2410c;
+
+  --radius: 8px;
+  font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --surface: #1f2229;
+    --border: #2e323b;
+    --text: #e7e9ee;
+    --muted: #9aa1ae;
+    --accent: #5b8cff;
+    --accent-hover: #7aa2ff;
+    --on-accent: #0b1020;
+    --danger: #f08a5d;
+    --success: #4ade80;
+
+    --cat-video: #a78bfa;
+    --cat-audio: #f472b6;
+    --cat-document: #7aa2ff;
+    --cat-archive: #fbbf24;
+    --cat-program: #2dd4bf;
+    --cat-image: #22d3ee;
+    --cat-other: #9ca3af;
+    --kind-stream: #fb923c;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover {
+  border-color: var(--muted);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 4px;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Étiquette de catégorie ou de type de média. */
+.tag {
+  --c: var(--cat-other);
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 14%, transparent);
+}
+
+.tag[data-category='video'],
+.tag.kind-video { --c: var(--cat-video); }
+.tag[data-category='audio'],
+.tag.kind-audio { --c: var(--cat-audio); }
+.tag[data-category='document'] { --c: var(--cat-document); }
+.tag[data-category='archive'] { --c: var(--cat-archive); }
+.tag[data-category='program'] { --c: var(--cat-program); }
+.tag[data-category='image'] { --c: var(--cat-image); }
+.tag.kind-hls,
+.tag.kind-dash { --c: var(--kind-stream); }
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

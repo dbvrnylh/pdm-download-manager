@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Clé privée de l'extension : sert seulement à empaqueter un .crx, jamais publiée.
+*.pem
+*.crx
+node_modules/
+.DS_Store

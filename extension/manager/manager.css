@@ -1,0 +1,252 @@
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 17px;
+}
+
+#add-form {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 260px;
+}
+
+#add-url {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--bg);
+}
+
+.chip[aria-pressed='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.chip .count {
+  margin-left: 4px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.filters-end {
+  display: flex;
+  gap: 8px;
+}
+
+select,
+#add-kind {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.error {
+  margin: 0;
+  padding: 8px 16px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+main {
+  flex: 1;
+  padding: 0 16px;
+}
+
+#downloads {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.download {
+  display: grid;
+  grid-template-columns: 92px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.download .tag {
+  justify-self: start;
+}
+
+.download .body {
+  min-width: 0;
+}
+
+.download .name {
+  font-weight: 500;
+}
+
+.download .meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.download[data-status='failed'] .meta,
+.download[data-status='blocked'] .meta,
+.download[data-status='dangerous'] .meta {
+  color: var(--danger);
+}
+
+.bar {
+  height: 5px;
+  margin: 5px 0 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar .fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.download[data-status='complete'] .fill {
+  background: var(--success);
+}
+
+.download[data-status='paused'] .fill,
+.download[data-status='failed'] .fill,
+.download[data-status='canceled'] .fill {
+  background: var(--muted);
+}
+
+/* Téléchargement multi-connexions : un morceau de barre par segment, comme IDM. */
+.bar {
+  position: relative;
+}
+
+.bar .piece {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: var(--accent);
+}
+
+.download[data-status='paused'] .piece {
+  background: var(--muted);
+}
+
+.bar.segmented .fill {
+  display: none;
+}
+
+/* Taille inconnue : une barre qui défile plutôt qu'un faux pourcentage. */
+.bar.indeterminate .fill {
+  width: 30%;
+  animation: slide 1.2s ease-in-out infinite;
+}
+
+@keyframes slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar.indeterminate .fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+}
+
+.empty {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+footer {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.banner {
+  margin: 0;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+
+.banner[data-state='missing'] {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.download[data-status='queued'] .meta {
+  font-style: italic;
+}
+
+@media (max-width: 560px) {
+  .download {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+}

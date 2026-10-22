@@ -1,0 +1,149 @@
+body {
+  width: 410px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+}
+
+header nav {
+  margin-left: auto;
+  display: flex;
+}
+
+.engine-status {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.engine-status::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  vertical-align: 0;
+}
+
+.engine-status[data-state='ok']::before {
+  background: var(--success);
+}
+
+.engine-status[data-state='missing']::before {
+  background: var(--danger);
+}
+
+main {
+  padding: 10px 12px;
+}
+
+section + section {
+  margin-top: 14px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+select {
+  flex: 1;
+  font: inherit;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#media-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.media {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.media:last-child {
+  border-bottom: none;
+}
+
+.media .info {
+  flex: 1;
+  min-width: 0;
+}
+
+.media .meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.empty p {
+  margin: 0 0 4px;
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status {
+  min-height: 1.4em;
+  margin: 8px 0 0;
+  color: var(--success);
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+footer {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+footer label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+footer label:has(input:disabled) {
+  color: var(--muted);
+}

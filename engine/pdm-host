@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Point d'entrée de PDM.
+
+  pdm-host                 pont Native Messaging (lancé par Chrome)
+  pdm-host daemon          moteur de téléchargement (lancé par le pont)
+  pdm-host status          état du moteur, pour le dépannage
+  pdm-host stop            arrête le moteur (les téléchargements reprendront au prochain lancement)
+  pdm-host add URL         ajoute un téléchargement depuis le terminal (--video : via yt-dlp)
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from pdm_engine import cli  # noqa: E402
+
+cli.main(sys.argv[1:])
