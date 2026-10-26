@@ -23,7 +23,12 @@ const fields = {
   categorize: document.getElementById('categorize'),
   notify: document.getElementById('notify'),
   autoResume: document.getElementById('auto-resume'),
+  subtitles: document.getElementById('subtitles'),
+  subtitleLangs: document.getElementById('subtitle-langs'),
 };
+
+// Les langues ne servent que si les sous-titres sont activés.
+fields.subtitles.addEventListener('change', () => (fields.subtitleLangs.disabled = !fields.subtitles.checked));
 
 // ─── Extension ─────────────────────────────────────────────────────────────
 
@@ -61,6 +66,15 @@ function fillForm(config) {
   fields.categorize.checked = config.categorize;
   fields.notify.checked = config.notify;
   fields.autoResume.checked = config.autoResume;
+  // Un moteur plus ancien (install.sh pas relancé) ne connaît pas ces réglages :
+  // on les cache, sinon il refuserait tout l'enregistrement.
+  const hasSubtitles = 'subtitles' in config;
+  fields.subtitles.closest('label').hidden = !hasSubtitles;
+  fields.subtitleLangs.closest('label').hidden = !hasSubtitles;
+  if (!hasSubtitles) return;
+  fields.subtitles.checked = config.subtitles;
+  fields.subtitleLangs.value = config.subtitleLangs.split(',').join(', ');
+  fields.subtitleLangs.disabled = !config.subtitles;
 }
 
 function renderTools(tools) {
@@ -93,6 +107,10 @@ form.addEventListener('submit', async (event) => {
     notify: fields.notify.checked,
     autoResume: fields.autoResume.checked,
   };
+  if (!fields.subtitles.closest('label').hidden) {
+    changes.subtitles = fields.subtitles.checked;
+    changes.subtitleLangs = fields.subtitleLangs.value;
+  }
   try {
     const reply = await engine.request({ type: 'config', set: changes });
     fillForm(reply.config);

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -16,9 +17,12 @@ DEFAULTS = {
     "notify": True,  # notification du bureau à la fin
     "autoResume": True,  # reprendre les téléchargements interrompus au démarrage
     "ytdlpPath": None,  # chemin de yt-dlp (sinon recherche automatique)
+    "subtitles": True,  # intégrer aux vidéos les sous-titres qui existent
+    "subtitleLangs": "fr,es,en",  # langues voulues, dans l'ordre des pistes
 }
 
 LIMITS = {"connections": (1, 32), "maxParallel": (1, 10)}
+LANG_CODE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")  # fr, es-419, pt-br…
 
 
 class Config:
@@ -62,6 +66,8 @@ class Config:
                     raise ValueError(f"{key} doit être un chemin absolu")
                 else:
                     value = os.path.expanduser(value)
+            elif key == "subtitleLangs":
+                value = _subtitle_langs(value)
             elif not isinstance(value, bool):
                 raise ValueError(f"{key} doit valoir true ou false")
             clean[key] = value
@@ -71,3 +77,16 @@ class Config:
             self.data.update(clean)
             write_json_atomic(self.path, self.data, mode=0o644)
         return self.snapshot()
+
+
+def _subtitle_langs(value):
+    """« FR, es ,en » → « fr,es,en ».
+
+    Rien que des codes de langue : ils servent ensuite à fabriquer les motifs
+    passés à yt-dlp (voir ytdlp.subtitle_patterns).
+    """
+    codes = [code.strip().lower() for code in value.split(",")] if isinstance(value, str) else []
+    codes = [code for code in codes if code]
+    if not codes or len(codes) > 10 or not all(LANG_CODE.match(code) for code in codes):
+        raise ValueError("langues des sous-titres : de 1 à 10 codes séparés par des virgules (ex. fr, es, en)")
+    return ",".join(dict.fromkeys(codes))  # sans doublons, dans l'ordre donné

@@ -199,6 +199,12 @@ vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par li
 l'exécutable officiel de yt-dlp — qui embarque le solveur JavaScript qu'exige désormais YouTube — et la met à
 jour chaque jour.
 
+**Sous-titres.** Quand une page vidéo propose des sous-titres dans tes langues (français, espagnol et anglais par
+défaut), ils sont intégrés au fichier vidéo, en pistes à choisir dans ton lecteur (VLC, mpv…) ; aucun `.vtt` ne
+reste à côté. Seuls les sous-titres écrits par des humains sont pris : YouTube propose aussi des traductions
+automatiques dans une centaine de langues, de qualité inégale, et les demander fait bloquer par le site. Les
+sous-titres sont un bonus : si leur téléchargement échoue, PDM refait la vidéo sans eux plutôt que de la perdre.
+
 ## Réglages
 
 Tout se règle dans la page **Réglages** de l'extension :
@@ -211,6 +217,7 @@ Tout se règle dans la page **Réglages** de l'extension :
 | Rangement par catégorie | activé | `Videos/`, `Musique/`, `Archives/`… (noms en ASCII exprès). |
 | Notifications du bureau | activé | Nécessite `notify-send`. |
 | Reprise automatique | activé | Relance les téléchargements interrompus au démarrage du moteur. |
+| Sous-titres · langues | activé · `fr, es, en` | Intégrés aux vidéos quand ils existent. Nécessite ffmpeg. |
 | Prise de contrôle · Ouverture du gestionnaire · Bouton vidéo | activés | Réglages côté navigateur. |
 
 Les réglages du moteur sont enregistrés dans `~/.local/share/pdm/config.json`.

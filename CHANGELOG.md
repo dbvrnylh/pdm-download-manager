@@ -13,6 +13,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   setting. A link imported as "Fichier" that returns a web page (typically a video page) fails with a
   clear reason instead of saving the page as a finished download, and can be imported again as
   "Vidéo de la page".
+- Subtitles for video downloads: when a page offers human-made subtitles in the chosen languages
+  (French, Spanish and English by default), they are embedded into the video as selectable tracks.
+  YouTube's machine translations are left out. If subtitles fail to download, the video is downloaded
+  again without them. New "Réglages" options: on/off and the list of languages. Needs ffmpeg.
 
 ## [2.0.4] - 2026-10-22
 

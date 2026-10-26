@@ -37,6 +37,17 @@ def ffprobe(path):
     return float(data["format"]["duration"]), sorted(s["codec_type"] for s in data["streams"])
 
 
+def subtitle_langs(path):
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream_tags=language",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+    ).stdout
+    return out.split()
+
+
+VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n{}\n"
+
+
 @unittest.skipUnless(YTDLP and FFMPEG, "yt-dlp et ffmpeg nécessaires")
 class YtdlpTest(unittest.TestCase):
     @classmethod
@@ -60,6 +71,16 @@ class YtdlpTest(unittest.TestCase):
             '<!doctype html><html><head><meta charset="utf-8"><title>Conférence réseau</title></head>'
             '<body><video controls src="/clip.mp4"></video></body></html>', encoding="utf-8")
         (www / "vide.html").write_text("<html><head><title>Rien</title></head><body>Rien</body></html>")
+        (www / "clip.fr.vtt").write_text(VTT.format("Bonjour"), encoding="utf-8")
+        (www / "clip.de.vtt").write_text(VTT.format("Hallo"), encoding="utf-8")
+        page = ('<!doctype html><html><head><meta charset="utf-8"><title>{title}</title></head><body>'
+                '<video controls src="/clip.mp4">{tracks}</video></body></html>')
+        track = '<track kind="subtitles" srclang="{}" src="{}">'
+        (www / "sous-titres.html").write_text(page.format(
+            title="Avec sous-titres", tracks=track.format("fr", "/clip.fr.vtt") + track.format("de", "/clip.de.vtt")),
+            encoding="utf-8")
+        (www / "sous-titres-absents.html").write_text(page.format(
+            title="Sous-titres absents", tracks=track.format("fr", "/absent.fr.vtt")), encoding="utf-8")
         cls.server = fx.start(static_dir=str(www))
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
 
@@ -126,6 +147,22 @@ class YtdlpTest(unittest.TestCase):
         leftovers = list((self.downloads / "Videos").glob("lent*")) if (self.downloads / "Videos").exists() else []
         self.assertEqual(leftovers, [])
 
+    def test_subtitles_are_embedded_then_removed_from_disk(self):
+        # fr est demandé (réglage par défaut fr, es, en), de ne l'est pas.
+        job = self.engine.add({"kind": "ytdlp", "url": self.base + "/sous-titres.html"})
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(subtitle_langs(job.path), ["fra"])
+        self.assertEqual(sorted(p.name for p in Path(job.path).parent.iterdir()), [Path(job.path).name])
+
+    def test_broken_subtitles_do_not_cost_the_video(self):
+        with self.assertLogs("pdm", "WARNING") as logs:
+            job = self.engine.add({"kind": "ytdlp", "url": self.base + "/sous-titres-absents.html"})
+            job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(subtitle_langs(job.path), [])
+        self.assertTrue(any("nouvel essai sans" in line for line in logs.output), logs.output)
+
     def test_unsupported_page_fails_with_message(self):
         job = self.engine.add({"kind": "ytdlp", "url": self.base + "/vide.html"})
         job = self.wait(job.id, {"failed", "completed"})
@@ -136,15 +173,32 @@ class YtdlpTest(unittest.TestCase):
 class CommandTest(unittest.TestCase):
     """Règles de construction de la commande yt-dlp (sans lancer yt-dlp)."""
 
-    def command(self, url):
+    def command(self, url, preset="best", ffmpeg="/usr/bin/ffmpeg", **settings):
         root = Path(tempfile.mkdtemp(prefix="pdm-cmd-", dir=os.environ.get("PDM_TEST_TMP")))
         config = Config(root / "config.json")
-        config.update({"downloadDir": str(root / "dl")})
-        tools = SimpleNamespace(ytdlp=["yt-dlp"], ffmpeg="/usr/bin/ffmpeg", deno="/usr/bin/deno",
+        config.update({"downloadDir": str(root / "dl"), **settings})
+        tools = SimpleNamespace(ytdlp=["yt-dlp"], ffmpeg=ffmpeg, deno="/usr/bin/deno",
                                 node=None, js_runtimes_option=True, ytdlp_version="test")
         job = Job(kind="ytdlp", url=url, referer="https://site.example/", userAgent="NavigateurUA",
-                  cookies="session=1", preset="best")
+                  cookies="session=1", preset=preset)
         return YtdlpDownload(job, config, tools)._command()
+
+    def test_subtitles_embedded_by_language_family(self):
+        command = self.command("https://www.youtube.com/watch?v=abc", subtitleLangs="fr,es-419")
+        self.assertIn("--embed-subs", command)
+        # « fr » doit aussi prendre « fr-FR » ou « fr-CA » : yt-dlp compare le code entier.
+        self.assertEqual(command[command.index("--sub-langs") + 1], "fr(-.*)?,es-419(-.*)?")
+        # --write-subs garderait les .vtt sur le disque ; --write-auto-subs ajouterait
+        # les traductions automatiques de YouTube.
+        self.assertNotIn("--write-subs", command)
+        self.assertNotIn("--write-auto-subs", command)
+
+    def test_no_subtitles_when_off_for_audio_or_without_ffmpeg(self):
+        url = "https://www.youtube.com/watch?v=abc"
+        for command in (self.command(url, subtitles=False), self.command(url, preset="audio"),
+                        self.command(url, ffmpeg=None)):
+            self.assertNotIn("--embed-subs", command)
+            self.assertNotIn("--sub-langs", command)
 
     def test_page_gets_no_browser_headers(self):
         # Imposer le User-Agent du navigateur à YouTube fait refuser les données (403).
@@ -170,16 +224,33 @@ class ProgressTest(unittest.TestCase):
 
     def test_plain_file_uses_one_connection(self):
         runner = self.runner()
+        runner._parse("[PDMFMT]18")
         runner._parse("[PDM]downloading|1048576|20971520|NA|5242880|3|NA|NA")
         progress = runner.progress()
         self.assertEqual((progress["downloaded"], progress["size"], progress["connections"]), (1048576, 20971520, 1))
 
     def test_fragmented_stream_uses_parallel_fragments(self):
         runner = self.runner()
+        runner._parse("[PDMFMT]hls-720")
         runner._parse("[PDM]downloading|1048576|NA|30000000|5242880|3|4|39")
         progress = runner.progress()
         self.assertEqual(progress["connections"], 8)
         self.assertEqual(progress["size"], 30000000)
+
+    def test_subtitle_downloads_are_not_counted_as_tracks(self):
+        # Ordre réel de yt-dlp : les sous-titres d'abord, puis le nom et les formats, puis les pistes.
+        runner = self.runner()
+        runner._parse("[PDM]finished|440|440|NA|5805.2|NA|NA|NA")
+        self.assertEqual((runner.progress()["stage"], runner.progress()["downloaded"]), ("Sous-titres…", 0))
+        for line in ("[PDMNAME]/dl/Videos/Me at the zoo.mp4", "[PDMFMT]395+140",
+                     "[PDM]downloading|100|1000|NA|10|1|NA|NA"):
+            runner._parse(line)
+        self.assertEqual(runner.progress()["stage"], "Piste 1/2")
+        runner._parse("[PDM]finished|1000|1000|NA|10|NA|NA|NA")
+        runner._parse("[PDM]downloading|50|500|NA|10|1|NA|NA")
+        self.assertEqual(runner.progress()["stage"], "Piste 2/2")
+        runner._parse("[PDM]finished|500|500|NA|10|NA|NA|NA")
+        self.assertEqual(runner.progress()["stage"], "Fusion des pistes…")
 
 
 FAKE_YTDLP = """import os, sys

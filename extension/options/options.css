@@ -98,6 +98,21 @@ pre {
   color: var(--text);
 }
 
+.field input:disabled {
+  opacity: 0.5;
+}
+
+/* display: flex/grid l'emporterait sur l'attribut hidden. */
+.check[hidden],
+.field[hidden] {
+  display: none;
+}
+
+/* Rattaché à la case « sous-titres » juste au-dessus. */
+.subtitle-langs {
+  margin-left: 26px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

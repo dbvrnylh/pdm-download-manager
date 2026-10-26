@@ -243,6 +243,20 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(all("cookies" not in e["job"] for e in self.events if e["type"] == "job"))
 
 
+class ConfigTest(unittest.TestCase):
+    def test_subtitle_languages_are_normalized_and_checked(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        self.assertEqual((config["subtitles"], config["subtitleLangs"]), (True, "fr,es,en"))
+        self.assertEqual(config.update({"subtitleLangs": " FR, es-419 ,fr,en "})["subtitleLangs"], "fr,es-419,en")
+        too_many = ",".join(a + b for a in "ab" for b in "abcdef")
+        # Les codes deviennent des motifs pour yt-dlp : rien d'autre que des lettres, chiffres et tirets.
+        for bad in ("", " , ", "fr;rm", "fr|.*", "français", too_many, 42):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.update({"subtitleLangs": bad})
+        with self.assertRaises(ValueError):
+            config.update({"subtitles": "oui"})
+
+
 class UtilTest(unittest.TestCase):
     def test_sanitize_and_limits(self):
         self.assertEqual(util.sanitize_filename("a/b:c*?.mp4"), "a_b_c__.mp4")

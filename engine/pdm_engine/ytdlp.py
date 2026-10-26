@@ -61,6 +61,15 @@ def is_manifest(url):
     return urlparse(url).path.lower().endswith((".m3u8", ".mpd"))
 
 
+def subtitle_patterns(langs):
+    """« fr,es » → « fr(-.*)?,es(-.*)? ».
+
+    yt-dlp compare le code de langue en entier : « fr » seul raterait les
+    sous-titres « fr-FR » ou « fr-CA », « es » raterait « es-419 ».
+    """
+    return ",".join(f"{code}(-.*)?" for code in langs.split(","))
+
+
 def _friendly(error):
     for needle, message in ERROR_HINTS:
         if needle.lower() in error.lower():
@@ -83,6 +92,8 @@ class YtdlpDownload:
         self.eta = None
         self.streams = 1
         self.streams_done = 0
+        self.media_started = False  # avant : la progression est celle des sous-titres
+        self.with_subtitles = True  # passe à False si les sous-titres font échouer yt-dlp
         self.stage = "Analyse de la page…"
         self.fragmented = False  # flux en fragments : yt-dlp en télécharge plusieurs à la fois
         self.final_path = None
@@ -118,25 +129,13 @@ class YtdlpDownload:
     def run(self):
         if not self.tools.ytdlp:
             raise DownloadError("yt-dlp n'est pas installé (voir install.sh)")
-        command = self._command()
-        with self.lock:
-            if self.stop_reason:
-                return self.stop_reason
-            self.proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                start_new_session=True,
-            )
-        with self.proc.stdout:  # refermé à la fin : le démon tourne des jours, pas de fuite
-            for line in self.proc.stdout:
-                self._parse(line.rstrip("\n"))
-        code = self.proc.wait()
+        code = self._run_ytdlp()
+        if code and not self.stop_reason and self._wants_subtitles() and "subtitles" in (self.last_error or ""):
+            # Les sous-titres sont un bonus : s'ils échouent (YouTube répond 429
+            # quand on en demande trop), on refait sans eux plutôt que de perdre la vidéo.
+            log.warning("sous-titres impossibles pour %s (%s) : nouvel essai sans", self.job.url, self.last_error)
+            self.with_subtitles, self.last_error = False, None
+            code = self._run_ytdlp()
         if self.stop_reason:
             return self.stop_reason
         if code != 0:
@@ -153,6 +152,34 @@ class YtdlpDownload:
             if self.size:
                 self.downloaded = self.size
         return "completed"
+
+    def _run_ytdlp(self):
+        """Lance yt-dlp et lit sa sortie jusqu'au bout. Renvoie son code, None si arrêté avant."""
+        command = self._command()
+        with self.lock:
+            if self.stop_reason:
+                return None
+            self.streams, self.streams_done, self.media_started = 1, 0, False
+            self.proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                start_new_session=True,
+            )
+        with self.proc.stdout:  # refermé à la fin : le démon tourne des jours, pas de fuite
+            for line in self.proc.stdout:
+                self._parse(line.rstrip("\n"))
+        return self.proc.wait()
+
+    def _wants_subtitles(self):
+        # Sans ffmpeg, impossible de les intégrer ; un MP3 n'en a pas l'usage.
+        return (self.with_subtitles and self.config["subtitles"] and bool(self.tools.ffmpeg)
+                and self.job.preset != "audio")
 
     def _command(self):
         job, tools = self.job, self.tools
@@ -188,6 +215,12 @@ class YtdlpDownload:
             else:
                 # Préférer MP4/M4A à qualité égale : le fichier se lit partout.
                 command += ["-S", "res,ext:mp4:m4a", "--merge-output-format", "mp4/mkv"]
+        if self._wants_subtitles():
+            # Sous-titres écrits par des humains seulement : sans --write-auto-subs,
+            # les traductions automatiques de YouTube (une centaine) sont ignorées.
+            # Pas de --write-subs non plus : yt-dlp garderait alors les .vtt à côté
+            # de la vidéo au lieu de les effacer une fois intégrés.
+            command += ["--embed-subs", "--sub-langs", subtitle_patterns(self.config["subtitleLangs"])]
         if tools.js_runtimes_option and not tools.deno and tools.node:
             command += ["--js-runtimes", "node"]  # YouTube exige un moteur JavaScript
         # Les en-têtes du navigateur ne servent qu'aux flux bruts d'un CDN qui
@@ -208,6 +241,13 @@ class YtdlpDownload:
         if line.startswith("[PDM]"):
             parts = line[5:].split("|")
             if len(parts) < 8:
+                return
+            if not self.media_started:
+                # Les sous-titres se téléchargent avant la vidéo, avec leurs propres
+                # lignes « finished » : les compter fausserait « Piste 1/2 » et
+                # annoncerait la fusion alors que l'audio n'a pas commencé.
+                with self.lock:
+                    self.stage = "Sous-titres…"
                 return
             status = parts[0]
             done, total, estimate, speed, eta = (_number(p) for p in parts[1:6])
@@ -235,6 +275,7 @@ class YtdlpDownload:
         elif line.startswith("[PDMFMT]"):
             with self.lock:
                 self.streams = line[8:].count("+") + 1
+                self.media_started = True
         elif line.startswith("[PDMFILE]"):
             self.final_path = line[9:].strip()
         else:
@@ -243,11 +284,15 @@ class YtdlpDownload:
                 self.last_error = line[6:].strip()
 
 
-_PARTIAL = re.compile(r"(\.part(-Frag\d+)?|\.ytdl|\.temp\.\w+|\.f[\w-]+\.\w+(\.part)?)$")
+# Morceaux en cours (.part, .ytdl, pistes .fNNN) et sous-titres pas encore intégrés (.fr.vtt…).
+_PARTIAL = re.compile(
+    r"(\.part(-Frag\d+)?|\.ytdl|\.temp\.\w+|\.f[\w-]+\.\w+(\.part)?"
+    r"|\.[\w-]+\.(vtt|srt|ass|ttml|srv[123]|json3)(\.part)?)$"
+)
 
 
 def cleanup_files(job):
-    """Annulation : supprime les morceaux laissés par yt-dlp (.part, .ytdl, pistes .fNNN)."""
+    """Annulation : supprime les morceaux laissés par yt-dlp (.part, .ytdl, pistes .fNNN, sous-titres)."""
     if not job.path:
         return
     stem = os.path.splitext(job.path)[0]
