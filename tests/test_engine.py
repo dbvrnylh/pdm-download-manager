@@ -11,7 +11,9 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "engine"))
@@ -22,7 +24,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import httpdl, paths, util  # noqa: E402
+from pdm_engine import daemon, httpdl, paths, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine, in_window  # noqa: E402
 from pdm_engine.limiter import Limiter  # noqa: E402
@@ -494,6 +496,36 @@ class LimiterTest(unittest.TestCase):
         self.assertFalse(in_window(at(6, 0), "23:00", "06:00"))
         self.assertFalse(in_window(at(14, 0), "23:00", "06:00"))
         self.assertTrue(in_window(at(13, 0), "12:00", "14:00"))
+
+
+class DaemonIdleTest(unittest.TestCase):
+    def test_idle_time_counts_from_when_it_is_seen_idle(self):
+        # La course du CI : délai de 3 s, vérification toutes les 3 s, et un
+        # téléchargement qui finit juste après une vérification.
+        watcher = daemon.Daemon.__new__(daemon.Daemon)  # sans socket ni moteur réel
+        watcher.clients, watcher.clients_lock = set(), threading.Lock()
+        state = {"now": 0.0, "work": True}
+        watcher.clock = lambda: state["now"]
+        watcher.engine = SimpleNamespace(has_work=lambda: state["work"])
+        watcher.idle_since = None
+
+        def check(at):
+            state["now"] = at
+            with unittest.mock.patch.object(daemon, "IDLE_EXIT", 3):
+                return watcher._idle_too_long()
+
+        # Deux vérifications sont séparées de 3 s plus un léger retard : c'est ce
+        # retard qui faisait dépasser les « 3 s depuis la dernière fois occupé ».
+        self.assertFalse(check(0.0))  # téléchargement en cours
+        state["work"] = False  # fini à 0,1 s, juste après cette vérification
+        self.assertFalse(check(3.01), "inactif depuis 2,9 s seulement : trop tôt pour s'arrêter")
+        self.assertTrue(check(6.02))  # plus de 3 s depuis qu'on l'a vu inactif
+        # Un client qui revient remet le compte à zéro.
+        watcher.clients.add(object())
+        self.assertFalse(check(9.03))
+        watcher.clients.clear()
+        self.assertFalse(check(12.04))
+        self.assertTrue(check(15.05))
 
 
 class UtilTest(unittest.TestCase):

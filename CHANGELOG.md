@@ -70,6 +70,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   and kept for a paused download to resume from.
 
 ### Fixed
+- The idle engine could quit right after its last download or client instead of waiting its full
+  delay: idleness was counted from the last check that saw it busy, so a check landing just after the
+  work ended found it "idle" for a whole check interval already. It now counts from the first check
+  that sees it idle.
 - Finished video downloads show the size of the final file. They showed the size of the last track
   received (often the audio after a merge), and 0 B when yt-dlp found the file already on disk.
 - Videos without sound (or sound without a picture) on sites that split HLS streams into tracks, such

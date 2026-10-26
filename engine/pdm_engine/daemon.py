@@ -65,7 +65,8 @@ class Daemon:
         self.engine = Engine(self.config, self.tools, self.broadcast)
         self.clients = set()
         self.clients_lock = threading.Lock()
-        self.idle_since = time.monotonic()
+        self.clock = time.monotonic  # remplacée dans les tests
+        self.idle_since = self.clock()  # None : occupé (client connecté ou téléchargement)
 
     def broadcast(self, message):
         with self.clients_lock:
@@ -125,9 +126,16 @@ class Daemon:
         with self.clients_lock:
             busy = bool(self.clients)
         if busy or self.engine.has_work():
-            self.idle_since = time.monotonic()
+            self.idle_since = None
             return False
-        return time.monotonic() - self.idle_since > IDLE_EXIT
+        # L'inactivité compte depuis la première vérification qui la constate, pas
+        # depuis la dernière où il travaillait : il a pu devenir inactif juste après
+        # celle-ci, et il s'arrêterait alors jusqu'à un intervalle de vérification
+        # trop tôt (aussitôt, avec un délai de 3 s vérifié toutes les 3 s).
+        now = self.clock()
+        if self.idle_since is None:
+            self.idle_since = now
+        return now - self.idle_since > IDLE_EXIT
 
     def _serve(self, conn):
         client = Client(conn)
