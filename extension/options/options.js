@@ -1,6 +1,7 @@
 // Page de réglages : ceux du moteur (enregistrés par le moteur) et ceux de
 // l'extension (chrome.storage).
 
+import { CATEGORIES, OTHER } from '../lib/categories.js';
 import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
 import { formatBytes } from '../lib/format.js';
@@ -18,6 +19,10 @@ const form = document.getElementById('engine-form');
 const saved = document.getElementById('saved');
 const status = document.getElementById('engine-status');
 const chooseDir = document.getElementById('choose-dir');
+const categoriesForm = document.getElementById('categories-form');
+const categoriesList = document.getElementById('categories');
+const categoriesSaved = document.getElementById('categories-saved');
+const resetCategories = document.getElementById('reset-categories');
 const dirWarning = document.getElementById('download-dir-warning');
 const PICKER_TIMEOUT = 10 * 60 * 1000; // la fenêtre attend l'utilisateur
 
@@ -70,6 +75,7 @@ try {
   status.dataset.state = 'ok';
   status.textContent = `Moteur PDM ${info.version} actif.`;
   fillForm(info.config);
+  renderCategories(info.config);
   renderTools(info.tools);
   form.hidden = false;
 } catch (err) {
@@ -102,6 +108,64 @@ function fillForm(config) {
   fields.audioTracks.checked = config.audioTracks;
   updateLanguages();
 }
+
+// ─── Catégories ────────────────────────────────────────────────────────────
+
+// Une ligne par catégorie : son dossier et ses extensions. Le moteur valide
+// tout (extension en double, nom de dossier…) et renvoie la raison d'un refus.
+function renderCategories(config) {
+  categoriesForm.hidden = !('categories' in config); // moteur plus ancien
+  if (categoriesForm.hidden) return;
+  categoriesList.replaceChildren(
+    ...config.categories.map(({ id, folder, exts }) => {
+      const { label } = [...CATEGORIES, OTHER].find((c) => c.id === id);
+      const row = el('div', 'category');
+      row.dataset.id = id;
+      const tag = el('span', 'tag', label);
+      tag.dataset.category = id;
+      const folderInput = el('input', 'folder');
+      folderInput.value = folder;
+      folderInput.spellcheck = false;
+      folderInput.setAttribute('aria-label', `Dossier de la catégorie ${label}`);
+      let list;
+      if (id === OTHER.id) {
+        list = el('small', '', 'Tout ce qui n’entre dans aucune autre catégorie.');
+      } else {
+        list = el('textarea', 'exts');
+        list.rows = 2;
+        list.spellcheck = false;
+        list.value = exts.join(', ');
+        list.setAttribute('aria-label', `Extensions de la catégorie ${label}`);
+      }
+      row.append(tag, folderInput, list);
+      return row;
+    }),
+  );
+  resetCategories.disabled = config.categoriesDefault;
+}
+
+async function saveCategories(categories) {
+  try {
+    const reply = await engine.request({ type: 'config', set: { categories } });
+    renderCategories(reply.config);
+    showSaved(categories ? 'Catégories enregistrées.' : 'Catégories d’origine rétablies.', false, categoriesSaved);
+  } catch (err) {
+    showSaved(err.message, true, categoriesSaved);
+  }
+}
+
+categoriesForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  saveCategories(
+    [...categoriesList.children].map((row) => ({
+      id: row.dataset.id,
+      folder: row.querySelector('.folder').value,
+      exts: row.querySelector('.exts')?.value ?? '',
+    })),
+  );
+});
+
+resetCategories.addEventListener('click', () => saveCategories(null));
 
 function renderTools(tools) {
   chooseDir.hidden = !tools.folderPicker;
@@ -168,8 +232,9 @@ chooseDir.addEventListener('click', async () => {
   }
 });
 
-function showSaved(message, isError = false) {
-  saved.textContent = message;
-  saved.classList.toggle('error', isError);
-  setTimeout(() => (saved.textContent = ''), 4000);
+function showSaved(message, isError = false, target = saved) {
+  target.textContent = message;
+  target.classList.toggle('error', isError);
+  // Une erreur reste le temps de la lire et de corriger.
+  setTimeout(() => (target.textContent = ''), isError ? 10000 : 4000);
 }

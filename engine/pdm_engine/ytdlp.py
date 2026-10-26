@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from . import paths
 from .httpdl import DownloadError, target_dir
-from .util import category_for, sanitize_filename
+from .util import sanitize_filename
 
 # Préréglages de qualité : (format avec ffmpeg, format sans ffmpeg).
 # Sans ffmpeg, impossible de fusionner une piste vidéo et une piste audio :
@@ -349,7 +349,7 @@ class YtdlpDownload:
     def _command(self):
         job, tools = self.job, self.tools
         audio_only = job.preset == "audio"
-        folder = ("Musique" if audio_only else "Videos") if self.config["categorize"] else ""
+        folder = self.config.folder_of("audio" if audio_only else "video") if self.config["categorize"] else ""
         directory = target_dir(self.config, folder)
         base = self.config.download_dir()
 
@@ -474,7 +474,7 @@ class YtdlpDownload:
             path = line[9:].strip()
             self.job.path = path
             self.job.filename = os.path.basename(path)
-            self.job.category = category_for(self.job.filename)[0]
+            self.job.category = self.config.category_for(self.job.filename)[0]
         elif line.startswith("[PDMFMT]"):
             with self.lock:
                 self.streams = line[8:].count("+") + 1

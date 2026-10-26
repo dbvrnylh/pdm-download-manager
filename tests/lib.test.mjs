@@ -225,3 +225,17 @@ test('jobs: les qualités, et la qualité par défaut laissée au moteur', async
   assert.equal('preset' in JSON.parse(JSON.stringify(await videoJob('https://x.com/v'))), false);
   assert.equal((await videoJob('https://x.com/v', { preset: '480' })).preset, '480');
 });
+
+test('categories: celles des réglages du moteur remplacent extensions et dossiers', () => {
+  const custom = [
+    { id: 'video', folder: 'Films', exts: ['mp4'] },
+    { id: 'archive', folder: 'Compresses', exts: ['zip', 'iso', 'mkv'] },
+    { id: 'other', folder: 'Divers', exts: [] },
+  ];
+  assert.equal(categoryFor('film.mkv', '', custom).id, 'archive'); // mkv déplacé dans Archives
+  assert.equal(categoryFor('film.mp4', '', custom).folder, 'Films');
+  assert.equal(categoryFor('clip.webm', 'video/webm', custom).folder, 'Films'); // le MIME rattrape
+  assert.equal(categoryFor('data.bin', '', custom).folder, 'Divers');
+  assert.equal(categoryFor('data.bin').folder, 'Generique');
+  assert.equal(categoryFor('photo.png', '', custom).folder, 'Images'); // non modifiée : d'origine
+});

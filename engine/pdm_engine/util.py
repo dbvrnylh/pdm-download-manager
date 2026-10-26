@@ -31,7 +31,10 @@ CATEGORIES = [
      {"jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "bmp", "ico", "heic"},
      re.compile(r"^image/")),
 ]
-OTHER = ("other", "Autres")
+OTHER = ("other", "Generique")  # tout ce qui n'entre dans aucune autre
+# Noms affichés (les dossiers, eux, restent en ASCII).
+LABELS = {"video": "Vidéos", "audio": "Musique", "document": "Documents", "archive": "Archives",
+          "program": "Programmes", "image": "Images", "other": "Générique"}
 
 EXT_FOR_MIME = {
     "video/mp4": "mp4", "video/webm": "webm", "video/ogg": "ogv", "video/quicktime": "mov",
@@ -54,16 +57,21 @@ def extension_of(name):
     return base[dot + 1:].lower() if dot > 0 else ""
 
 
-def category_for(name, mime=""):
-    """Renvoie (id, dossier) de la catégorie d'un fichier."""
+def category_for(name, mime="", categories=CATEGORIES, other=OTHER):
+    """Renvoie (id, dossier) de la catégorie d'un fichier.
+
+    `categories` et `other` : celles des réglages (Config.categories), sinon
+    celles d'origine. L'extension passe avant le MIME : beaucoup de serveurs
+    envoient « application/octet-stream » pour n'importe quel fichier.
+    """
     ext = extension_of(name)
-    for cid, folder, exts, _ in CATEGORIES:
+    for cid, folder, exts, _ in categories:
         if ext in exts:
             return cid, folder
-    for cid, folder, _, pattern in CATEGORIES:
+    for cid, folder, _, pattern in categories:
         if mime and pattern.search(mime):
             return cid, folder
-    return OTHER
+    return other
 
 
 def _truncate_bytes(text, limit):

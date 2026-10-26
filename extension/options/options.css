@@ -113,6 +113,70 @@ pre {
   color: var(--danger);
 }
 
+.hint-block {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+/* Catégories : une ligne par catégorie (étiquette, dossier, extensions). */
+.category {
+  display: grid;
+  grid-template-columns: 110px 170px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.category.head {
+  padding: 0 0 4px;
+  border-top: none;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.category .tag {
+  justify-self: start;
+  margin-top: 6px;
+}
+
+.category small {
+  margin-top: 7px;
+  color: var(--muted);
+}
+
+.category input,
+.category textarea {
+  width: 100%;
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.category textarea {
+  font-size: 12px;
+  resize: vertical;
+}
+
+.actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 600px) {
+  .category {
+    grid-template-columns: 1fr;
+  }
+
+  .category.head {
+    display: none;
+  }
+}
+
 .field select {
   font: inherit;
   justify-self: start;

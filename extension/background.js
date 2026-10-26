@@ -146,7 +146,9 @@ async function decide(item) {
   if (!takeOver) {
     return requested ? { filename: requested, conflictAction: 'uniquify' } : undefined;
   }
-  return { filename: `${categoryFor(name, item.mime).folder}/${name}`, conflictAction: 'uniquify' };
+  // Gardé par Chrome : rangé comme le moteur l'aurait fait, avec ses catégories s'il répond.
+  const folder = categoryFor(name, item.mime, engine.info?.config.categories).folder;
+  return { filename: `${folder}/${name}`, conflictAction: 'uniquify' };
 }
 
 // Le moteur refait la requête (avec cookies et Referer) et vérifie qu'il

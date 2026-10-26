@@ -24,7 +24,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .util import (
-    category_for,
     ensure_extension,
     extension_of,
     filename_from_disposition,
@@ -330,13 +329,13 @@ class HttpDownload:
         job.validator = None if self.single else result.validator
         job.mime = result.mime or job.mime
         job.filename = job.filename or result.filename
-        job.category = category_for(job.filename, job.mime)[0]
+        job.category = self.config.category_for(job.filename, job.mime)[0]
 
     def _create_file(self):
         job = self.job
         if job.path:  # nouvelle tentative depuis zéro : on jette l'ancien partiel
             self.cleanup()
-        folder = category_for(job.filename, job.mime)[1] if self.config["categorize"] else ""
+        folder = self.config.category_for(job.filename, job.mime)[1] if self.config["categorize"] else ""
         directory = target_dir(self.config, folder)
         if self.size and shutil.disk_usage(directory).free < self.size:
             raise DownloadError(f"espace disque insuffisant ({human_size(self.size)} nécessaires)")

@@ -104,7 +104,7 @@ function fromEngine(job) {
     kind: job.kind,
     url: job.url,
     filename,
-    category: ALL_CATEGORIES.find((c) => c.id === job.category) ?? categoryFor(filename, job.mime ?? ''),
+    category: ALL_CATEGORIES.find((c) => c.id === job.category) ?? categoryFor(filename, job.mime ?? '', customCategories()),
     status: ENGINE_STATUS[job.status] ?? 'failed',
     done: job.downloaded,
     total: job.size,
@@ -117,6 +117,11 @@ function fromEngine(job) {
     error: job.error,
     startedAt: job.createdAt * 1000,
   };
+}
+
+// Les catégories des réglages du moteur, s'il répond (sinon celles d'origine).
+function customCategories() {
+  return engine.info?.config.categories ?? null;
 }
 
 function chromeStatus(item) {
@@ -158,7 +163,7 @@ function fromChrome(item, now) {
     url: item.url,
     host: item.finalUrl || item.url,
     filename,
-    category: categoryFor(filename, item.mime),
+    category: categoryFor(filename, item.mime, customCategories()),
     status: chromeStatus(item),
     done: item.state === 'complete' ? item.fileSize || item.bytesReceived : item.bytesReceived,
     total,

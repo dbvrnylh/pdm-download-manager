@@ -33,9 +33,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   a browser restart or a reboot. The engine keeps downloading when the browser is closed.
 - **Videos in one click.** A "download this video" button appears on players; the popup lists detected media;
   YouTube and hundreds of sites are supported through [yt-dlp](https://github.com/yt-dlp/yt-dlp), with quality
-  presets (best, 1080p, 720p, MP3). HLS/DASH streams are merged into a single MP4.
+  presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
 - **Organized.** Files are sorted into `Videos/`, `Musique/`, `Documents/`, `Archives/`, `Programmes/`,
-  `Images/` and `Autres/`. Download queue, desktop notifications, right-click "Télécharger avec PDM".
+  `Images/` and `Generique/` for the rest, by extension; each category's extensions and folder name can be edited. Download queue, desktop notifications, right-click "Télécharger avec PDM".
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
 
 > The user interface is currently in French.
@@ -234,6 +234,7 @@ Everything lives in the extension's **Réglages** page:
 | Connections per file | 8 | 1–32. More only helps when a server throttles each connection. |
 | Simultaneous downloads | 3 | 1–10; the rest waits in the queue. |
 | Sort by category | on | `Videos/`, `Musique/`, `Archives/`… (ASCII folder names on purpose). |
+| Categories | IDM-like lists | Each category's **extensions** and **folder name** are edited in **Réglages → Catégories**; whatever matches none goes to **Générique** (`Generique/`). A file is sorted by its extension, else by the type the server announces. An extension can only belong to one category, and folder names stay in ASCII (Chrome silently refuses an accented path when the system locale isn't UTF-8). Already downloaded files don't move. |
 | Desktop notifications | on | Needs `notify-send`. |
 | Auto-resume | on | Restarts interrupted downloads when the engine starts. |
 | Your languages | `fr, es, en` | Used for subtitles and extra audio tracks, in this order. |

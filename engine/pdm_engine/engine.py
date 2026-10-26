@@ -20,7 +20,7 @@ from urllib.parse import quote
 from . import httpdl, paths
 from .config import QUALITIES
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload
-from .util import category_for, filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
+from .util import filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
 from .ytdlp import YtdlpDownload, cleanup_files
 
 log = logging.getLogger("pdm")
@@ -160,7 +160,7 @@ class Engine:
                 job.category = "audio" if job.preset == "audio" else "video"
                 job.filename = job.filename or job.title or url
             else:
-                job.category = category_for(job.filename or filename_from_url(url), job.mime or "")[0]
+                job.category = self.config.category_for(job.filename or filename_from_url(url), job.mime or "")[0]
             self.jobs[job.id] = job
             self.dirty = True
         self._publish(job)

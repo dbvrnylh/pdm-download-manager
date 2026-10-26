@@ -33,9 +33,9 @@ dans l'esprit d'Internet Download Manager — pour Chrome, Chromium, Brave, Edge
   réseau, un redémarrage du navigateur ou du PC. Le moteur continue navigateur fermé.
 - **Vidéos en un clic.** Un bouton « Télécharger cette vidéo » apparaît sur les lecteurs ; la popup liste les
   médias détectés ; YouTube et des centaines de sites passent par [yt-dlp](https://github.com/yt-dlp/yt-dlp),
-  avec choix de la qualité (meilleure, 1080p, 720p, MP3). Les flux HLS/DASH sont assemblés en un seul MP4.
+  avec choix de la qualité (meilleure, 1080p, 720p, 480p, MP3). Les flux HLS/DASH sont assemblés en un seul MP4.
 - **Rangement automatique** dans `Videos/`, `Musique/`, `Documents/`, `Archives/`, `Programmes/`, `Images/`,
-  `Autres/`. File d'attente, notifications du bureau, clic droit « Télécharger avec PDM ».
+  et `Generique/` pour le reste, selon l'extension ; extensions et nom de dossier modifiables pour chaque catégorie. File d'attente, notifications du bureau, clic droit « Télécharger avec PDM ».
 - **Rien à installer** pour le moteur : bibliothèque standard de Python uniquement. Thèmes clair et sombre.
 
 ## Sommaire
@@ -235,6 +235,7 @@ Tout se règle dans la page **Réglages** de l'extension :
 | Connexions par fichier | 8 | De 1 à 32. Monter n'aide que si le serveur limite chaque connexion. |
 | Téléchargements simultanés | 3 | De 1 à 10 ; les suivants attendent dans la file. |
 | Rangement par catégorie | activé | `Videos/`, `Musique/`, `Archives/`… (noms en ASCII exprès). |
+| Catégories | listes façon IDM | Les **extensions** et le **nom de dossier** de chaque catégorie se modifient dans **Réglages → Catégories** ; ce qui n'entre dans aucune va dans **Générique** (`Generique/`). Un fichier est rangé selon son extension, sinon selon le type annoncé par le serveur. Une extension n'appartient qu'à une catégorie, et les noms de dossier restent en ASCII (Chrome refuse en silence un chemin accentué quand la locale du système n'est pas UTF-8). Les fichiers déjà téléchargés ne bougent pas. |
 | Notifications du bureau | activé | Nécessite `notify-send`. |
 | Reprise automatique | activé | Relance les téléchargements interrompus au démarrage du moteur. |
 | Tes langues | `fr, es, en` | Pour les sous-titres et les pistes audio en plus, dans cet ordre. |

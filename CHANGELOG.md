@@ -41,7 +41,15 @@ versions follow [Semantic Versioning](https://semver.org/).
   not a folder, missing parent) and keeps the previous one. "Réglages" shows the free space, and
   warns when the chosen folder is missing; `pdm-host status` shows both too.
 
+- Editable categories, as in IDM: "Réglages → Catégories" lists each category's extensions and folder
+  name; whatever matches none goes to "Générique". The engine's settings are the single source of truth:
+  the extension, which kept its own copy of the lists, now receives them from the engine. A category
+  edit is refused with the reason when an extension sits in two categories, two categories share a
+  folder, or a folder name isn't plain ASCII; "Rétablir celles d'origine" restores the defaults.
+
 ### Changed
+- The catch-all category "Autres" is now called "Générique" (folder `Generique/`). Files already in
+  `Autres/` stay there.
 - A download folder chosen in "Réglages" that has disappeared (external disk unplugged) is no longer
   recreated when downloading: it would have filled the internal disk unnoticed. The download fails
   with "dossier de téléchargement introuvable". The default folder and category folders are still

@@ -87,7 +87,7 @@ class EngineTest(unittest.TestCase):
         self.assertGreaterEqual(seen, 6, "plusieurs connexions en parallèle")
         # 24 Mo à 2 Mo/s par connexion : 12 s seul, ~1,5 s à 8.
         self.assertLess(elapsed, 5, f"trop lent : {elapsed:.1f} s")
-        self.assertEqual(Path(job.path).parent, self.downloads / "Autres")
+        self.assertEqual(Path(job.path).parent, self.downloads / "Generique")
         self.assertFalse(Path(job.path + ".pdm").exists())
 
     def test_pause_then_resume(self):
@@ -161,6 +161,19 @@ class EngineTest(unittest.TestCase):
                          "une seule requête après le repli")
 
     # ─── Erreurs et refus ──────────────────────────────────────────────────
+
+    def test_downloads_follow_the_categories_of_the_settings(self):
+        categories = self.config.snapshot()["categories"]
+        for category in categories:
+            if category["id"] == "archive":
+                category["folder"] = "Compresses"
+            if category["id"] == "other":
+                category["folder"] = "Divers"
+        self.config.update({"categories": categories})
+        archive = self.wait(self.add("/range/small.zip").id, {"completed"})
+        other = self.wait(self.add("/range/mid.bin").id, {"completed"})
+        self.assertEqual((archive.category, Path(archive.path).parent), ("archive", self.downloads / "Compresses"))
+        self.assertEqual((other.category, Path(other.path).parent), ("other", self.downloads / "Divers"))
 
     def test_vanished_download_dir_is_not_recreated(self):
         # Disque externe débranché : le dossier choisi a disparu. Le recréer le
@@ -326,6 +339,46 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(list(good.glob(".pdm-essai-*")), [], "le fichier d'essai est effacé")
         self.assertIsNone(paths.free_space(root / "absent"))
 
+    def test_categories_are_cleaned_and_checked(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        mine = {c["id"]: c for c in config.snapshot()["categories"]}
+        self.assertEqual((mine["archive"]["folder"], mine["other"]["folder"]), ("Archives", "Generique"))
+        self.assertIn("iso", mine["archive"]["exts"])
+        self.assertTrue(config.snapshot()["categoriesDefault"])
+
+        # Texte libre nettoyé : points, majuscules, doublons, espaces.
+        mine["video"]["exts"] = " .MP4, mkv,mkv , webm "
+        mine["archive"].update(folder="Compresses", exts=mine["archive"]["exts"] + ["dmg"])
+        mine["program"]["exts"] = [e for e in mine["program"]["exts"] if e != "dmg"]
+        mine["other"]["folder"] = "Divers"
+        saved = {c["id"]: c for c in config.update({"categories": list(mine.values())})["categories"]}
+        self.assertEqual(saved["video"]["exts"], ["mkv", "mp4", "webm"])
+        self.assertEqual(config.category_for("film.MP4"), ("video", "Videos"))
+        self.assertEqual(config.category_for("disque.dmg"), ("archive", "Compresses"))
+        self.assertEqual(config.category_for("clip.avi", "video/x-msvideo"), ("video", "Videos"))  # le MIME rattrape
+        self.assertEqual(config.category_for("data.bin"), ("other", "Divers"))
+        self.assertEqual(config.folder_of("audio"), "Musique")
+
+        def refused(change, message):
+            broken = {cid: dict(c) for cid, c in saved.items()}
+            change(broken)
+            with self.assertRaises(ValueError) as caught:
+                config.update({"categories": list(broken.values())})
+            self.assertIn(message, str(caught.exception))
+
+        refused(lambda c: c["image"].update(exts=["png", "mp4"]), "« mp4 » est à la fois dans Vidéos et dans Images")
+        refused(lambda c: c["audio"].update(folder="videos"), "ont le même dossier")
+        refused(lambda c: c["audio"].update(folder="Musique/Rock"), "nom de dossier « Musique/Rock » refusé")
+        refused(lambda c: c["audio"].update(folder="Vidéos"), "refusé")  # accent : Chrome le refuserait
+        refused(lambda c: c["audio"].update(folder=".cache"), "refusé")
+        refused(lambda c: c["archive"].update(exts=["tar.gz"]), "gz plutôt que tar.gz")
+        refused(lambda c: c.pop("image"), "les 7 catégories")
+        self.assertEqual(config.category_for("disque.dmg"), ("archive", "Compresses"), "refus : rien n'a changé")
+
+        # Retour aux catégories d'origine.
+        self.assertTrue(config.update({"categories": None})["categoriesDefault"])
+        self.assertEqual(config.category_for("disque.dmg"), ("program", "Programmes"))
+
     def test_video_quality_is_one_of_the_presets(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
         self.assertEqual(config["videoQuality"], "best")
@@ -351,7 +404,7 @@ class UtilTest(unittest.TestCase):
     def test_categories(self):
         self.assertEqual(util.category_for("x.tar.gz"), ("archive", "Archives"))
         self.assertEqual(util.category_for("noext", "video/mp4"), ("video", "Videos"))
-        self.assertEqual(util.category_for("data.bin"), ("other", "Autres"))
+        self.assertEqual(util.category_for("data.bin"), ("other", "Generique"))
 
     def test_parse_link_list(self):
         # Mêmes cas que tests/lib.test.mjs : les deux implémentations doivent s'accorder.

@@ -325,6 +325,15 @@ class CommandTest(unittest.TestCase):
         runner.audio_ids, runner.info_path = ["140-23"], Path("/data/a.json")
         self.assertTrue(runner._command()[runner._command().index("-f") + 1].startswith("bv[height<=480]+140-23/"))
 
+    def test_video_and_audio_folders_follow_the_categories(self):
+        categories = Config(Path(tempfile.mkdtemp(dir=os.environ.get("PDM_TEST_TMP"))) / "c.json").snapshot()["categories"]
+        for category in categories:
+            category["folder"] = {"video": "Films", "audio": "Sons"}.get(category["id"], category["folder"])
+        video = self.runner("https://www.youtube.com/watch?v=abc", categories=categories)._command()
+        audio = self.runner("https://www.youtube.com/watch?v=abc", preset="audio", categories=categories)._command()
+        self.assertTrue(video[video.index("-P") + 1].endswith("/Films"))
+        self.assertTrue(audio[audio.index("-P") + 1].endswith("/Sons"))
+
     def test_intermediate_files_go_to_a_hidden_work_dir(self):
         runner = self.runner("https://www.youtube.com/watch?v=abc")
         command = runner._command()
@@ -407,7 +416,7 @@ class ProgressTest(unittest.TestCase):
     """Lecture de la progression de yt-dlp et nombre de connexions affiché."""
 
     def runner(self):
-        config = {"connections": 8}
+        config = Config(Path(tempfile.mkdtemp(prefix="pdm-progress-", dir=os.environ.get("PDM_TEST_TMP"))) / "c.json")
         return YtdlpDownload(Job(kind="ytdlp", url="https://example.com/v"), config, SimpleNamespace())
 
     def test_plain_file_uses_one_connection(self):

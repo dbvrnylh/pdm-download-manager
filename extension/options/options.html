@@ -91,6 +91,24 @@
         </section>
       </form>
 
+      <form id="categories-form" hidden>
+        <section>
+          <h2>Catégories</h2>
+          <p class="hint-block">
+            Chaque fichier va dans le dossier de sa catégorie, d'après son extension, ou à défaut le type annoncé par
+            le serveur. Ce qui n'entre dans aucune va dans « Générique ». Une extension ne peut être que dans une
+            catégorie ; les fichiers déjà téléchargés ne bougent pas.
+          </p>
+          <div class="category head" aria-hidden="true"><span>Catégorie</span><span>Dossier</span><span>Extensions</span></div>
+          <div id="categories"></div>
+          <div class="actions">
+            <button type="submit" class="primary">Enregistrer les catégories</button>
+            <button type="button" id="reset-categories">Rétablir celles d'origine</button>
+            <span id="categories-saved" class="saved" role="status"></span>
+          </div>
+        </section>
+      </form>
+
       <section>
         <h2>Navigateur</h2>
         <label class="check"><input id="take-over" type="checkbox" /> Prendre le contrôle des téléchargements de Chrome</label>

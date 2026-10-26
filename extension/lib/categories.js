@@ -1,6 +1,10 @@
 // Catégories façon IDM : chaque téléchargement est rangé dans un sous-dossier
 // de « Téléchargements » selon son extension, ou à défaut son type MIME.
 //
+// Ce sont les valeurs d'origine. Extensions et dossiers se modifient dans les
+// réglages du moteur, qui les envoie (config.categories) : quand on les a,
+// elles remplacent celles-ci (voir categoryFor).
+//
 // Les noms de dossiers restent en ASCII : quand la locale du système n'est
 // pas UTF-8, Chrome refuse en silence un chemin accentué (« Vidéos/… ») et
 // le fichier atterrit à la racine. Les libellés affichés, eux, gardent leurs accents.
@@ -50,7 +54,8 @@ export const CATEGORIES = [
   },
 ];
 
-export const OTHER = { id: 'other', label: 'Autres', folder: 'Autres', exts: [], mime: null };
+// Tout ce qui n'entre dans aucune autre catégorie.
+export const OTHER = { id: 'other', label: 'Générique', folder: 'Generique', exts: [], mime: null };
 
 export function extensionOf(path) {
   const name = path.split(/[\\/]/).pop();
@@ -59,13 +64,20 @@ export function extensionOf(path) {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
-export function categoryFor(filename = '', mime = '') {
+// `custom` : les catégories des réglages du moteur ([{ id, folder, exts }]),
+// qui remplacent extensions et dossiers d'origine ; libellés et MIME restent.
+export function categoryFor(filename = '', mime = '', custom = null) {
+  const mine = (category) => {
+    const set = custom?.find((c) => c.id === category.id);
+    return set ? { ...category, folder: set.folder, exts: set.exts } : category;
+  };
+  const categories = CATEGORIES.map(mine);
   const ext = extensionOf(filename);
   // L'extension passe avant le MIME : beaucoup de serveurs envoient
   // « application/octet-stream » pour n'importe quel fichier.
   return (
-    CATEGORIES.find((c) => c.exts.includes(ext)) ??
-    CATEGORIES.find((c) => c.mime.test(mime)) ??
-    OTHER
+    categories.find((c) => c.exts.includes(ext)) ??
+    categories.find((c) => c.mime.test(mime)) ??
+    mine(OTHER)
   );
 }
