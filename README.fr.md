@@ -142,8 +142,9 @@ Ce qui se passe vraiment :
 
 Bon à savoir :
 
-- Relancer la même liste n'ajoute que les nouveaux liens : ceux déjà dans le gestionnaire sont sautés, même en
-  échec (utilise **Réessayer**). Pour retélécharger un fichier terminé, **retire**-le d'abord du gestionnaire.
+- Relancer la même liste n'ajoute que les nouveaux liens : ceux déjà dans le gestionnaire **avec le même type**
+  sont sautés, même en échec (utilise **Réessayer**). Pour retélécharger un fichier terminé, **retire**-le d'abord
+  du gestionnaire. Le même lien avec l'autre type, en revanche, est bien ajouté.
 - Le type (**Fichier** ou **Vidéo de la page**) vaut pour toute la liste. Pour mélanger fichiers directs et pages
   YouTube, fais deux imports. Une page vidéo importée en **Fichier** passe en *Échec* avec la raison
   « page web reçue au lieu d'un fichier » : rien n'est enregistré, réimporte-la en **Vidéo de la page**.

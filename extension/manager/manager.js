@@ -576,10 +576,13 @@ function shorten(text, max = 60) {
 }
 
 // Ce qui sera vraiment ajouté : les liens valides de la zone de texte, moins
-// ceux que le moteur a déjà. Relancer la même liste n'ajoute que les nouveaux.
+// ceux que le moteur a déjà avec le même type. Relancer la même liste n'ajoute
+// que les nouveaux, et une page vidéo refusée en « Fichier » peut revenir en
+// « Vidéo de la page ».
 function importPlan() {
   const parsed = parseLinkList(importText.value);
-  const known = new Set([...engineJobs.values()].map((job) => job.url));
+  const kind = importKind.value === 'video' ? 'ytdlp' : 'http';
+  const known = new Set([...engineJobs.values()].filter((job) => job.kind === kind).map((job) => job.url));
   const fresh = parsed.urls.filter((url) => !known.has(url));
   return { ...parsed, fresh, known: parsed.urls.length - fresh.length };
 }
@@ -685,6 +688,7 @@ importFile.addEventListener('change', async () => {
 });
 
 importText.addEventListener('input', () => renderImportPreview());
+importKind.addEventListener('change', () => renderImportPreview()); // change les liens « déjà dans le gestionnaire »
 
 document.getElementById('import-form').addEventListener('submit', (event) => {
   event.preventDefault();

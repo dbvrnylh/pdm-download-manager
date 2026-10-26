@@ -173,6 +173,16 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("0 ajouté(s) · 2 déjà dans la liste", again.stdout)
         self.assertEqual(len(chrome.request({"type": "list"})["jobs"]), 2)
 
+        # Une page refusée en « Fichier » peut revenir en « Vidéo de la page » :
+        # même lien, autre type, ce n'est pas un doublon.
+        page = self.downloads.parent / "page.txt"
+        page.write_text(self.base + "/html\n")
+        self.assertIn("1 ajouté(s)", cli(str(page)).stdout)
+        self.assertIn("0 ajouté(s) · 1 déjà dans la liste", cli(str(page)).stdout)
+        self.assertIn("1 ajouté(s)", cli(str(page), "--video").stdout)
+        kinds = [j["kind"] for j in chrome.request({"type": "list"})["jobs"] if j["url"].endswith("/html")]
+        self.assertEqual(kinds, ["http", "ytdlp"])
+
         missing = cli(str(links) + ".absent")
         self.assertNotEqual(missing.returncode, 0)
         self.assertIn("Impossible de lire", missing.stderr)

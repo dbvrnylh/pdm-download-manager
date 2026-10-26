@@ -52,7 +52,8 @@ def _add_list(args, kind):
     for number, line, reason in invalid:
         print(f"Ligne {number} ignorée : {reason} ({line})")
     engine = _Connection()
-    known = {job["url"] for job in engine.request({"type": "list"})["jobs"]}
+    # Même lien, même type : une page refusée en fichier peut revenir avec --video.
+    known = {job["url"] for job in engine.request({"type": "list"})["jobs"] if job["kind"] == kind}
     fresh = [url for url in urls if url not in known]
     if len(fresh) > MAX_LINKS:
         sys.exit(f"{len(fresh)} liens à ajouter : {MAX_LINKS} au maximum par import, découpe la liste.")

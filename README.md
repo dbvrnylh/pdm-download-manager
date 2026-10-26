@@ -144,8 +144,9 @@ What actually happens:
 
 Good to know:
 
-- Importing the same list again only adds the new links: those already in the manager are skipped, even failed
-  ones (use **Réessayer**). To download a finished file again, **remove** it from the manager first.
+- Importing the same list again only adds the new links: those already in the manager **with the same type** are
+  skipped, even failed ones (use **Réessayer**). To download a finished file again, **remove** it from the manager
+  first. The same link with the other type, however, is added.
 - The type (**Fichier** or **Vidéo de la page**) applies to the whole list. To mix direct files and YouTube
   pages, import twice. A video page imported as **Fichier** fails with "page web reçue au lieu d'un fichier"
   (a web page instead of a file): nothing is saved, import it again as **Vidéo de la page**.

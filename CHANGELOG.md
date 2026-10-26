@@ -8,10 +8,11 @@ versions follow [Semantic Versioning](https://semver.org/).
 ### Added
 - Import a list of links (one per line) from the manager — **Importer une liste…**, from a `.txt` file or
   pasted — or from the terminal with `pdm-host add --file links.txt`. A preview shows the links kept,
-  duplicates, links already in the manager and every rejected line with its reason; the links are queued
-  in order and downloaded as many at a time as the "Téléchargements simultanés" setting.
-  A link imported as "Fichier" that returns a web page (typically a video page) fails with a
-  clear reason instead of saving the page as a finished download.
+  duplicates, links already in the manager with the same type and every rejected line with its reason;
+  the links are queued in order and downloaded as many at a time as the "Téléchargements simultanés"
+  setting. A link imported as "Fichier" that returns a web page (typically a video page) fails with a
+  clear reason instead of saving the page as a finished download, and can be imported again as
+  "Vidéo de la page".
 
 ## [2.0.4] - 2026-10-22
 
