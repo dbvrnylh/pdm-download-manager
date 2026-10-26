@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -162,6 +163,17 @@ class YtdlpTest(unittest.TestCase):
         self.assertEqual(job.status, "completed", job.error)
         self.assertEqual(subtitle_langs(job.path), [])
         self.assertTrue(any("nouvel essai sans" in line for line in logs.output), logs.output)
+
+    def test_waits_for_the_tools_lookup_at_startup(self):
+        # Démon qui vient de démarrer : le premier téléchargement part avant la fin
+        # de la recherche de yt-dlp. Il doit l'attendre, pas échouer.
+        tools = Tools(self.config)
+        self.engine = Engine(self.config, tools, lambda e: None)
+        self.engine.start()
+        job = self.engine.add({"kind": "ytdlp", "url": self.base + "/lecteur.html"})
+        threading.Timer(1.0, tools.refresh).start()
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
 
     def test_unsupported_page_fails_with_message(self):
         job = self.engine.add({"kind": "ytdlp", "url": self.base + "/vide.html"})

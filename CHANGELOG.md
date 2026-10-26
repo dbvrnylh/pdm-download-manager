@@ -18,6 +18,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   YouTube's machine translations are left out. If subtitles fail to download, the video is downloaded
   again without them. New "Réglages" options: on/off and the list of languages. Needs ffmpeg.
 
+### Fixed
+- Video downloads started right as the engine launched (auto-resume, `pdm-host add`) no longer fail
+  with "yt-dlp n'est pas installé": they wait for the engine to finish looking for yt-dlp and ffmpeg.
+
 ## [2.0.4] - 2026-10-22
 
 ### Added

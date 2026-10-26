@@ -127,6 +127,9 @@ class YtdlpDownload:
         cleanup_files(self.job)
 
     def run(self):
+        # Démon tout juste lancé (reprise automatique, CLI) : la recherche de
+        # yt-dlp et de ffmpeg tourne peut-être encore dans son thread.
+        self.tools.ready.wait(30)
         if not self.tools.ytdlp:
             raise DownloadError("yt-dlp n'est pas installé (voir install.sh)")
         code = self._run_ytdlp()
