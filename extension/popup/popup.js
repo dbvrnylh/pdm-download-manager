@@ -62,6 +62,7 @@ function showPageVideo() {
       return option;
     }),
   );
+  preset.value = engine.info?.config.videoQuality ?? 'best';
 }
 
 document.getElementById('grab-page').addEventListener('click', () =>

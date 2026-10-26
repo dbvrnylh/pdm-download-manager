@@ -66,11 +66,12 @@
           <li>
             <strong>Fichier</strong> pour des liens directs (.zip, .iso, .pdf…),
             <strong>Vidéo de la page</strong> pour des pages YouTube ou d’autres sites vidéo.
-            Le choix vaut pour toute la liste : pour une liste mélangée, fais deux imports.
+            Le choix vaut pour toute la liste, comme la qualité des vidéos : pour une liste mélangée, fais deux imports.
             Une page vidéo importée en « Fichier » passe en échec, sans rien enregistrer.
           </li>
           <li>
-            Un lien en double, ou déjà dans le gestionnaire avec le même type, n’est ajouté qu’une fois.
+            Un lien en double, ou déjà dans le gestionnaire avec le même type et la même qualité, n’est ajouté
+            qu’une fois.
             Avant l’ajout, PDM t’indique ce qu’il a compris de ta liste et les lignes refusées.
           </li>
         </ul>
@@ -88,6 +89,7 @@
             <option value="file">Fichier</option>
             <option value="video">Vidéo de la page</option>
           </select>
+          <select id="import-quality" aria-label="Qualité des vidéos de la liste" hidden></select>
         </div>
         <div id="import-preview" class="import-preview" role="status"></div>
         <div class="import-actions">

@@ -13,7 +13,7 @@ import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
 import { basename, filenameFromUrl } from '../lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../lib/format.js';
-import { httpJob, videoJob } from '../lib/jobs.js';
+import { PRESETS, httpJob, videoJob } from '../lib/jobs.js';
 import { MAX_LINKS, parseLinkList } from '../lib/linklist.js';
 import { markBypass } from '../lib/store.js';
 
@@ -87,6 +87,7 @@ const importDialog = document.getElementById('import-dialog');
 const importText = document.getElementById('import-text');
 const importFile = document.getElementById('import-file');
 const importKind = document.getElementById('import-kind');
+const importQuality = document.getElementById('import-quality');
 const importPreview = document.getElementById('import-preview');
 const importSubmit = document.getElementById('import-submit');
 const importClose = document.getElementById('import-close');
@@ -576,13 +577,15 @@ function shorten(text, max = 60) {
 }
 
 // Ce qui sera vraiment ajouté : les liens valides de la zone de texte, moins
-// ceux que le moteur a déjà avec le même type. Relancer la même liste n'ajoute
-// que les nouveaux, et une page vidéo refusée en « Fichier » peut revenir en
-// « Vidéo de la page ».
+// ceux que le moteur a déjà avec le même type et, pour une vidéo, la même
+// qualité. Relancer la même liste n'ajoute que les nouveaux ; une page vidéo
+// refusée en « Fichier » peut revenir en « Vidéo de la page », et une vidéo
+// en 480p après la 720p (fichier « [480p] » distinct).
 function importPlan() {
   const parsed = parseLinkList(importText.value);
   const kind = importKind.value === 'video' ? 'ytdlp' : 'http';
-  const known = new Set([...engineJobs.values()].filter((job) => job.kind === kind).map((job) => job.url));
+  const same = (job) => job.kind === kind && (kind === 'http' || (job.preset ?? 'best') === importQuality.value);
+  const known = new Set([...engineJobs.values()].filter(same).map((job) => job.url));
   const fresh = parsed.urls.filter((url) => !known.has(url));
   return { ...parsed, fresh, known: parsed.urls.length - fresh.length };
 }
@@ -640,7 +643,10 @@ async function importLinks() {
     }
     importPreview.replaceChildren(el('p', '', `Ajout ${index + 1} / ${plan.fresh.length}…`));
     try {
-      const job = importKind.value === 'video' ? await videoJob(url) : await httpJob(url, { source: 'list' });
+      const job =
+        importKind.value === 'video'
+          ? await videoJob(url, { preset: importQuality.value })
+          : await httpJob(url, { source: 'list' });
       await engine.request({ type: 'add', job });
     } catch (err) {
       refused.push({ url, error: err.message });
@@ -666,8 +672,23 @@ async function importLinks() {
   ]);
 }
 
+importQuality.replaceChildren(
+  ...PRESETS.map(({ id, label }) => {
+    const option = el('option', '', label);
+    option.value = id;
+    return option;
+  }),
+);
+
+// La qualité ne concerne que les vidéos : elle apparaît avec « Vidéo de la page ».
+function updateImportQuality() {
+  importQuality.hidden = importKind.value !== 'video';
+}
+
 document.getElementById('open-import').addEventListener('click', () => {
   if (engine.info) document.getElementById('import-parallel').textContent = String(engine.info.config.maxParallel);
+  importQuality.value = engine.info?.config.videoQuality ?? 'best';
+  updateImportQuality();
   renderImportPreview();
   importDialog.showModal();
 });
@@ -688,7 +709,11 @@ importFile.addEventListener('change', async () => {
 });
 
 importText.addEventListener('input', () => renderImportPreview());
-importKind.addEventListener('change', () => renderImportPreview()); // change les liens « déjà dans le gestionnaire »
+importKind.addEventListener('change', () => {
+  updateImportQuality();
+  renderImportPreview(); // change les liens « déjà dans le gestionnaire »
+});
+importQuality.addEventListener('change', () => renderImportPreview()); // idem
 
 document.getElementById('import-form').addEventListener('submit', (event) => {
   event.preventDefault();

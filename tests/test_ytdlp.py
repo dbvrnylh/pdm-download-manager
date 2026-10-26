@@ -20,10 +20,10 @@ sys.path.insert(0, str(ROOT / "engine"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import fixture_server as fx  # noqa: E402
-from pdm_engine.config import Config  # noqa: E402
+from pdm_engine.config import QUALITIES, Config  # noqa: E402
 from pdm_engine.engine import Engine, Job  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
-from pdm_engine.ytdlp import YtdlpDownload, pick_audio_tracks  # noqa: E402
+from pdm_engine.ytdlp import PRESETS, VIDEO_ONLY, YtdlpDownload, pick_audio_tracks  # noqa: E402
 
 YTDLP = os.environ.get("PDM_TEST_YTDLP") or shutil.which("yt-dlp")
 FFMPEG = shutil.which("ffmpeg")
@@ -154,6 +154,7 @@ class YtdlpTest(unittest.TestCase):
         self.assertEqual(job.status, "completed", job.error)
         path = Path(job.path)
         self.assertEqual(path.parent, self.downloads / "Videos")
+        # Playlist simple, sans RESOLUTION : hauteur inconnue, donc pas de « [720p] ».
         self.assertEqual(path.stem, "Cours _ le protocole IRC")
         duration, streams = ffprobe(path)
         self.assertAlmostEqual(duration, 40, delta=1)
@@ -212,6 +213,7 @@ class YtdlpTest(unittest.TestCase):
         job = self.wait(job.id, {"completed", "failed"})
         self.assertEqual(job.status, "completed", job.error)
         self.assertEqual(audio_streams(job.path), ["ita", "fra"])
+        self.assertEqual(Path(job.path).stem, "Multilingue [360p]")  # hauteur annoncée par le maître
         self.assertEqual(list(Path(os.environ["PDM_DATA_DIR"]).glob("analyse-*")), [], "analyse effacée")
 
     def test_missing_extra_track_falls_back_to_one_track(self):
@@ -279,6 +281,22 @@ class CommandTest(unittest.TestCase):
         # L'analyse déjà faite sert au téléchargement : pas de 2e visite du site.
         self.assertEqual(command[-2:], ["--load-info-json", "/data/analyse-x.json"])
         self.assertNotIn("https://www.youtube.com/watch?v=abc", command)
+
+    def test_qualities_cap_the_picture_height(self):
+        # Une qualité = une hauteur maximale ; la meilleure en dessous si elle n'existe pas.
+        self.assertEqual(set(PRESETS), set(QUALITIES))
+        self.assertEqual(set(VIDEO_ONLY), set(QUALITIES) - {"audio"})
+        command = self.command("https://www.youtube.com/watch?v=abc", preset="480")
+        self.assertEqual(command[command.index("-f") + 1], "bv*[height<=480]+ba/b[height<=480]/b")
+        runner = self.runner("https://www.youtube.com/watch?v=abc", preset="480")
+        runner.audio_ids, runner.info_path = ["140-23"], Path("/data/a.json")
+        self.assertTrue(runner._command()[runner._command().index("-f") + 1].startswith("bv[height<=480]+140-23/"))
+
+    def test_file_name_carries_the_resolution(self):
+        command = self.command("https://www.youtube.com/watch?v=abc")
+        self.assertEqual(command[command.index("-o") + 1], "%(title).170B%(height& [{}p]|)s.%(ext)s")
+        audio = self.command("https://www.youtube.com/watch?v=abc", preset="audio")
+        self.assertEqual(audio[audio.index("-o") + 1], "%(title).170B.%(ext)s")
 
     def test_no_subtitles_when_off_for_audio_or_without_ffmpeg(self):
         url = "https://www.youtube.com/watch?v=abc"

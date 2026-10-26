@@ -2,10 +2,14 @@
 
 import { filenameFromUrl, mediaFilename } from './filename.js';
 
+// Qualités des vidéos : hauteur maximale de l'image (la meilleure en dessous si
+// la vidéo n'existe pas dans celle-là), ou l'audio seul. Mêmes clés que
+// QUALITIES dans engine/pdm_engine/config.py et que la liste de content/grab.js.
 export const PRESETS = [
   { id: 'best', label: 'Meilleure qualité' },
-  { id: '1080', label: '1080p maximum' },
-  { id: '720', label: '720p maximum' },
+  { id: '1080', label: '1080p' },
+  { id: '720', label: '720p (moyenne)' },
+  { id: '480', label: '480p (petite)' },
   { id: 'audio', label: 'Audio seul (MP3)' },
 ];
 
@@ -47,7 +51,8 @@ export async function httpJob(url, { filename, referer, source, size, mime, id =
 // - Page (YouTube…) : rien de tout ça. yt-dlp imite lui-même le client
 //   attendu par le site ; lui imposer les en-têtes du navigateur fait
 //   refuser le téléchargement des données (erreur 403).
-export async function videoJob(url, { title, referer, preset = 'best', isStream = false } = {}) {
+// Sans `preset`, le moteur prend la qualité par défaut de ses réglages.
+export async function videoJob(url, { title, referer, preset, isStream = false } = {}) {
   const job = { id: newJobId(), kind: 'ytdlp', url, preset, source: 'video' };
   if (!isStream) return job;
   return { ...job, title, referer, cookies: await cookieHeader(url), userAgent: navigator.userAgent };

@@ -162,6 +162,18 @@ class EngineTest(unittest.TestCase):
 
     # ─── Erreurs et refus ──────────────────────────────────────────────────
 
+    def test_video_quality_defaults_to_the_setting(self):
+        self.config.update({"videoQuality": "720"})
+        url = "https://exemple.org/video"
+        # Rien de précisé : la qualité des réglages, notée dans le téléchargement.
+        self.assertEqual(self.engine.add({"url": url, "kind": "ytdlp"}).preset, "720")
+        self.assertEqual(self.engine.add({"url": url, "kind": "ytdlp", "preset": "480"}).preset, "480")
+        file = self.engine.add({"url": self.base + "/range/absent.bin"})  # échoue tout de suite (404)
+        self.assertIsNone(file.preset)
+        self.wait(file.id, {"failed"})
+        with self.assertRaises(ValueError):
+            self.engine.add({"url": url, "kind": "ytdlp", "preset": "4k"})
+
     def test_404_fails_with_clear_message(self):
         job = self.add("/range/nope.bin")
         job = self.wait(job.id, {"failed"})
@@ -255,6 +267,14 @@ class ConfigTest(unittest.TestCase):
                 config.update({"languages": bad})
         with self.assertRaises(ValueError):
             config.update({"subtitles": "oui"})
+
+    def test_video_quality_is_one_of_the_presets(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        self.assertEqual(config["videoQuality"], "best")
+        self.assertEqual(config.update({"videoQuality": "480"})["videoQuality"], "480")
+        for bad in ("4k", "", None, 720):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.update({"videoQuality": bad})
 
 
 class UtilTest(unittest.TestCase):

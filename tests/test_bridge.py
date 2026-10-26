@@ -187,6 +187,37 @@ class BridgeTest(unittest.TestCase):
         self.assertNotEqual(missing.returncode, 0)
         self.assertIn("Impossible de lire", missing.stderr)
 
+    def test_cli_quality_option(self):
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+
+        def cli(*args):
+            return subprocess.run([str(HOST), "add", *args], capture_output=True, text=True, env=self.env, timeout=30)
+
+        # La valeur de --quality n'est pas prise pour l'adresse, et --quality implique une vidéo.
+        self.assertEqual(cli("--quality", "480", self.base + "/page/a").returncode, 0)
+        links = self.downloads.parent / "videos.txt"
+        links.write_text(self.base + "/page/b\n")
+        self.assertIn("1 ajouté(s)", cli("--file", str(links), "--video", "--quality", "720").stdout)
+        self.assertEqual(cli(self.base + "/page/c", "--video").returncode, 0)  # qualité des réglages
+        jobs = {j["url"].rsplit("/", 1)[1]: j for j in chrome.request({"type": "list"})["jobs"]}
+        self.assertEqual({name: (j["kind"], j["preset"]) for name, j in jobs.items()},
+                         {"a": ("ytdlp", "480"), "b": ("ytdlp", "720"), "c": ("ytdlp", "best")})
+
+        # Anti-doublon des listes : même lien et même type, mais aussi même qualité.
+        page = self.downloads.parent / "qualites.txt"
+        page.write_text(self.base + "/page/q\n")
+        self.assertIn("1 ajouté(s)", cli("--file", str(page), "--quality", "720").stdout)
+        self.assertIn("1 ajouté(s)", cli("--file", str(page), "--quality", "480").stdout)
+        self.assertIn("0 ajouté(s) · 1 déjà dans la liste", cli("--file", str(page), "--quality", "480").stdout)
+        self.assertIn("1 ajouté(s)", cli("--file", str(page), "--video").stdout)  # qualité des réglages : best
+
+        bad = cli("--quality", "4k", self.base + "/page/d")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("Qualité inconnue : 4k", bad.stderr)
+        self.assertIn("attend une valeur", cli(self.base + "/page/d", "--quality").stderr)
+        self.assertIn("Usage", cli().stderr)
+
     def test_errors_are_replies_not_crashes(self):
         chrome = self.connect()
         bad = chrome.request({"type": "add", "job": {"url": "file:///etc/passwd"}})

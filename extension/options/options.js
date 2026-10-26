@@ -3,6 +3,7 @@
 
 import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
+import { PRESETS } from '../lib/jobs.js';
 import { getSettings, setSetting } from '../lib/settings.js';
 
 const YTDLP_SOURCES = {
@@ -23,11 +24,20 @@ const fields = {
   categorize: document.getElementById('categorize'),
   notify: document.getElementById('notify'),
   autoResume: document.getElementById('auto-resume'),
+  videoQuality: document.getElementById('video-quality'),
   languages: document.getElementById('languages'),
   subtitles: document.getElementById('subtitles'),
   audioTracks: document.getElementById('audio-tracks'),
 };
 const languageFields = [fields.languages, fields.subtitles, fields.audioTracks];
+
+fields.videoQuality.replaceChildren(
+  ...PRESETS.map(({ id, label }) => {
+    const option = el('option', '', label);
+    option.value = id;
+    return option;
+  }),
+);
 
 // Les langues ne servent que si les sous-titres ou les pistes audio sont activés.
 function updateLanguages() {
@@ -74,6 +84,8 @@ function fillForm(config) {
   fields.autoResume.checked = config.autoResume;
   // Un moteur plus ancien (install.sh pas relancé) ne connaît pas ces réglages :
   // on les cache, sinon il refuserait tout l'enregistrement.
+  fields.videoQuality.closest('label').hidden = !('videoQuality' in config);
+  fields.videoQuality.value = config.videoQuality ?? 'best';
   const hasLanguages = 'languages' in config;
   for (const field of languageFields) field.closest('label').hidden = !hasLanguages;
   document.querySelector('.hint').hidden = !hasLanguages;
@@ -114,6 +126,7 @@ form.addEventListener('submit', async (event) => {
     notify: fields.notify.checked,
     autoResume: fields.autoResume.checked,
   };
+  if (!fields.videoQuality.closest('label').hidden) changes.videoQuality = fields.videoQuality.value;
   if (!fields.languages.closest('label').hidden) {
     changes.languages = fields.languages.value;
     changes.subtitles = fields.subtitles.checked;

@@ -79,12 +79,12 @@ Laisse le dépôt à sa place : le navigateur charge l'extension depuis ce dossi
 | Je veux… | Comment |
 |---|---|
 | Télécharger un fichier | Clique le lien comme d'habitude : PDM le reprend et ouvre son gestionnaire. |
-| Télécharger une vidéo | Survole le lecteur → **Télécharger cette vidéo**. |
-| Choisir la qualité | Icône PDM → **Vidéo de cette page** → qualité → **Télécharger**. |
+| Télécharger une vidéo | Survole le lecteur → **Télécharger cette vidéo** (dans ta qualité par défaut). |
+| Choisir la qualité | Survole le lecteur → **▾** à côté du bouton → **Meilleure qualité**, **1080p**, **720p (moyenne)**, **480p (petite)** ou **Audio seul (MP3)**. Ou icône PDM → **Vidéo de cette page**. |
 | Un média précis de la page | Icône PDM → **Médias détectés**, ou clic droit sur le lien → **Télécharger avec PDM**. |
 | Ajouter une adresse à la main | Gestionnaire → coller l'adresse → **Fichier** ou **Vidéo de la page** → **Ajouter**. |
 | Télécharger une liste de liens | Gestionnaire → **Importer une liste…**, ou `pdm-host add --file liens.txt`. Voir [ci-dessous](#télécharger-une-liste-de-liens). |
-| Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp). |
+| Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp, `--quality 720` pour la qualité). |
 
 Si un site très protégé refuse le moteur, **Avec Chrome** relance le téléchargement dans le navigateur,
 avec sa propre session.
@@ -126,7 +126,7 @@ Puis, au choix :
 - **Gestionnaire** → **Importer une liste…** → **Charger un fichier .txt…** (ou colle les liens dans la zone) →
   **Fichier** ou **Vidéo de la page** → **Ajouter N téléchargements**.
 - **Terminal** : `~/.local/share/pdm/app/pdm-host add --file liens.txt` (`--video` pour des pages vidéo,
-  `--file -` pour lire l'entrée standard).
+  `--quality 480` pour leur qualité, `--file -` pour lire l'entrée standard).
 
 Ce qui se passe vraiment :
 
@@ -142,10 +142,10 @@ Ce qui se passe vraiment :
 
 Bon à savoir :
 
-- Relancer la même liste n'ajoute que les nouveaux liens : ceux déjà dans le gestionnaire **avec le même type**
-  sont sautés, même en échec (utilise **Réessayer**). Pour retélécharger un fichier terminé, **retire**-le d'abord
+- Relancer la même liste n'ajoute que les nouveaux liens : ceux déjà dans le gestionnaire **avec le même type** (et,
+  pour une vidéo, la même qualité) sont sautés, même en échec (utilise **Réessayer**). Pour retélécharger un fichier terminé, **retire**-le d'abord
   du gestionnaire. Le même lien avec l'autre type, en revanche, est bien ajouté.
-- Le type (**Fichier** ou **Vidéo de la page**) vaut pour toute la liste. Pour mélanger fichiers directs et pages
+- Le type (**Fichier** ou **Vidéo de la page**), comme la qualité des vidéos, vaut pour toute la liste. Pour mélanger fichiers directs et pages
   YouTube, fais deux imports. Une page vidéo importée en **Fichier** passe en *Échec* avec la raison
   « page web reçue au lieu d'un fichier » : rien n'est enregistré, réimporte-la en **Vidéo de la page**.
 - Depuis le gestionnaire, PDM transmet les cookies de chaque site (fichiers réservés aux membres…). Depuis le
@@ -228,6 +228,7 @@ Tout se règle dans la page **Réglages** de l'extension :
 | Réglage | Par défaut | Remarques |
 |---|---|---|
 | Dossier de destination | ton dossier Téléchargements (XDG) | Détecté avec `xdg-user-dir`. |
+| Qualité des vidéos | meilleure | Meilleure, 1080p, 720p, 480p ou audio seul : la hauteur d'image maximale, ou la meilleure en dessous. Sert dès qu'aucune qualité n'est choisie (bouton, gestionnaire, listes, terminal). Le nom du fichier porte la résolution obtenue (`Titre [720p].mp4`) : chaque qualité a son propre fichier. |
 | Connexions par fichier | 8 | De 1 à 32. Monter n'aide que si le serveur limite chaque connexion. |
 | Téléchargements simultanés | 3 | De 1 à 10 ; les suivants attendent dans la file. |
 | Rangement par catégorie | activé | `Videos/`, `Musique/`, `Archives/`… (noms en ASCII exprès). |

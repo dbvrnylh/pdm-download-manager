@@ -228,7 +228,8 @@ async function openManagerIfClosed() {
 // Un fichier vidéo direct part au moteur HTTP (multi-connexions). Un lecteur
 // en streaming (blob:, HLS, DASH, YouTube…) part à yt-dlp : le manifeste
 // détecté dans l'onglet s'il y en a un, sinon l'adresse de la page.
-async function grabVideo({ pageUrl, src, title }, tabId) {
+// `preset` : qualité choisie dans le menu du bouton ; sans elle, celle des réglages du moteur.
+async function grabVideo({ pageUrl, src, title, preset }, tabId) {
   const client = await getEngine();
   if (/^https?:/i.test(src ?? '') && !isStreamUrl(src)) {
     const filename = directFilename(src, title);
@@ -246,8 +247,8 @@ async function grabVideo({ pageUrl, src, title }, tabId) {
   const detected = tabId == null ? [] : await getMedia(tabId);
   const stream = detected.toReversed().find((m) => m.kind === 'hls' || m.kind === 'dash');
   const job = stream
-    ? await videoJob(stream.url, { title, referer: stream.referer ?? pageUrl, isStream: true })
-    : await videoJob(pageUrl);
+    ? await videoJob(stream.url, { title, referer: stream.referer ?? pageUrl, isStream: true, preset })
+    : await videoJob(pageUrl, { preset });
   await client.request({ type: 'add', job });
   await openManagerIfWanted();
   return { ok: true };

@@ -17,12 +17,15 @@ DEFAULTS = {
     "notify": True,  # notification du bureau à la fin
     "autoResume": True,  # reprendre les téléchargements interrompus au démarrage
     "ytdlpPath": None,  # chemin de yt-dlp (sinon recherche automatique)
+    "videoQuality": "best",  # qualité des vidéos quand rien n'est précisé (voir QUALITIES)
     "languages": "fr,es,en",  # langues voulues (sous-titres, pistes audio), dans l'ordre des pistes
     "subtitles": True,  # intégrer aux vidéos les sous-titres qui existent
     "audioTracks": True,  # garder aussi les pistes audio dans ces langues, en plus de l'originale
 }
 
 LIMITS = {"connections": (1, 32), "maxParallel": (1, 10)}
+# Mêmes clés que ytdlp.PRESETS : hauteur maximale de l'image, ou l'audio seul.
+QUALITIES = ("best", "1080", "720", "480", "audio")
 LANG_CODE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")  # fr, es-419, pt-br…
 
 
@@ -69,6 +72,9 @@ class Config:
                     value = os.path.expanduser(value)
             elif key == "languages":
                 value = _languages(value)
+            elif key == "videoQuality":
+                if value not in QUALITIES:
+                    raise ValueError(f"qualité inconnue : {value} (choix : {', '.join(QUALITIES)})")
             elif not isinstance(value, bool):
                 raise ValueError(f"{key} doit valoir true ou false")
             clean[key] = value

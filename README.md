@@ -81,12 +81,12 @@ Keep the repository where it is: the browser loads the extension from it.
 | I want to… | How |
 |---|---|
 | Download a file | Click the link as usual — PDM takes over and opens its manager. |
-| Download a video | Hover the player → **Télécharger cette vidéo**. |
-| Pick the quality | PDM icon → **Vidéo de cette page** → choose a preset → **Télécharger**. |
+| Download a video | Hover the player → **Télécharger cette vidéo** (in your default quality). |
+| Pick the quality | Hover the player → **▾** next to the button → **Meilleure qualité**, **1080p**, **720p (moyenne)**, **480p (petite)** or **Audio seul (MP3)**. Or PDM icon → **Vidéo de cette page**. |
 | Grab a specific media file | PDM icon → **Médias détectés**, or right-click a link → **Télécharger avec PDM**. |
 | Add a URL by hand | Manager → paste the address → **Fichier** or **Vidéo de la page** → **Ajouter**. |
 | Download a list of links | Manager → **Importer une liste…**, or `pdm-host add --file links.txt`. See [below](#downloading-a-list-of-links). |
-| Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp). |
+| Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality). |
 
 If a heavily protected site refuses the engine, **Avec Chrome** retries the download in the browser,
 with the browser's own session.
@@ -128,7 +128,7 @@ Then either:
 - **Manager** → **Importer une liste…** → **Charger un fichier .txt…** (or paste the links into the box) →
   **Fichier** or **Vidéo de la page** → **Ajouter N téléchargements**.
 - **Terminal**: `~/.local/share/pdm/app/pdm-host add --file links.txt` (`--video` for video pages,
-  `--file -` to read standard input).
+  `--quality 480` for their quality, `--file -` to read standard input).
 
 What actually happens:
 
@@ -144,10 +144,10 @@ What actually happens:
 
 Good to know:
 
-- Importing the same list again only adds the new links: those already in the manager **with the same type** are
-  skipped, even failed ones (use **Réessayer**). To download a finished file again, **remove** it from the manager
+- Importing the same list again only adds the new links: those already in the manager **with the same type** (and, for
+  videos, the same quality) are skipped, even failed ones (use **Réessayer**). To download a finished file again, **remove** it from the manager
   first. The same link with the other type, however, is added.
-- The type (**Fichier** or **Vidéo de la page**) applies to the whole list. To mix direct files and YouTube
+- The type (**Fichier** or **Vidéo de la page**), like the video quality, applies to the whole list. To mix direct files and YouTube
   pages, import twice. A video page imported as **Fichier** fails with "page web reçue au lieu d'un fichier"
   (a web page instead of a file): nothing is saved, import it again as **Vidéo de la page**.
 - From the manager, PDM forwards each site's cookies (members-only files…). From the terminal it has no access
@@ -226,6 +226,7 @@ Everything lives in the extension's **Réglages** page:
 | Setting | Default | Notes |
 |---|---|---|
 | Download folder | your XDG Downloads folder | Detected with `xdg-user-dir`. |
+| Video quality | best | Best, 1080p, 720p, 480p or audio only: the highest picture height, or the best below it. Used whenever no quality is picked (button, manager, lists, terminal). File names carry the resolution obtained (`Title [720p].mp4`), so each quality gets its own file. |
 | Connections per file | 8 | 1–32. More only helps when a server throttles each connection. |
 | Simultaneous downloads | 3 | 1–10; the rest waits in the queue. |
 | Sort by category | on | `Videos/`, `Musique/`, `Archives/`… (ASCII folder names on purpose). |

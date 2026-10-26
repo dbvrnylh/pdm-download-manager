@@ -23,6 +23,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   the analysis is reused for the download. Before, only one track was kept, chosen at random on Arte.
 - "Réglages": one list of languages (French, Spanish and English by default) for subtitles and audio
   tracks, each with its own on/off box.
+- Video quality choices: best, 1080p, 720p (medium), 480p (small) and audio only (MP3). The video
+  button became a split button: a click downloads in the default quality, its ▾ arrow opens a menu of
+  qualities (no arrow for a direct file, which exists in one quality only). The default quality is a
+  "Réglages" option used by the button, the manager, lists and the terminal; the list import dialog has
+  its own quality menu and `pdm-host add` a `--quality` option, which implies `--video`. File names carry
+  the resolution obtained ("Title [720p].mp4"), so two qualities of one video get two files, and the
+  list import treats the same video in another quality as a new link.
 
 ### Fixed
 - Videos without sound (or sound without a picture) on sites that split HLS streams into tracks, such

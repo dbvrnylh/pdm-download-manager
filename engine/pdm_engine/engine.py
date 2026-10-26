@@ -18,6 +18,7 @@ import uuid
 from urllib.parse import quote
 
 from . import httpdl, paths
+from .config import QUALITIES
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload
 from .util import category_for, filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
 from .ytdlp import YtdlpDownload, cleanup_files
@@ -122,12 +123,20 @@ class Engine:
         kind = spec.get("kind") or "http"
         if kind not in ("http", "ytdlp"):
             raise ValueError("type de téléchargement inconnu")
+        preset = spec.get("preset")
+        if kind == "ytdlp":
+            # Rien de précisé (bouton, liste, gestionnaire, terminal) : la qualité
+            # par défaut des réglages, notée dans le téléchargement pour qu'une
+            # reprise après un changement de réglage garde la même.
+            preset = preset or self.config["videoQuality"]
+            if preset not in QUALITIES:
+                raise ValueError(f"qualité inconnue : {preset}")
         job = Job(
             id=spec.get("id"), kind=kind, url=url, referer=spec.get("referer"),
             cookies=spec.get("cookies") or None, userAgent=spec.get("userAgent"),
             source=spec.get("source") or "manual", mime=spec.get("mime"),
             filename=sanitize_filename(spec["filename"]) if spec.get("filename") else None,
-            title=spec.get("title"), preset=spec.get("preset"), size=spec.get("size"),
+            title=spec.get("title"), preset=preset, size=spec.get("size"),
             createdAt=time.time(), status="queued",
         )
         with self.lock:

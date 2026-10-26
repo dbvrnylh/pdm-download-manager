@@ -19,11 +19,25 @@
   const MIN_WIDTH = 240; // en dessous : miniature, publicité, aperçu
   const MIN_HEIGHT = 135;
   const HIDE_AFTER = 2500;
+  const LABEL = 'Télécharger cette vidéo';
+
+  // Mêmes qualités que PRESETS dans lib/jobs.js (un script de contenu ne peut
+  // pas importer de module).
+  const QUALITIES = [
+    ['best', 'Meilleure qualité'],
+    ['1080', '1080p'],
+    ['720', '720p (moyenne)'],
+    ['480', '480p (petite)'],
+    ['audio', 'Audio seul (MP3)'],
+  ];
 
   const videos = new Set();
   let enabled = true;
   let host = null;
-  let button = null;
+  let bar = null;
+  let main = null;
+  let more = null;
+  let menu = null;
   let current = null;
   let hideTimer = null;
   let framePending = false;
@@ -93,15 +107,28 @@
     ensureButton();
     const r = video.getBoundingClientRect();
     host.style.top = `${Math.max(r.top, 0) + 10}px`;
-    host.style.left = `${Math.min(r.right, window.innerWidth) - button.offsetWidth - 10}px`;
+    // Un fichier vidéo direct n'existe qu'en une qualité : pas de menu.
+    // (Avant de mesurer : la flèche change la largeur du bouton.)
+    more.hidden = isDirectFile(video.currentSrc || video.src);
     host.style.display = 'block';
+    host.style.left = `${Math.min(r.right, window.innerWidth) - bar.offsetWidth - 10}px`;
     clearTimeout(hideTimer);
     hideTimer = setTimeout(hide, HIDE_AFTER);
   }
 
   function hide() {
-    if (host && !busy && !host.matches(':hover')) host.style.display = 'none';
+    if (host && !busy && menu.hidden && !host.matches(':hover')) host.style.display = 'none';
     else hideTimer = setTimeout(hide, HIDE_AFTER);
+  }
+
+  // Même règle que background.js (isStreamUrl) : http(s), mais pas un manifeste HLS/DASH.
+  function isDirectFile(src) {
+    try {
+      const url = new URL(src);
+      return /^https?:$/.test(url.protocol) && !/\.(m3u8|mpd)$/i.test(url.pathname);
+    } catch {
+      return false; // blob:, vide… : c'est yt-dlp qui s'en charge
+    }
   }
 
   function ensureButton() {
@@ -115,30 +142,81 @@
       <style>
         button {
           all: initial;
-          display: flex; align-items: center; gap: 6px;
-          padding: 7px 12px; border-radius: 8px;
           font: 600 13px/1.2 system-ui, sans-serif; color: #fff;
-          background: rgba(37, 99, 235, 0.94);
-          box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
           cursor: pointer; white-space: nowrap;
         }
-        button:hover { background: #1d4ed8; }
-        button[data-state="ok"] { background: #15803d; }
-        button[data-state="error"] { background: #b91c1c; }
+        .bar {
+          display: flex; border-radius: 8px; overflow: hidden;
+          background: rgba(37, 99, 235, 0.94);
+          box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+        }
+        .bar[data-state="ok"] { background: #15803d; }
+        .bar[data-state="error"] { background: #b91c1c; }
+        .bar button { display: flex; align-items: center; gap: 6px; padding: 7px 12px; }
+        .bar button:hover, .bar button[aria-expanded="true"] { background: rgba(0, 0, 0, 0.18); }
+        .bar .more { padding: 7px 9px; border-left: 1px solid rgba(255, 255, 255, 0.35); }
+        [hidden] { display: none !important; }
         svg { width: 14px; height: 14px; fill: currentColor; }
+        .menu {
+          position: absolute; right: 0; top: calc(100% + 4px); min-width: 190px;
+          padding: 4px; border-radius: 8px; background: #1f2229;
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+        }
+        .menu button { display: block; box-sizing: border-box; width: 100%; padding: 7px 10px; border-radius: 5px; font-weight: 500; }
+        .menu button:hover, .menu button:focus-visible { background: rgba(255, 255, 255, 0.12); }
       </style>
-      <button type="button" title="PDM">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 1h2v7.6l2.6-2.6L13 7.4 8 12.4 3 7.4 4.4 6 7 8.6zM2 13.5h12V15H2z"/></svg>
-        <span>Télécharger cette vidéo</span>
-      </button>`;
-    button = root.querySelector('button');
-    button.addEventListener('click', onClick);
+      <div class="bar">
+        <button type="button" class="main" title="PDM : qualité choisie dans les réglages">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 1h2v7.6l2.6-2.6L13 7.4 8 12.4 3 7.4 4.4 6 7 8.6zM2 13.5h12V15H2z"/></svg>
+          <span>${LABEL}</span>
+        </button>
+        <button type="button" class="more" title="Choisir la qualité" aria-haspopup="menu" aria-expanded="false">▾</button>
+      </div>
+      <div class="menu" role="menu" hidden></div>`;
+    bar = root.querySelector('.bar');
+    main = root.querySelector('.main');
+    more = root.querySelector('.more');
+    menu = root.querySelector('.menu');
+    for (const [preset, label] of QUALITIES) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.setAttribute('role', 'menuitem');
+      item.textContent = label;
+      item.addEventListener('click', (event) => grab(event, preset));
+      menu.append(item);
+    }
+    main.addEventListener('click', (event) => grab(event)); // qualité par défaut, choisie par le moteur
+    more.addEventListener('click', (event) => {
+      stop(event);
+      toggleMenu(menu.hidden);
+    });
+    // Un clic ailleurs ou Échap referme le menu. Ces écouteurs voient aussi les
+    // clics sur notre bouton (phase de capture) : ceux-là, ▾ s'en occupe.
+    document.addEventListener('click', (event) => {
+      if (!event.composedPath().includes(host)) toggleMenu(false);
+    }, true);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') toggleMenu(false);
+    }, true);
     document.documentElement.append(host);
   }
 
-  async function onClick(event) {
+  function toggleMenu(open) {
+    if (!menu || menu.hidden === !open) return;
+    menu.hidden = !open;
+    more.setAttribute('aria-expanded', String(open));
+    if (open) menu.querySelector('button').focus();
+  }
+
+  // Le site ne doit pas croire à un clic sur son lecteur.
+  function stop(event) {
     event.preventDefault();
-    event.stopPropagation(); // le site ne doit pas croire à un clic sur son lecteur
+    event.stopPropagation();
+  }
+
+  async function grab(event, preset) {
+    stop(event);
+    toggleMenu(false);
     if (busy || !current) return;
     busy = true;
     setLabel('Envoi…');
@@ -148,6 +226,7 @@
         pageUrl: location.href,
         src: current.currentSrc || current.src,
         title: document.title,
+        preset,
       });
       if (!reply?.ok) throw new Error(reply?.error ?? 'pas de réponse');
       setLabel('Envoyé à PDM ✓', 'ok');
@@ -158,13 +237,13 @@
     }
     setTimeout(() => {
       busy = false;
-      setLabel('Télécharger cette vidéo');
+      setLabel(LABEL);
     }, 3000);
   }
 
   function setLabel(text, state = '') {
-    button.querySelector('span').textContent = text;
-    button.dataset.state = state;
+    main.querySelector('span').textContent = text;
+    bar.dataset.state = state;
   }
 
   // Réglage « bouton vidéo » de l'extension.

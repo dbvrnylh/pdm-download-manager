@@ -4,7 +4,7 @@ import { detectMedia, totalSize } from '../extension/lib/media.js';
 import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
-import { isStreamUrl, directFilename, videoJob } from '../extension/lib/jobs.js';
+import { PRESETS, isStreamUrl, directFilename, videoJob } from '../extension/lib/jobs.js';
 import { MAX_LINKS, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
 import { addMedia, getMedia } from '../extension/lib/store.js';
@@ -218,4 +218,10 @@ test('store: seul le maître reste, quel que soit l’ordre d’arrivée des pis
   await addMedia(7, hls('https://autre.site/live/index.m3u8'));
   assert.deepEqual((await getMedia(7)).map((m) => m.url), [MASTER_URL, 'https://autre.site/live/index.m3u8']);
   delete globalThis.chrome;
+});
+
+test('jobs: les qualités, et la qualité par défaut laissée au moteur', async () => {
+  assert.deepEqual(PRESETS.map((p) => p.id), ['best', '1080', '720', '480', 'audio']);
+  assert.equal('preset' in JSON.parse(JSON.stringify(await videoJob('https://x.com/v'))), false);
+  assert.equal((await videoJob('https://x.com/v', { preset: '480' })).preset, '480');
 });

@@ -28,10 +28,11 @@ PRESETS = {
     "best": ("bv*+ba/b", "b"),
     "1080": ("bv*[height<=1080]+ba/b[height<=1080]/b", "b[height<=1080]/b"),
     "720": ("bv*[height<=720]+ba/b[height<=720]/b", "b[height<=720]/b"),
+    "480": ("bv*[height<=480]+ba/b[height<=480]/b", "b[height<=480]/b"),
     "audio": ("ba/b", "ba/b"),
 }
 # La vidéo seule, quand on choisit soi-même les pistes audio à lui ajouter.
-VIDEO_ONLY = {"best": "bv", "1080": "bv[height<=1080]", "720": "bv[height<=720]"}
+VIDEO_ONLY = {"best": "bv", "1080": "bv[height<=1080]", "720": "bv[height<=720]", "480": "bv[height<=480]"}
 SORT = "res,ext:mp4:m4a"  # à qualité égale, MP4/M4A : le fichier se lit partout
 ANALYSE_TIMEOUT = 120  # s
 
@@ -323,12 +324,17 @@ class YtdlpDownload:
         directory = base / folder if folder else base
         directory.mkdir(parents=True, exist_ok=True)
 
+        # La résolution obtenue dans le nom (« Titre [720p].mp4 ») : sinon deux
+        # qualités de la même vidéo portent le même nom, et yt-dlp, trouvant le
+        # fichier, croit le travail déjà fait. Rien quand la hauteur est inconnue,
+        # ni pour l'audio seul. (Des crochets : une « ) » fermerait le champ %(…).)
+        suffix = "" if audio_only else "%(height& [{}p]|)s"
         if job.title:
             # Flux HLS/DASH : yt-dlp l'appellerait « master » ; le titre de la page est meilleur.
             name = sanitize_filename(job.title).replace("%", "%%")
-            template = f"{name}.%(ext)s"
+            template = f"{name}{suffix}.%(ext)s"
         else:
-            template = "%(title).180B.%(ext)s"
+            template = f"%(title).170B{suffix}.%(ext)s"
 
         with_ffmpeg, without_ffmpeg = PRESETS.get(job.preset or "best", PRESETS["best"])
         selector = with_ffmpeg if tools.ffmpeg else without_ffmpeg
