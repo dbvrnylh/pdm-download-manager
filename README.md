@@ -198,6 +198,12 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official
 yt-dlp build — which bundles the JavaScript challenge solver YouTube now requires — and updates it daily.
 
+**Streams split into tracks.** Many sites (Arte…) serve an HLS *master playlist*: a menu listing video
+variants without sound (432p, 1080p…) and separate audio tracks (one per language). The player then loads the
+playlist of each track it plays. Handing one of those tracks to yt-dlp would give a video without sound, or sound
+without a picture. The extension cannot see response bodies, so it reads each new `.m3u8` once: a master keeps the
+list of its tracks, and those tracks are neither listed in the popup nor used by the video button.
+
 **Subtitles.** When a video page offers subtitles in your languages (French, Spanish and English by default),
 they are embedded into the video file as tracks you pick in your player (VLC, mpv…); no `.vtt` file is left
 next to it. Only human-made subtitles are taken: YouTube also offers machine translations into about a hundred

@@ -199,6 +199,13 @@ vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par li
 l'exécutable officiel de yt-dlp — qui embarque le solveur JavaScript qu'exige désormais YouTube — et la met à
 jour chaque jour.
 
+**Flux découpés en pistes.** Beaucoup de sites (Arte…) servent un *manifeste maître* HLS : un menu qui liste des
+variantes vidéo sans son (432p, 1080p…) et des pistes audio séparées (une par langue). Le lecteur charge ensuite la
+playlist de chaque piste qu'il joue. Donner l'une de ces pistes à yt-dlp donnerait une vidéo sans son, ou du son
+sans image. L'extension ne voit pas le contenu des réponses : elle relit donc chaque nouvelle `.m3u8` une fois. Un
+maître garde la liste de ses pistes, et ces pistes ne sont ni proposées dans la popup ni utilisées par le bouton
+vidéo.
+
 **Sous-titres.** Quand une page vidéo propose des sous-titres dans tes langues (français, espagnol et anglais par
 défaut), ils sont intégrés au fichier vidéo, en pistes à choisir dans ton lecteur (VLC, mpv…) ; aucun `.vtt` ne
 reste à côté. Seuls les sous-titres écrits par des humains sont pris : YouTube propose aussi des traductions

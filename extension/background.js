@@ -12,6 +12,7 @@
 import { categoryFor } from './lib/categories.js';
 import { EngineClient } from './lib/engine.js';
 import { basename } from './lib/filename.js';
+import { isKnownVariant, masterVariants } from './lib/hls.js';
 import { directFilename, httpJob, isStreamUrl, videoJob } from './lib/jobs.js';
 import { detectMedia } from './lib/media.js';
 import { getSettings } from './lib/settings.js';
@@ -21,6 +22,7 @@ const MANAGER_URL = chrome.runtime.getURL('manager/manager.html');
 const MENU_LINK = 'pdm-download';
 const MENU_VIDEO = 'pdm-page-video';
 const PROBE_TIMEOUT = 12000;
+const PLAYLIST_TIMEOUT = 8000;
 
 // ─── 1. Détection des médias ───────────────────────────────────────────────
 
@@ -34,13 +36,42 @@ chrome.webRequest.onHeadersReceived.addListener(
     // Le Referer envoyé par la page : certains serveurs refusent (403) une
     // requête sans lui. Le moteur le renverra.
     media.referer = details.initiator ? `${details.initiator}/` : null;
-    addMedia(details.tabId, media)
+    remember(details.tabId, media)
       .then((count) => updateBadge(details.tabId, count))
       .catch(console.error);
   },
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other'] },
   ['responseHeaders'],
 );
+
+// Une .m3u8 est relue avant d'être gardée : si c'est un manifeste maître, il
+// emporte la liste de ses pistes, qui ne seront pas proposées à part (une
+// piste seule, c'est une vidéo sans son ou du son sans image : voir lib/hls.js).
+async function remember(tabId, media) {
+  if (media.kind === 'hls') {
+    const stored = await getMedia(tabId);
+    // Déjà vue, ou piste d'un maître connu : inutile de la relire. Un direct
+    // redemande ses pistes toutes les quelques secondes.
+    if (!stored.some((m) => m.url === media.url) && !isKnownVariant(media.url, stored)) {
+      const text = await readPlaylist(media.url);
+      const variants = text && masterVariants(text, media.url);
+      if (variants) media.variants = variants;
+    }
+  }
+  return addMedia(tabId, media);
+}
+
+// Contenu d'une playlist, ou null si on ne peut pas la lire : elle est alors
+// gardée telle quelle, comme avant (mieux vaut une piste de trop qu'un flux perdu).
+// Cette requête vient de l'extension (tabId -1) : l'écouteur ci-dessus l'ignore.
+async function readPlaylist(url) {
+  try {
+    const response = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(PLAYLIST_TIMEOUT) });
+    return response.ok ? await response.text() : null;
+  } catch {
+    return null;
+  }
+}
 
 // Nouvelle page dans l'onglet : on oublie les médias de l'ancienne.
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, timeStamp }) => {

@@ -20,6 +20,8 @@ export default [
         HTMLVideoElement: 'readonly',
         Intl: 'readonly',
         URL: 'readonly',
+        fetch: 'readonly',
+        AbortSignal: 'readonly',
       },
     },
     rules: {

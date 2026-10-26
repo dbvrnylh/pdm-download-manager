@@ -5,6 +5,8 @@
 // avec lui. storage.session survit à ces arrêts (mais pas à la fermeture du
 // navigateur, ce qui convient : les médias d'hier n'intéressent personne).
 
+import { isKnownVariant, playlistKey } from './hls.js';
+
 const MAX_PER_TAB = 50;
 
 export const mediaKey = (tabId) => `media:${tabId}`;
@@ -28,18 +30,26 @@ export async function getMedia(tabId) {
 }
 
 // Ajoute un média (ou met à jour sa taille). Renvoie le nombre de médias de l'onglet.
+// Un manifeste HLS maître porte `variants` : ses pistes ne sont pas gardées
+// à côté de lui (voir lib/hls.js).
 export function addMedia(tabId, media) {
   return serialized(async () => {
-    const list = await getMedia(tabId);
+    let list = await getMedia(tabId);
     const known = list.find((m) => m.url === media.url);
     if (known) {
       // Un lecteur demande souvent la même vidéo morceau par morceau
       // (requêtes Range) : même URL, on garde la meilleure taille connue.
       if (!media.size || (known.size && known.size >= media.size)) return list.length;
       known.size = media.size;
+    } else if (isKnownVariant(media.url, list)) {
+      return list.length; // piste d'un maître déjà gardé : le maître suffit
     } else {
       if (list.length >= MAX_PER_TAB) list.shift();
       list.push(media);
+      if (media.variants) {
+        // Des pistes ont pu être détectées pendant qu'on relisait le maître.
+        list = list.filter((m) => m === media || !media.variants.includes(playlistKey(m.url)));
+      }
     }
     await chrome.storage.session.set({ [mediaKey(tabId)]: list });
     return list.length;

@@ -19,6 +19,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   again without them. New "Réglages" options: on/off and the list of languages. Needs ffmpeg.
 
 ### Fixed
+- Videos without sound (or sound without a picture) on sites that split HLS streams into tracks, such
+  as Arte: the video button took the last playlist the player loaded, which is a single track. Each new
+  `.m3u8` is now read once; a master playlist is kept with the list of its tracks, and those tracks are
+  no longer offered in the popup or used by the button.
 - Video downloads started right as the engine launched (auto-resume, `pdm-host add`) no longer fail
   with "yt-dlp n'est pas installé": they wait for the engine to finish looking for yt-dlp and ffmpeg.
 

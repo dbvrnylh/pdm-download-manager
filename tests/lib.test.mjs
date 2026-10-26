@@ -6,6 +6,8 @@ import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilena
 import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
 import { isStreamUrl, directFilename, videoJob } from '../extension/lib/jobs.js';
 import { MAX_LINKS, parseLinkList } from '../extension/lib/linklist.js';
+import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
+import { addMedia, getMedia } from '../extension/lib/store.js';
 
 const h = (obj) => Object.entries(obj).map(([name, value]) => ({ name, value }));
 const resp = (url, headers, statusCode = 200) => ({ url, statusCode, responseHeaders: h(headers) });
@@ -156,4 +158,64 @@ test('linklist: liste vide et limite', () => {
   assert.deepEqual(parseLinkList(''), { urls: [], invalid: [], duplicates: 0 });
   const many = Array.from({ length: MAX_LINKS + 1 }, (_, i) => `https://x.com/${i}.bin`).join('\n');
   assert.equal(parseLinkList(many).urls.length, MAX_LINKS + 1); // la limite est appliquée à l'import, pas à la lecture
+});
+
+// Même forme que le manifeste maître d'Arte : pistes audio séparées, variantes vidéo sans son.
+const MASTER = [
+  '#EXTM3U',
+  '#EXT-X-VERSION:7',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio_0",LANGUAGE="fr",NAME="français",DEFAULT=YES,URI="https://cdn.x.com/v/123_aud_VF-FRA.m3u8"',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio_0",LANGUAGE="it",NAME="italien (VO)",URI="audio/it.m3u8?tok=1"',
+  '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="fr",URI="subs/fr.m3u8"',
+  '#EXT-X-STREAM-INF:BANDWIDTH=1756840,CODECS="avc1.4D001E,mp4a.40.2",RESOLUTION=768x432,AUDIO="audio_0"',
+  'https://cdn.x.com/v/123_v432_crf_h264.m3u8',
+  '',
+  '#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,AUDIO="audio_0"',
+  'video/1080.m3u8?tok=1',
+  '#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=90000,URI="iframes.m3u8"',
+].join('\r\n');
+const MASTER_URL = 'https://manifest.x.com/api/Generate/abc/123.m3u8?sig=xyz';
+const TRACK = '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:6.000,\nseg1.mp4\n#EXT-X-ENDLIST\n';
+
+test('hls: un maître annonce ses pistes, adresses relatives résolues et paramètres ôtés', () => {
+  assert.deepEqual(masterVariants(MASTER, MASTER_URL), [
+    'https://cdn.x.com/v/123_aud_VF-FRA.m3u8',
+    'https://manifest.x.com/api/Generate/abc/audio/it.m3u8',
+    'https://manifest.x.com/api/Generate/abc/subs/fr.m3u8',
+    'https://cdn.x.com/v/123_v432_crf_h264.m3u8',
+    'https://manifest.x.com/api/Generate/abc/video/1080.m3u8',
+    'https://manifest.x.com/api/Generate/abc/iframes.m3u8',
+  ]);
+  // Une piste (#EXTINF) n'est pas un maître, même avec #EXT-X-MEDIA-SEQUENCE.
+  assert.equal(masterVariants(TRACK, 'https://cdn.x.com/v/123_v432_crf_h264.m3u8'), null);
+  assert.equal(playlistKey('https://cdn.x.com/a.m3u8?t=1#x'), 'https://cdn.x.com/a.m3u8');
+  const stored = [{ url: MASTER_URL, variants: masterVariants(MASTER, MASTER_URL) }];
+  assert.equal(isKnownVariant('https://manifest.x.com/api/Generate/abc/video/1080.m3u8?tok=2', stored), true);
+  assert.equal(isKnownVariant('https://cdn.x.com/autre/index.m3u8', stored), false);
+});
+
+test('store: seul le maître reste, quel que soit l’ordre d’arrivée des pistes', async () => {
+  const area = {};
+  globalThis.chrome = {
+    storage: {
+      session: {
+        get: async (key) => (key in area ? { [key]: structuredClone(area[key]) } : {}),
+        set: async (items) => Object.assign(area, structuredClone(items)),
+        remove: async (key) => delete area[key],
+      },
+    },
+  };
+  const hls = (url, extra = {}) => ({ url, kind: 'hls', detectedAt: 1, ...extra });
+  const master = hls(MASTER_URL, { variants: masterVariants(MASTER, MASTER_URL) });
+  // Une piste détectée pendant qu'on relisait le maître…
+  await addMedia(7, hls('https://cdn.x.com/v/123_v432_crf_h264.m3u8'));
+  // … puis le maître : elle disparaît.
+  await addMedia(7, master);
+  // Les pistes suivantes (changement de qualité, langue) ne sont plus gardées.
+  await addMedia(7, hls('https://cdn.x.com/v/123_aud_VF-FRA.m3u8'));
+  await addMedia(7, hls('https://manifest.x.com/api/Generate/abc/video/1080.m3u8?tok=1'));
+  // Une playlist simple sans maître (son et image dans la même piste) reste détectée.
+  await addMedia(7, hls('https://autre.site/live/index.m3u8'));
+  assert.deepEqual((await getMedia(7)).map((m) => m.url), [MASTER_URL, 'https://autre.site/live/index.m3u8']);
+  delete globalThis.chrome;
 });
