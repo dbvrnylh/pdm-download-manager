@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -23,7 +24,8 @@ os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
 from pdm_engine import httpdl, paths, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
-from pdm_engine.engine import Engine  # noqa: E402
+from pdm_engine.engine import Engine, in_window  # noqa: E402
+from pdm_engine.limiter import Limiter  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
 
 
@@ -202,6 +204,62 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(httpdl.target_dir(DefaultDir(base), "Videos"), base / "Videos")
         self.assertTrue((base / "Videos").is_dir())
 
+    # ─── Limite de vitesse et plage horaire ────────────────────────────────
+
+    def test_speed_limit_holds_for_one_file_and_is_shared_by_two(self):
+        mib = 1024 * 1024
+        self.config.update({"speedLimit": 3 * mib})
+        start = time.time()
+        job = self.wait(self.add("/range/mid.bin").id, {"completed"})  # 6 Mo : ~0,4 s sans limite
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+        self.assertTrue(1.5 < time.time() - start < 4, f"6 Mo à 3 Mo/s : {time.time() - start:.1f} s")
+        # Deux fichiers ensemble : la limite porte sur le total (6,9 Mo → ~2,3 s), pas sur chacun.
+        start = time.time()
+        jobs = [self.add("/range/mid.bin"), self.add("/range/small.zip")]
+        for job in jobs:
+            self.wait(job.id, {"completed"})
+        self.assertGreater(time.time() - start, 1.9)
+
+    def test_scheduled_download_waits_for_its_window_and_keeps_its_progress(self):
+        clock = {"now": self.at(14, 0)}
+        self.engine.now = lambda: clock["now"]
+        self.config.update({"speedLimit": 2 * 1024 * 1024})  # 24 Mo → ~12 s : le temps de fermer la plage en route
+        # 14 h, hors plage (23:00 → 06:00) : le programmé attend, un normal passe.
+        later = self.add("/range/big.bin", scheduled=True)
+        self.wait(self.add("/range/small.zip").id, {"completed"})
+        time.sleep(0.6)
+        self.assertEqual(self.engine.jobs[later.id].status, "queued")
+        # 23:30 : la plage s'ouvre, le tic d'horloge le lance.
+        clock["now"] = self.at(23, 30)
+        deadline = time.time() + 10
+        while self.engine.jobs[later.id].downloaded < 1024 * 1024 and time.time() < deadline:
+            time.sleep(0.1)
+        # 06:00 : elle se ferme ; il retourne en file en gardant ce qu'il a reçu.
+        clock["now"] = self.at(6, 0)
+        job = self.wait(later.id, {"queued"})
+        self.assertGreater(job.downloaded, 1024 * 1024)
+        self.assertTrue(job.segments)
+        # Plage suivante : il reprend là où il s'était arrêté et finit.
+        self.config.update({"speedLimit": 0})
+        fx.LOG.clear()
+        clock["now"] = self.at(23, 0)
+        job = self.wait(later.id, {"completed"})
+        self.assertEqual(sha(job.path), self.hashes["big.bin"])
+        ranges = [r for p, r, _ in fx.LOG if p == "/range/big.bin"]
+        self.assertNotIn("bytes=0-", ranges, "reprise, pas un nouveau départ")
+
+    def test_plus_tard_and_maintenant(self):
+        self.engine.now = lambda: self.at(14, 0)  # hors plage
+        job = self.add("/range/mid.bin", scheduled=True)
+        time.sleep(0.6)
+        self.assertEqual(self.engine.jobs[job.id].status, "queued")
+        self.engine.program(job.id, scheduled=False)  # « Maintenant »
+        self.assertFalse(self.wait(job.id, {"completed"}).scheduled)
+
+    @staticmethod
+    def at(hour, minute):
+        return time.struct_time((2026, 10, 26, hour, minute, 0, 0, 299, -1))
+
     def test_video_quality_defaults_to_the_setting(self):
         self.config.update({"videoQuality": "720"})
         url = "https://exemple.org/video"
@@ -379,6 +437,20 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(config.update({"categories": None})["categoriesDefault"])
         self.assertEqual(config.category_for("disque.dmg"), ("program", "Programmes"))
 
+    def test_speed_limit_and_window_are_checked(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        self.assertEqual((config["speedLimit"], config["windowStart"], config["windowEnd"]), (0, "23:00", "06:00"))
+        self.assertEqual(config.update({"speedLimit": 2.5 * 1024 * 1024})["speedLimit"], 2621440)
+        for bad in (1000, -1, "2M", True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.update({"speedLimit": bad})
+        for bad in ("24:00", "7:00", "midi", None):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.update({"windowStart": bad})
+        with self.assertRaises(ValueError) as caught:
+            config.update({"windowStart": "06:00"})
+        self.assertIn("début et fin sont identiques", str(caught.exception))
+
     def test_video_quality_is_one_of_the_presets(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
         self.assertEqual(config["videoQuality"], "best")
@@ -386,6 +458,42 @@ class ConfigTest(unittest.TestCase):
         for bad in ("4k", "", None, 720):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 config.update({"videoQuality": bad})
+
+
+class LimiterTest(unittest.TestCase):
+    def test_rate_is_respected_and_shared_between_readers(self):
+        limiter = Limiter(lambda: 1_000_000)
+
+        def read(total):
+            for _ in range(total // 65536):
+                time.sleep(limiter.take(65536))
+
+        start = time.monotonic()
+        readers = [threading.Thread(target=read, args=(1_000_000,)) for _ in range(3)]
+        for reader in readers:
+            reader.start()
+        for reader in readers:
+            reader.join()
+        elapsed = time.monotonic() - start
+        self.assertTrue(2.4 < elapsed < 3.5, f"3 Mo à 1 Mo/s en tout : {elapsed:.2f} s")
+        self.assertEqual(Limiter(lambda: 0).take(10 ** 9), 0.0)  # illimitée : jamais d'attente
+
+    def test_http_rate_leaves_room_for_ytdlp_but_never_zero(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        config.update({"speedLimit": 4 * 1024 * 1024})
+        engine = Engine.__new__(Engine)  # juste le calcul, sans démarrer de moteur
+        engine.config, engine.ytdlp_reserved = config, 3 * 1024 * 1024
+        self.assertEqual(engine._http_rate(), 1024 * 1024)
+        engine.ytdlp_reserved = 4 * 1024 * 1024
+        self.assertEqual(engine._http_rate(), 4 * 1024 * 1024 // 10)
+
+    def test_window_may_cross_midnight(self):
+        at = EngineTest.at
+        self.assertTrue(in_window(at(23, 30), "23:00", "06:00"))
+        self.assertTrue(in_window(at(3, 0), "23:00", "06:00"))
+        self.assertFalse(in_window(at(6, 0), "23:00", "06:00"))
+        self.assertFalse(in_window(at(14, 0), "23:00", "06:00"))
+        self.assertTrue(in_window(at(13, 0), "12:00", "14:00"))
 
 
 class UtilTest(unittest.TestCase):

@@ -109,6 +109,15 @@ pre {
   min-width: 0;
 }
 
+.field .unit {
+  align-self: center;
+  color: var(--muted);
+}
+
+.grid[hidden] {
+  display: none;
+}
+
 .field .warning {
   color: var(--danger);
 }

@@ -36,20 +36,23 @@ def _request(message):
     return _Connection().request(message)
 
 
-ADD_USAGE = "Usage : pdm-host add [--video] [--quality best|1080|720|480|audio] (ADRESSE | --file liens.txt)"
+ADD_USAGE = ("Usage : pdm-host add [--video] [--quality best|1080|720|480|audio] [--later] "
+             "(ADRESSE | --file liens.txt)")
 
 
 def _parse_add(args):
-    """Arguments de « add » → (adresse, liste, type, qualité). --file et --quality attendent une valeur."""
+    """Arguments de « add » → (adresse, liste, type, qualité, programmé). --file et --quality attendent une valeur."""
     from .config import QUALITIES
 
     url = source = quality = None
-    video = False
+    video = later = False
     rest = list(args)
     while rest:
         arg = rest.pop(0)
         if arg == "--video":
             video = True
+        elif arg == "--later":
+            later = True  # attendre la plage horaire des réglages
         elif arg in ("--file", "--quality"):
             if not rest:
                 sys.exit(f"{arg} attend une valeur. {ADD_USAGE}")
@@ -68,11 +71,11 @@ def _parse_add(args):
         if quality not in QUALITIES:
             sys.exit(f"Qualité inconnue : {quality} (choix : {', '.join(QUALITIES)})")
         video = True  # une qualité ne concerne que les vidéos
-    return url, source, "ytdlp" if video else "http", quality
+    return url, source, "ytdlp" if video else "http", quality, later
 
 
-def _add_list(source, kind, quality):
-    """pdm-host add --file LISTE [--video] [--quality Q] : un lien par ligne, « - » pour l'entrée standard."""
+def _add_list(source, kind, quality, later):
+    """pdm-host add --file LISTE [--video] [--quality Q] [--later] : un lien par ligne, « - » pour l'entrée standard."""
     from .util import MAX_LINKS, parse_link_list
 
     try:
@@ -95,7 +98,8 @@ def _add_list(source, kind, quality):
 
     refused = 0
     for url in fresh:  # dans l'ordre du fichier : c'est l'ordre de la file d'attente
-        reply = engine.request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "list"}})
+        reply = engine.request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "list",
+                                                       "scheduled": later}})
         if not reply["ok"]:
             refused += 1
             print(f"Refusé : {url} ({reply['error']})")
@@ -135,11 +139,12 @@ def main(args):
         for job in reply["jobs"][-10:]:
             print(f"  [{job['status']:<11}] {job['filename'] or job['url']}")
     elif command == "add":
-        url, source, kind, quality = _parse_add(args[1:])
+        url, source, kind, quality, later = _parse_add(args[1:])
         if source is not None:
-            _add_list(source, kind, quality)
+            _add_list(source, kind, quality, later)
             return
-        reply = _request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "cli"}})
+        reply = _request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "cli",
+                                                 "scheduled": later}})
         print("Ajouté." if reply["ok"] else f"Erreur : {reply['error']}")
     elif command == "stop":
         from .host import connect

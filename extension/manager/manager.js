@@ -15,6 +15,7 @@ import { basename, filenameFromUrl } from '../lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../lib/format.js';
 import { PRESETS, httpJob, videoJob } from '../lib/jobs.js';
 import { MAX_LINKS, parseLinkList } from '../lib/linklist.js';
+import { inWindow } from '../lib/schedule.js';
 import { markBypass } from '../lib/store.js';
 
 const REFRESH_MS = 1000;
@@ -88,6 +89,7 @@ const importText = document.getElementById('import-text');
 const importFile = document.getElementById('import-file');
 const importKind = document.getElementById('import-kind');
 const importQuality = document.getElementById('import-quality');
+const importLater = document.getElementById('import-later');
 const importPreview = document.getElementById('import-preview');
 const importSubmit = document.getElementById('import-submit');
 const importClose = document.getElementById('import-close');
@@ -114,9 +116,16 @@ function fromEngine(job) {
     connections: job.connections,
     stage: job.stage,
     resumable: job.resumable,
+    scheduled: job.scheduled,
     error: job.error,
     startedAt: job.createdAt * 1000,
   };
+}
+
+// La plage horaire des téléchargements programmés est-elle ouverte ?
+function windowOpen() {
+  const config = engine.info?.config;
+  return Boolean(config?.windowStart) && inWindow(new Date(), config.windowStart, config.windowEnd);
 }
 
 // Les catégories des réglages du moteur, s'il répond (sinon celles d'origine).
@@ -250,7 +259,7 @@ function updateRow(row, entry) {
   row.meta.textContent = describe(entry);
 
   // Les boutons ne dépendent que de l'état : on ne les recrée que s'il change.
-  const key = `${entry.status}:${entry.canResume}`;
+  const key = `${entry.status}:${entry.canResume}:${entry.scheduled}`;
   if (row.actionsKey !== key) {
     row.actions.replaceChildren(...actionsFor(entry));
     row.actionsKey = key;
@@ -287,10 +296,14 @@ function describe(entry) {
   const done = formatBytes(entry.done);
   const total = entry.total ? formatBytes(entry.total) : 'taille inconnue';
   switch (entry.status) {
-    case 'queued':
-      return entry.total ? `En file d’attente · ${total}` : 'En file d’attente';
+    case 'queued': {
+      if (entry.scheduled && !windowOpen()) return `Programmé · démarre à ${engine.info.config.windowStart}`;
+      const queued = entry.scheduled ? 'Programmé · en file d’attente' : 'En file d’attente';
+      return entry.total ? `${queued} · ${total}` : queued;
+    }
     case 'active': {
       const parts = [];
+      if (entry.scheduled && engine.info) parts.push(`Programmé jusqu’à ${engine.info.config.windowEnd}`);
       if (entry.stage) parts.push(entry.stage);
       if (entry.kind === 'ytdlp' && !entry.done) return parts.join(' · ') || 'Préparation…';
       parts.push(`${done} / ${total}`);
@@ -338,12 +351,18 @@ function engineActions(entry) {
   const send = (type, extra = {}) => () => engine.request({ type, id, ...extra });
   const cancel = button('Annuler', send('cancel'));
   const remove = button('Retirer', send('remove'));
+  // « Plus tard » : n'avancer que pendant la plage horaire des réglages.
+  const later = 'windowStart' in (engine.info?.config ?? {})
+    ? [entry.scheduled
+        ? button('Maintenant', send('program', { scheduled: false }))
+        : button('Plus tard', send('program', { scheduled: true }))]
+    : [];
   switch (entry.status) {
     case 'queued':
     case 'active':
-      return [button('Pause', send('pause')), cancel];
+      return [button('Pause', send('pause')), ...later, cancel];
     case 'paused':
-      return [button('Reprendre', send('resume'), 'primary'), cancel];
+      return [button('Reprendre', send('resume'), 'primary'), ...later, cancel];
     case 'complete':
       return [button('Ouvrir', send('open'), 'primary'), button('Dossier', send('show')), remove];
     case 'canceled':
@@ -449,6 +468,7 @@ function renderSummary(entries) {
   }
   parts.push(`${entries.length} téléchargement${entries.length > 1 ? 's' : ''}`);
   if (engineState === 'ok') parts.push(`moteur actif (${engine.info.config.connections} connexions par fichier)`);
+  if (engineState === 'ok' && engine.info.config.speedLimit) parts.push(`limité à ${formatSpeed(engine.info.config.speedLimit)}`);
   else if (engineState === 'missing') parts.push('moteur absent');
   summaryEl.textContent = parts.join(' · ');
 }
@@ -652,6 +672,7 @@ async function importLinks() {
         importKind.value === 'video'
           ? await videoJob(url, { preset: importQuality.value })
           : await httpJob(url, { source: 'list' });
+      if (importLater.checked) job.scheduled = true; // n'avancera que pendant la plage horaire
       await engine.request({ type: 'add', job });
     } catch (err) {
       refused.push({ url, error: err.message });
@@ -694,6 +715,9 @@ document.getElementById('open-import').addEventListener('click', () => {
   if (engine.info) document.getElementById('import-parallel').textContent = String(engine.info.config.maxParallel);
   importQuality.value = engine.info?.config.videoQuality ?? 'best';
   updateImportQuality();
+  const config = engine.info?.config ?? {};
+  importLater.closest('label').hidden = !('windowStart' in config); // moteur plus ancien
+  document.getElementById('import-window').textContent = `${config.windowStart} → ${config.windowEnd}`;
   renderImportPreview();
   importDialog.showModal();
 });

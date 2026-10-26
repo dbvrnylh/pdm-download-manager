@@ -224,9 +224,10 @@ class _DiskError(DownloadError):
 class HttpDownload:
     """Exécute un téléchargement HTTP. Une instance par démarrage (ou reprise)."""
 
-    def __init__(self, job, config, reserve, first=None):
+    def __init__(self, job, config, reserve, first=None, limiter=None):
         self.job = job
         self.config = config
+        self.limiter = limiter  # limite de vitesse globale (limiter.Limiter), partagée
         self.reserve = reserve  # fonction du moteur : choisit et réserve un chemin libre
         self.first = first  # ProbeResult déjà ouvert (sonde faite à l'ajout)
         self.lock = threading.Lock()
@@ -488,6 +489,10 @@ class HttpDownload:
                 self.downloaded += limit
                 if seg.end is not None and seg.pos > seg.end:
                     return True
+            # Limite de vitesse : attendre son tour avant de lire la suite. Hors du
+            # verrou (les autres connexions continuent), interrompu par une pause.
+            if self.limiter:
+                self.stop_event.wait(self.limiter.take(limit))
 
     def _open_range(self, seg):
         job = self.job

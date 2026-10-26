@@ -200,7 +200,10 @@ class BridgeTest(unittest.TestCase):
         links.write_text(self.base + "/page/b\n")
         self.assertIn("1 ajouté(s)", cli("--file", str(links), "--video", "--quality", "720").stdout)
         self.assertEqual(cli(self.base + "/page/c", "--video").returncode, 0)  # qualité des réglages
-        jobs = {j["url"].rsplit("/", 1)[1]: j for j in chrome.request({"type": "list"})["jobs"]}
+        self.assertEqual(cli("--later", self.base + "/fichier-de-nuit.bin").returncode, 0)
+        night = [j for j in chrome.request({"type": "list"})["jobs"] if j["url"].endswith("/fichier-de-nuit.bin")]
+        self.assertEqual([(j["kind"], j["scheduled"]) for j in night], [("http", True)])
+        jobs = {j["url"].rsplit("/", 1)[1]: j for j in chrome.request({"type": "list"})["jobs"] if "/page/" in j["url"]}
         self.assertEqual({name: (j["kind"], j["preset"]) for name, j in jobs.items()},
                          {"a": ("ytdlp", "480"), "b": ("ytdlp", "720"), "c": ("ytdlp", "best")})
 

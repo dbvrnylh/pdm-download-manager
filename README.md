@@ -86,6 +86,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Grab a specific media file | PDM icon → **Médias détectés**, or right-click a link → **Télécharger avec PDM**. |
 | Add a URL by hand | Manager → paste the address → **Fichier** or **Vidéo de la page** → **Ajouter**. |
 | Download a list of links | Manager → **Importer une liste…**, or `pdm-host add --file links.txt`. See [below](#downloading-a-list-of-links). |
+| Download later (at night) | Manager → **Plus tard** on a download, or the **Plus tard** box when importing a list, or `pdm-host add --later URL`. It only progresses during the time window of **Réglages**; the rest starts right away. |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality). |
 
 If a heavily protected site refuses the engine, **Avec Chrome** retries the download in the browser,
@@ -232,6 +233,8 @@ Everything lives in the extension's **Réglages** page:
 | Download folder | your XDG Downloads folder | Detected with `xdg-user-dir`. **Choisir…** opens your desktop's folder picker (zenity or kdialog), or type a path (`~/Documents` works). Category folders are created inside it. Before saving, PDM creates the last folder level if needed and writes a test file: a folder you can't write to is refused with the reason, and the previous one is kept. |
 | Video quality | best | Best, 1080p, 720p, 480p or audio only: the highest picture height, or the best below it. Used whenever no quality is picked (button, manager, lists, terminal). File names carry the resolution obtained (`Title [720p].mp4`), so each quality gets its own file. |
 | Connections per file | 8 | 1–32. More only helps when a server throttles each connection. |
+| Speed limit | none | For PDM as a whole, all downloads together, so a big download doesn't saturate the home connection. Files share one token bucket; each yt-dlp video gets a fixed share of it when it starts (an approximation: a new limit applies to videos from their next start). |
+| Time window | 23:00 → 06:00 | When downloads marked **Plus tard** progress; it may cross midnight. When it closes, an unfinished one goes back to the queue and resumes from what it received at the next window. The computer must stay on (the engine stays up by itself while downloads are waiting). |
 | Simultaneous downloads | 3 | 1–10; the rest waits in the queue. |
 | Sort by category | on | `Videos/`, `Musique/`, `Archives/`… (ASCII folder names on purpose). |
 | Categories | IDM-like lists | Each category's **extensions** and **folder name** are edited in **Réglages → Catégories**; whatever matches none goes to **Générique** (`Generique/`). A file is sorted by its extension, else by the type the server announces. An extension can only belong to one category, and folder names stay in ASCII (Chrome silently refuses an accented path when the system locale isn't UTF-8). Already downloaded files don't move. |

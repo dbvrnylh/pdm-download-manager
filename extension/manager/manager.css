@@ -317,6 +317,17 @@ code {
   margin-top: 8px;
 }
 
+.import-later {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.import-later[hidden] {
+  display: none;
+}
+
 .import-preview {
   min-height: 20px;
   margin-top: 12px;

@@ -160,6 +160,7 @@ class YtdlpDownload:
         self.streams_done = 0
         self.media_started = False  # avant : la progression est celle des sous-titres
         self.with_subtitles = True  # passe à False si les sous-titres font échouer yt-dlp
+        self.limit_rate = None  # part de la limite de vitesse donnée par le moteur (octets/s)
         self.audio_ids = None  # pistes audio choisies par l'analyse (identifiants de format)
         self.audio_langs = []  # leur langue en ISO 639-2 (None si inconnue), dans le même ordre
         self.info_path = None  # analyse de la page, réutilisée par le téléchargement
@@ -190,7 +191,7 @@ class YtdlpDownload:
                 "stage": self.stage,
                 # Fichier classique (YouTube…) : une connexion, déjà à pleine vitesse.
                 # Flux en fragments (HLS/DASH) : --concurrent-fragments en parallèle.
-                "connections": min(self.config["connections"], 16) if self.fragmented else 1,
+                "connections": min(self.config["connections"], 16) if self.fragmented and not self.limit_rate else 1,
             }
 
     def cleanup(self):
@@ -381,9 +382,12 @@ class YtdlpDownload:
             "-P", str(directory),
             "-P", f"temp:{self._work_dir(base)}",
             "-o", template,
-            "--concurrent-fragments", str(min(self.config["connections"], 16)),
+            # Vitesse limitée : un fragment à la fois, sinon chacun aurait sa propre limite.
+            "--concurrent-fragments", "1" if self.limit_rate else str(min(self.config["connections"], 16)),
             "-f", selector,
         ]
+        if self.limit_rate:
+            command += ["--limit-rate", str(self.limit_rate)]
         if self.audio_ids:
             command.append("--audio-multistreams")
             # yt-dlp n'étiquette pas la langue des pistes qu'il fusionne : sans

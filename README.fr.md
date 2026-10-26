@@ -84,6 +84,7 @@ Laisse le dépôt à sa place : le navigateur charge l'extension depuis ce dossi
 | Un média précis de la page | Icône PDM → **Médias détectés**, ou clic droit sur le lien → **Télécharger avec PDM**. |
 | Ajouter une adresse à la main | Gestionnaire → coller l'adresse → **Fichier** ou **Vidéo de la page** → **Ajouter**. |
 | Télécharger une liste de liens | Gestionnaire → **Importer une liste…**, ou `pdm-host add --file liens.txt`. Voir [ci-dessous](#télécharger-une-liste-de-liens). |
+| Télécharger plus tard (la nuit) | Gestionnaire → **Plus tard** sur un téléchargement, ou la case **Plus tard** à l'import d'une liste, ou `pdm-host add --later URL`. Il n'avance que pendant la plage horaire des **Réglages** ; le reste part tout de suite. |
 | Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp, `--quality 720` pour la qualité). |
 
 Si un site très protégé refuse le moteur, **Avec Chrome** relance le téléchargement dans le navigateur,
@@ -233,6 +234,8 @@ Tout se règle dans la page **Réglages** de l'extension :
 | Dossier de destination | ton dossier Téléchargements (XDG) | Détecté avec `xdg-user-dir`. **Choisir…** ouvre le sélecteur de dossier de ton bureau (zenity ou kdialog), ou tape un chemin (`~/Documents` marche). Les dossiers de catégorie sont créés dedans. Avant d'enregistrer, PDM crée le dernier niveau s'il manque et écrit un fichier d'essai : un dossier où tu ne peux pas écrire est refusé avec la raison, et l'ancien est gardé. |
 | Qualité des vidéos | meilleure | Meilleure, 1080p, 720p, 480p ou audio seul : la hauteur d'image maximale, ou la meilleure en dessous. Sert dès qu'aucune qualité n'est choisie (bouton, gestionnaire, listes, terminal). Le nom du fichier porte la résolution obtenue (`Titre [720p].mp4`) : chaque qualité a son propre fichier. |
 | Connexions par fichier | 8 | De 1 à 32. Monter n'aide que si le serveur limite chaque connexion. |
+| Vitesse maximale | aucune | Pour tout PDM, tous téléchargements confondus : un gros téléchargement ne sature plus la connexion de la maison. Les fichiers puisent dans un même seau de jetons ; chaque vidéo yt-dlp en reçoit une part fixe à son démarrage (approximatif : une nouvelle limite s'applique aux vidéos à leur prochain démarrage). |
+| Plage horaire | 23:00 → 06:00 | Quand avancent les téléchargements marqués **Plus tard** ; elle peut passer minuit. À sa fermeture, un téléchargement pas fini retourne en file et reprend, à la plage suivante, à partir de ce qu'il a reçu. Le PC doit rester allumé (le moteur, lui, reste actif tant que des téléchargements attendent). |
 | Téléchargements simultanés | 3 | De 1 à 10 ; les suivants attendent dans la file. |
 | Rangement par catégorie | activé | `Videos/`, `Musique/`, `Archives/`… (noms en ASCII exprès). |
 | Catégories | listes façon IDM | Les **extensions** et le **nom de dossier** de chaque catégorie se modifient dans **Réglages → Catégories** ; ce qui n'entre dans aucune va dans **Générique** (`Generique/`). Un fichier est rangé selon son extension, sinon selon le type annoncé par le serveur. Une extension n'appartient qu'à une catégorie, et les noms de dossier restent en ASCII (Chrome refuse en silence un chemin accentué quand la locale du système n'est pas UTF-8). Les fichiers déjà téléchargés ne bougent pas. |

@@ -8,6 +8,7 @@ import { PRESETS, isStreamUrl, directFilename, videoJob } from '../extension/lib
 import { MAX_LINKS, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
 import { addMedia, getMedia } from '../extension/lib/store.js';
+import { inWindow } from '../extension/lib/schedule.js';
 
 const h = (obj) => Object.entries(obj).map(([name, value]) => ({ name, value }));
 const resp = (url, headers, statusCode = 200) => ({ url, statusCode, responseHeaders: h(headers) });
@@ -238,4 +239,14 @@ test('categories: celles des réglages du moteur remplacent extensions et dossie
   assert.equal(categoryFor('data.bin', '', custom).folder, 'Divers');
   assert.equal(categoryFor('data.bin').folder, 'Generique');
   assert.equal(categoryFor('photo.png', '', custom).folder, 'Images'); // non modifiée : d'origine
+});
+
+test('schedule: plage horaire, y compris quand elle passe minuit', () => {
+  const at = (h, m) => new Date(2026, 9, 26, h, m);
+  assert.equal(inWindow(at(23, 30), '23:00', '06:00'), true);
+  assert.equal(inWindow(at(3, 0), '23:00', '06:00'), true);
+  assert.equal(inWindow(at(6, 0), '23:00', '06:00'), false); // la fin est exclue
+  assert.equal(inWindow(at(14, 0), '23:00', '06:00'), false);
+  assert.equal(inWindow(at(13, 0), '12:00', '14:00'), true);
+  assert.equal(inWindow(at(11, 59), '12:00', '14:00'), false);
 });

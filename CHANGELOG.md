@@ -47,6 +47,16 @@ versions follow [Semantic Versioning](https://semver.org/).
   edit is refused with the reason when an extension sits in two categories, two categories share a
   folder, or a folder name isn't plain ASCII; "Rétablir celles d'origine" restores the defaults.
 
+- Speed limit for PDM as a whole ("Réglages → Vitesse maximale"). The HTTP engine's connections, all
+  files together, draw from one shared token bucket, refilled at the allowed rate; reading slower
+  really slows the network (TCP shrinks its window), as with curl --limit-rate. A yt-dlp video runs
+  in its own process and gets a fixed share at start, with one fragment at a time, taken out of the
+  bucket so the total stays under the limit.
+- Downloads "Plus tard": a download marked so (manager button, list import box, `pdm-host add
+  --later`) only progresses during the time window of "Réglages" (23:00 → 06:00 by default, may cross
+  midnight); everything else starts right away. When the window closes, an unfinished one goes back to
+  the queue and resumes from what it received at the next window. "Maintenant" undoes it.
+
 ### Changed
 - The catch-all category "Autres" is now called "Générique" (folder `Generique/`). Files already in
   `Autres/` stay there.

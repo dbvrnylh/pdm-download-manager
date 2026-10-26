@@ -22,6 +22,9 @@ DEFAULTS = {
     "subtitles": True,  # intégrer aux vidéos les sous-titres qui existent
     "audioTracks": True,  # garder aussi les pistes audio dans ces langues, en plus de l'originale
     "categories": None,  # [{id, folder, exts}] modifiées dans les réglages ; None : celles d'origine
+    "speedLimit": 0,  # octets/s pour tout PDM ; 0 : illimitée
+    "windowStart": "23:00",  # plage horaire des téléchargements programmés (peut passer minuit)
+    "windowEnd": "06:00",
 }
 
 LIMITS = {"connections": (1, 32), "maxParallel": (1, 10)}
@@ -33,6 +36,9 @@ CATEGORY_IDS = [c[0] for c in CATEGORIES] + [OTHER[0]]
 # accentué quand la locale n'est pas UTF-8), sans « / », ni point au début.
 FOLDER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,49}$")
 EXTENSION = re.compile(r"^[a-z0-9]{1,10}$")
+MIN_SPEED = 16 * 1024  # en dessous, les connexions expireraient plutôt que de ralentir
+MAX_SPEED = 10 * 1024 ** 3
+CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class Config:
@@ -107,12 +113,23 @@ class Config:
                 value = _languages(value)
             elif key == "categories":
                 value = _categories(value)
+            elif key == "speedLimit":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+                        value == 0 or MIN_SPEED <= value <= MAX_SPEED):
+                    raise ValueError("vitesse maximale : 0 (illimitée) ou au moins 16 Ko/s")
+                value = int(value)
+            elif key in ("windowStart", "windowEnd"):
+                if not isinstance(value, str) or not CLOCK.match(value):
+                    raise ValueError(f"heure « {value} » refusée (format HH:MM, par exemple 23:00)")
             elif key == "videoQuality":
                 if value not in QUALITIES:
                     raise ValueError(f"qualité inconnue : {value} (choix : {', '.join(QUALITIES)})")
             elif not isinstance(value, bool):
                 raise ValueError(f"{key} doit valoir true ou false")
             clean[key] = value
+        start = clean.get("windowStart", self["windowStart"])
+        if start == clean.get("windowEnd", self["windowEnd"]):
+            raise ValueError("la plage horaire doit durer : début et fin sont identiques")
         if clean.get("downloadDir"):
             # Avant d'enregistrer : un dossier refusé laisse l'ancien en place.
             clean["downloadDir"] = str(paths.check_download_dir(clean["downloadDir"]))

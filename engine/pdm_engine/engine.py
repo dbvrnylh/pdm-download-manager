@@ -19,7 +19,9 @@ from urllib.parse import quote
 
 from . import httpdl, paths
 from .config import QUALITIES
+from .config import MIN_SPEED
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload
+from .limiter import Limiter
 from .util import filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
 from .ytdlp import YtdlpDownload, cleanup_files
 
@@ -30,7 +32,7 @@ PERSISTED = {
     "userAgent": None, "source": "manual", "filename": None, "title": None, "path": None, "workDir": None,
     "category": "other", "mime": None, "preset": None, "status": "queued", "error": None,
     "size": None, "downloaded": 0, "resumable": False, "validator": None, "segments": [],
-    "createdAt": 0, "completedAt": None,
+    "createdAt": 0, "completedAt": None, "scheduled": False,
 }
 SECRET = {"cookies", "userAgent", "validator"}
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
@@ -76,6 +78,13 @@ class Engine:
         self.cancelled = set()  # annulés pendant leur sonde, avant même d'exister
         self.dirty = False
         self.last_save = 0.0
+        # Limite de vitesse : un seau pour tout le moteur HTTP, et une part fixe
+        # pour chaque yt-dlp (processus à part, qui ne peut pas y puiser).
+        self.limiter = Limiter(self._http_rate)
+        self.ytdlp_shares = {}  # id → part donnée (octets/s)
+        self.ytdlp_reserved = 0  # leur total, lu sans verrou par le seau
+        self.now = time.localtime  # horloge de la plage horaire (remplacée dans les tests)
+        self.window_open = None  # état de la plage au dernier coup d'œil
         self._load()
 
     # ─── Démarrage et persistance ──────────────────────────────────────────
@@ -89,8 +98,9 @@ class Engine:
         for fields in stored:
             job = Job(**fields)
             if job.status in ("downloading", "queued"):
-                # Interrompu par un arrêt : on reprend, ou on attend l'utilisateur.
-                job.status = "queued" if self.config["autoResume"] else "paused"
+                # Interrompu par un arrêt : on reprend, ou on attend l'utilisateur. Un
+                # programmé attend sa plage horaire : ce n'est pas une interruption.
+                job.status = "queued" if self.config["autoResume"] or job.scheduled else "paused"
             self.jobs[job.id] = job
 
     def start(self):
@@ -137,7 +147,7 @@ class Engine:
             source=spec.get("source") or "manual", mime=spec.get("mime"),
             filename=sanitize_filename(spec["filename"]) if spec.get("filename") else None,
             title=spec.get("title"), preset=preset, size=spec.get("size"),
-            createdAt=time.time(), status="queued",
+            createdAt=time.time(), status="queued", scheduled=bool(spec.get("scheduled")),
         )
         with self.lock:
             if job.id in self.jobs:
@@ -195,6 +205,28 @@ class Engine:
         self.schedule()
 
     retry = resume
+
+    def program(self, job_id, scheduled=True):
+        """Programme un téléchargement pour la plage horaire, ou le rend immédiat."""
+        with self.lock:
+            job = self._get(job_id)
+            if job.status == "completed":
+                raise ValueError("ce téléchargement est déjà terminé")
+            job.scheduled = bool(scheduled)
+            self.dirty = True
+            runner = self.runners.get(job_id)
+            stop = job.scheduled and runner is not None and not self.window_is_open()
+            requeue = job.scheduled and job.status in ("paused", "failed", "canceled")
+        if stop:
+            runner.stop("queued")  # il attendra la plage en gardant ce qui est reçu
+        if requeue:
+            self.resume(job_id)  # en file : il attendra la plage
+        else:
+            self._publish(job)
+            self.schedule()  # rendu immédiat : il démarre s'il y a de la place
+
+    def window_is_open(self):
+        return in_window(self.now(), self.config["windowStart"], self.config["windowEnd"])
 
     def cancel(self, job_id):
         with self.lock:
@@ -272,7 +304,10 @@ class Engine:
         started = []
         with self.lock:
             active = sum(1 for job in self.jobs.values() if job.status == "downloading")
-            waiting = sorted((j for j in self.jobs.values() if j.status == "queued"), key=lambda j: j.createdAt)
+            # Hors de la plage horaire, les programmés attendent ; les autres passent.
+            window = self.window_is_open()
+            waiting = sorted((j for j in self.jobs.values() if j.status == "queued" and (window or not j.scheduled)),
+                             key=lambda j: j.createdAt)
             for job in waiting:
                 if active >= self.config["maxParallel"]:
                     break
@@ -287,8 +322,17 @@ class Engine:
     def _start(self, job, first):
         if job.kind == "ytdlp":
             runner = YtdlpDownload(job, self.config, self.tools)
+            limit = self.config["speedLimit"]
+            if limit:
+                # Sa part : la limite divisée par les téléchargements actifs (lui compris),
+                # retirée du seau du moteur HTTP. Approximatif, mais le total ne dépasse pas.
+                active = 1 + sum(1 for j in self.jobs.values() if j.status == "downloading")
+                runner.limit_rate = max(limit // active, MIN_SPEED)
+                self.ytdlp_shares[job.id] = runner.limit_rate
+                self.ytdlp_reserved += runner.limit_rate
         else:
-            runner = HttpDownload(job, self.config, lambda d, n: self._reserve(job.id, d, n), first)
+            runner = HttpDownload(job, self.config, lambda d, n: self._reserve(job.id, d, n), first,
+                                  limiter=self.limiter)
         self.runners[job.id] = runner
         job.status, job.error, job.sample, job.speed = "downloading", None, None, 0.0
         self.dirty = True
@@ -306,6 +350,7 @@ class Engine:
         progress = runner.progress()
         with self.lock:
             self.runners.pop(job.id, None)
+            self.ytdlp_reserved -= self.ytdlp_shares.pop(job.id, 0)
             for path, owner in list(self.reserved.items()):
                 if owner == job.id:
                     del self.reserved[path]
@@ -327,9 +372,34 @@ class Engine:
         self.save()
         self.schedule()
 
+    def _http_rate(self):
+        """Débit permis au moteur HTTP : la limite, moins les parts données aux yt-dlp."""
+        limit = self.config["speedLimit"]
+        if not limit:
+            return 0
+        # Jamais réduit à rien : un yt-dlp ne doit pas affamer les fichiers en cours.
+        return max(limit - self.ytdlp_reserved, limit // 10)
+
+    def _check_window(self):
+        """Ouverture de la plage : les programmés démarrent. Fermeture : ceux en cours
+        retournent en file, et reprendront à la plage suivante à partir de ce qui est reçu."""
+        is_open = self.window_is_open()
+        if is_open == self.window_open:
+            return
+        self.window_open = is_open
+        if is_open:
+            self.schedule()
+            return
+        with self.lock:
+            running = [runner for job_id, runner in self.runners.items()
+                       if job_id in self.jobs and self.jobs[job_id].scheduled]
+        for runner in running:
+            runner.stop("queued")
+
     def _ticker(self):
         while True:
             time.sleep(self.TICK)
+            self._check_window()
             updates = []
             with self.lock:
                 now = time.monotonic()
@@ -428,6 +498,13 @@ class Engine:
         else:
             title, body = "Échec du téléchargement", f"{name}\n{job.error}"
         _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
+
+
+def in_window(now, start, end):
+    """`now` (struct_time) est-il dans la plage `start` → `end` (« HH:MM ») ? Elle peut passer minuit."""
+    minutes = now.tm_hour * 60 + now.tm_min
+    first, last = (int(h) * 60 + int(m) for h, m in (start.split(":"), end.split(":")))
+    return first <= minutes < last if first < last else minutes >= first or minutes < last
 
 
 def _detached(command):

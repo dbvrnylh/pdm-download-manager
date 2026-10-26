@@ -90,6 +90,10 @@
             <option value="video">Vidéo de la page</option>
           </select>
           <select id="import-quality" aria-label="Qualité des vidéos de la liste" hidden></select>
+          <label class="import-later">
+            <input id="import-later" type="checkbox" /> Plus tard : seulement pendant la plage horaire
+            (<span id="import-window"></span>)
+          </label>
         </div>
         <div id="import-preview" class="import-preview" role="status"></div>
         <div class="import-actions">

@@ -166,6 +166,9 @@ class Daemon:
                     threading.Thread(target=self._add, args=(message, reply), daemon=True).start()
                 else:
                     self._add(message, reply)
+            elif kind == "program":
+                self.engine.program(message["id"], bool(message.get("scheduled", True)))
+                reply()
             elif kind in ("pause", "resume", "retry", "cancel"):
                 getattr(self.engine, kind)(message["id"])
                 reply()

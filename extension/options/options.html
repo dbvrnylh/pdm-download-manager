@@ -56,6 +56,25 @@
               <small>Les suivants attendent dans la file.</small>
             </label>
           </div>
+          <div class="grid" id="speed-and-window">
+            <label class="field">
+              <span>Vitesse maximale</span>
+              <span class="input-row">
+                <input id="speed-limit" type="number" min="0" step="0.1" placeholder="illimitée" />
+                <span class="unit">Mo/s</span>
+              </span>
+              <small>Pour tout PDM, tous téléchargements confondus. Vide : pas de limite.</small>
+            </label>
+            <label class="field">
+              <span>Plage horaire des téléchargements programmés</span>
+              <span class="input-row">
+                <input id="window-start" type="time" required />
+                <span class="unit">→</span>
+                <input id="window-end" type="time" required />
+              </span>
+              <small>Un téléchargement marqué « Plus tard » n'avance que pendant cette plage ; les autres partent tout de suite.</small>
+            </label>
+          </div>
           <label class="check"><input id="categorize" type="checkbox" /> Ranger par catégorie (Videos/, Musique/, Archives/…)</label>
           <label class="check"><input id="notify" type="checkbox" /> Notification du bureau à la fin de chaque téléchargement</label>
           <label class="check"><input id="auto-resume" type="checkbox" /> Reprendre automatiquement les téléchargements interrompus</label>

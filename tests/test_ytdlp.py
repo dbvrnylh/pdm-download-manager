@@ -334,6 +334,14 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(video[video.index("-P") + 1].endswith("/Films"))
         self.assertTrue(audio[audio.index("-P") + 1].endswith("/Sons"))
 
+    def test_speed_limit_share_and_one_fragment_at_a_time(self):
+        runner = self.runner("https://cdn.example/live/master.m3u8")
+        runner.limit_rate = 524288
+        command = runner._command()
+        self.assertEqual(command[command.index("--limit-rate") + 1], "524288")
+        # Sinon chaque fragment en parallèle aurait sa propre limite.
+        self.assertEqual(command[command.index("--concurrent-fragments") + 1], "1")
+
     def test_intermediate_files_go_to_a_hidden_work_dir(self):
         runner = self.runner("https://www.youtube.com/watch?v=abc")
         command = runner._command()

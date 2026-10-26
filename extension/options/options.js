@@ -25,11 +25,15 @@ const categoriesSaved = document.getElementById('categories-saved');
 const resetCategories = document.getElementById('reset-categories');
 const dirWarning = document.getElementById('download-dir-warning');
 const PICKER_TIMEOUT = 10 * 60 * 1000; // la fenêtre attend l'utilisateur
+const MIB = 1024 * 1024;
 
 const fields = {
   downloadDir: document.getElementById('download-dir'),
   connections: document.getElementById('connections'),
   maxParallel: document.getElementById('max-parallel'),
+  speedLimit: document.getElementById('speed-limit'),
+  windowStart: document.getElementById('window-start'),
+  windowEnd: document.getElementById('window-end'),
   categorize: document.getElementById('categorize'),
   notify: document.getElementById('notify'),
   autoResume: document.getElementById('auto-resume'),
@@ -92,6 +96,11 @@ function fillForm(config) {
   dirWarning.textContent = `Dossier introuvable (disque débranché ?) : les téléchargements échoueront tant qu’il manque.`;
   fields.connections.value = config.connections;
   fields.maxParallel.value = config.maxParallel;
+  // Limite et plage : cachées avec un moteur plus ancien, qui les refuserait.
+  document.getElementById('speed-and-window').hidden = !('speedLimit' in config);
+  fields.speedLimit.value = config.speedLimit ? Math.round((config.speedLimit / MIB) * 100) / 100 : '';
+  fields.windowStart.value = config.windowStart ?? '';
+  fields.windowEnd.value = config.windowEnd ?? '';
   fields.categorize.checked = config.categorize;
   fields.notify.checked = config.notify;
   fields.autoResume.checked = config.autoResume;
@@ -199,6 +208,11 @@ form.addEventListener('submit', async (event) => {
     autoResume: fields.autoResume.checked,
   };
   if (!fields.videoQuality.closest('label').hidden) changes.videoQuality = fields.videoQuality.value;
+  if (!document.getElementById('speed-and-window').hidden) {
+    changes.speedLimit = Math.round((Number(fields.speedLimit.value) || 0) * MIB);
+    changes.windowStart = fields.windowStart.value;
+    changes.windowEnd = fields.windowEnd.value;
+  }
   if (!fields.languages.closest('label').hidden) {
     changes.languages = fields.languages.value;
     changes.subtitles = fields.subtitles.checked;
