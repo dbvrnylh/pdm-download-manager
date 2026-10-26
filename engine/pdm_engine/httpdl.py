@@ -139,12 +139,19 @@ def probe(job, timeout=TIMEOUT):
     name = job.filename or filename_from_disposition(headers.get("Content-Disposition"))
     name = name or filename_from_url(resp.geturl()) or filename_from_url(job.url)
 
-    # Un téléchargement repris au navigateur qui renvoie une page HTML, c'est
-    # presque toujours une page de connexion ou un lien expiré : on laisse
-    # Chrome continuer avec sa propre session.
-    if job.source == "intercept" and mime == "text/html" and extension_of(name) not in ("htm", "html"):
-        resp.close()
-        raise Rejected("le serveur renvoie une page web au lieu du fichier")
+    if mime == "text/html" and extension_of(name) not in ("htm", "html"):
+        # Un téléchargement repris au navigateur qui renvoie une page HTML, c'est
+        # presque toujours une page de connexion ou un lien expiré : on laisse
+        # Chrome continuer avec sa propre session.
+        if job.source == "intercept":
+            resp.close()
+            raise Rejected("le serveur renvoie une page web au lieu du fichier")
+        # Dans une liste importée en « Fichier », c'est le plus souvent une page
+        # vidéo (YouTube…) importée avec le mauvais type. Sans ce refus, la page
+        # serait enregistrée et affichée comme « Terminé ».
+        if job.source == "list":
+            resp.close()
+            raise Rejected("page web reçue au lieu d'un fichier : pour une vidéo, choisis « Vidéo de la page »")
 
     size, resumable = None, False
     if resp.status == 206:

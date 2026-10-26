@@ -147,7 +147,8 @@ Good to know:
 - Importing the same list again only adds the new links: those already in the manager are skipped, even failed
   ones (use **Réessayer**). To download a finished file again, **remove** it from the manager first.
 - The type (**Fichier** or **Vidéo de la page**) applies to the whole list. To mix direct files and YouTube
-  pages, import twice.
+  pages, import twice. A video page imported as **Fichier** fails with "page web reçue au lieu d'un fichier"
+  (a web page instead of a file): nothing is saved, import it again as **Vidéo de la page**.
 - From the manager, PDM forwards each site's cookies (members-only files…). From the terminal it has no access
   to the browser: no cookies.
 - At most 200 links per import and 1 MB for the file: split a longer list. The manager only shows the last 300

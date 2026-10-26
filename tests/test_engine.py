@@ -172,6 +172,16 @@ class EngineTest(unittest.TestCase):
             self.add("/html", source="intercept", filename="rapport.pdf", probe=True)
         self.assertEqual(self.engine.jobs, {})
 
+    def test_list_html_page_fails_instead_of_being_saved(self):
+        # Un lien de page (vidéo YouTube…) importé en « Fichier » : échec clair, aucun fichier créé.
+        job = self.add("/html", source="list")
+        job = self.wait(job.id, {"failed"})
+        self.assertIn("Vidéo de la page", job.error)
+        self.assertIsNone(job.path)
+        # Ajoutée à la main, la même page reste téléchargeable : c'est un choix explicite.
+        manual = self.wait(self.add("/html", source="manual").id, {"completed"})
+        self.assertTrue(Path(manual.path).is_file())
+
     def test_probe_accepts_and_reuses_connection(self):
         fx.LOG.clear()
         job = self.add("/range/small.zip", source="intercept", filename="x.zip", probe=True)
