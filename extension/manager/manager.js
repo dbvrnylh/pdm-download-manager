@@ -14,12 +14,15 @@ import { EngineClient } from '../lib/engine.js';
 import { basename, filenameFromUrl } from '../lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../lib/format.js';
 import { httpJob, videoJob } from '../lib/jobs.js';
+import { MAX_LINKS, parseLinkList } from '../lib/linklist.js';
 import { markBypass } from '../lib/store.js';
 
 const REFRESH_MS = 1000;
 const SAMPLE_MS = 500;
 const HISTORY_LIMIT = 200;
 const RECONNECT_MS = 5000;
+const MAX_LIST_BYTES = 1024 * 1024; // une liste de liens, pas un fichier quelconque
+const MAX_SHOWN_PROBLEMS = 5;
 
 // Codes d'erreur de chrome.downloads, en clair.
 const CHROME_ERRORS = {
@@ -80,6 +83,14 @@ const errorEl = document.getElementById('error');
 const summaryEl = document.getElementById('summary');
 const bannerEl = document.getElementById('engine-banner');
 const addKind = document.getElementById('add-kind');
+const importDialog = document.getElementById('import-dialog');
+const importText = document.getElementById('import-text');
+const importFile = document.getElementById('import-file');
+const importKind = document.getElementById('import-kind');
+const importPreview = document.getElementById('import-preview');
+const importSubmit = document.getElementById('import-submit');
+const importClose = document.getElementById('import-close');
+let importing = false;
 
 // ─── Modèle : de chaque source vers une « entrée » commune ─────────────────
 
@@ -468,8 +479,11 @@ function setEngineState(state, message = '') {
     state === 'missing'
       ? `${message}. En attendant, les téléchargements passent par Chrome (une seule connexion, pas de vidéos en streaming).`
       : '';
-  addKind.querySelector('[value="video"]').disabled = !(state === 'ok' && engine.info?.tools.ytdlp);
-  if (addKind.selectedOptions[0]?.disabled) addKind.value = 'file';
+  for (const select of [addKind, importKind]) {
+    select.querySelector('[value="video"]').disabled = !(state === 'ok' && engine.info?.tools.ytdlp);
+    if (select.selectedOptions[0]?.disabled) select.value = 'file';
+  }
+  if (importDialog.open && !importing) renderImportPreview();
 }
 
 engine.on((event) => {
@@ -550,6 +564,139 @@ document.getElementById('clear-complete').addEventListener('click', async () => 
 });
 
 document.getElementById('open-options').addEventListener('click', () => chrome.runtime.openOptionsPage());
+
+// ─── Import d'une liste de liens ───────────────────────────────────────────
+
+function plural(n, one, many = `${one}s`) {
+  return `${n} ${n > 1 ? many : one}`;
+}
+
+function shorten(text, max = 60) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+// Ce qui sera vraiment ajouté : les liens valides de la zone de texte, moins
+// ceux que le moteur a déjà. Relancer la même liste n'ajoute que les nouveaux.
+function importPlan() {
+  const parsed = parseLinkList(importText.value);
+  const known = new Set([...engineJobs.values()].map((job) => job.url));
+  const fresh = parsed.urls.filter((url) => !known.has(url));
+  return { ...parsed, fresh, known: parsed.urls.length - fresh.length };
+}
+
+function importBlocker(plan) {
+  if (engineState !== 'ok') return 'Le moteur PDM est nécessaire : c’est lui qui gère la file d’attente.';
+  if (plan.fresh.length > MAX_LINKS) return `${MAX_LINKS} liens au maximum par import : découpe ta liste en plusieurs fois.`;
+  return '';
+}
+
+// L'aperçu dit ce que PDM a compris de la liste, avant tout ajout.
+// `before` : nœuds affichés en tête (bilan du dernier import).
+function renderImportPreview(before = []) {
+  const plan = importPlan();
+  const nodes = [...before];
+  if (!importText.value.trim()) {
+    nodes.push(el('p', 'hint', 'Colle tes liens ci-dessus, ou charge un fichier texte.'));
+  } else {
+    const parts = [plan.fresh.length ? plural(plan.fresh.length, 'lien à ajouter', 'liens à ajouter') : 'Aucun lien à ajouter'];
+    if (plan.known) parts.push(`${plan.known} déjà dans le gestionnaire`);
+    if (plan.duplicates) parts.push(plural(plan.duplicates, 'doublon ignoré', 'doublons ignorés'));
+    if (plan.invalid.length) parts.push(plural(plan.invalid.length, 'ligne refusée', 'lignes refusées'));
+    nodes.push(el('p', '', parts.join(' · ')));
+    if (plan.invalid.length) {
+      nodes.push(problemList(plan.invalid.map(({ line, text, reason }) => `Ligne ${line} : ${reason} (${shorten(text)})`)));
+    }
+  }
+  const blocker = importBlocker(plan);
+  if (blocker) nodes.push(el('p', 'blocked', blocker));
+  importPreview.replaceChildren(...nodes);
+  importSubmit.disabled = Boolean(blocker) || plan.fresh.length === 0;
+  importSubmit.textContent = plan.fresh.length ? `Ajouter ${plural(plan.fresh.length, 'téléchargement')}` : 'Ajouter';
+}
+
+function problemList(lines) {
+  const list = el('ul', 'problems');
+  for (const line of lines.slice(0, MAX_SHOWN_PROBLEMS)) list.append(el('li', '', line));
+  if (lines.length > MAX_SHOWN_PROBLEMS) list.append(el('li', '', `… et ${lines.length - MAX_SHOWN_PROBLEMS} autres`));
+  return list;
+}
+
+// Un ajout à la fois, dans l'ordre de la liste : le moteur date chaque
+// téléchargement à son arrivée et sert sa file dans cet ordre.
+async function importLinks() {
+  const plan = importPlan();
+  if (importing || importBlocker(plan) || !plan.fresh.length) return;
+  importing = true;
+  importSubmit.disabled = true;
+  importClose.disabled = true;
+  const refused = [];
+  for (const [index, url] of plan.fresh.entries()) {
+    if (!engine.connected) {
+      refused.push(...plan.fresh.slice(index).map((rest) => ({ url: rest, error: 'moteur déconnecté' })));
+      break;
+    }
+    importPreview.replaceChildren(el('p', '', `Ajout ${index + 1} / ${plan.fresh.length}…`));
+    try {
+      const job = importKind.value === 'video' ? await videoJob(url) : await httpJob(url, { source: 'list' });
+      await engine.request({ type: 'add', job });
+    } catch (err) {
+      refused.push({ url, error: err.message });
+    }
+  }
+  importing = false;
+  importClose.disabled = false;
+  if (!refused.length) {
+    importText.value = '';
+    importDialog.close();
+    return;
+  }
+  // Les liens refusés restent dans la zone : on peut les corriger et réessayer.
+  importText.value = refused.map((r) => r.url).join('\n');
+  renderImportPreview([
+    el('p', '', `${plural(plan.fresh.length - refused.length, 'téléchargement ajouté', 'téléchargements ajoutés')} à la file.`),
+    el(
+      'p',
+      'blocked',
+      `${plural(refused.length, 'lien refusé', 'liens refusés')} par le moteur. ${refused.length > 1 ? 'Ils restent' : 'Il reste'} ci-dessus pour réessayer :`,
+    ),
+    problemList(refused.map((r) => `${shorten(r.url)} : ${r.error}`)),
+  ]);
+}
+
+document.getElementById('open-import').addEventListener('click', () => {
+  if (engine.info) document.getElementById('import-parallel').textContent = String(engine.info.config.maxParallel);
+  renderImportPreview();
+  importDialog.showModal();
+});
+
+document.getElementById('import-pick').addEventListener('click', () => importFile.click());
+
+importFile.addEventListener('change', async () => {
+  const [file] = importFile.files;
+  importFile.value = ''; // pour pouvoir recharger le même fichier après l'avoir modifié
+  if (!file) return;
+  if (file.size > MAX_LIST_BYTES) {
+    renderImportPreview([el('p', 'blocked', `${file.name} pèse ${formatBytes(file.size)} : trop pour une liste de liens (1 Mo maximum).`)]);
+    return;
+  }
+  // Le fichier remplit la zone de texte : on voit et on peut corriger ce qui sera importé.
+  importText.value = await file.text();
+  renderImportPreview();
+});
+
+importText.addEventListener('input', () => renderImportPreview());
+
+document.getElementById('import-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  importLinks();
+});
+
+importClose.addEventListener('click', () => importDialog.close());
+
+// Échap ferme la fenêtre, sauf pendant un import : son bilan serait perdu.
+importDialog.addEventListener('cancel', (event) => {
+  if (importing) event.preventDefault();
+});
 
 createChips();
 refreshChrome();

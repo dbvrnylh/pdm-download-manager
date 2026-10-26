@@ -251,6 +251,33 @@ class UtilTest(unittest.TestCase):
         self.assertEqual(util.category_for("noext", "video/mp4"), ("video", "Videos"))
         self.assertEqual(util.category_for("data.bin"), ("other", "Autres"))
 
+    def test_parse_link_list(self):
+        # Mêmes cas que tests/lib.test.mjs : les deux implémentations doivent s'accorder.
+        text = "﻿# Cours\r\nhttps://x.com/b.pdf\n\n   https://x.com/a.pdf  \r# fin\n"
+        self.assertEqual(util.parse_link_list(text), (["https://x.com/b.pdf", "https://x.com/a.pdf"], [], 0))
+        text = "\n".join([
+            "https://x.com/a.zip",
+            "HTTP://x.com/b.zip",
+            "https://x.com/a.zip",
+            "www.x.com/c.zip",
+            "ftp://x.com/d.zip",
+            "https://x.com/e.zip https://x.com/f.zip",
+            "https://",
+            "mailto:moi@x.com",
+        ])
+        urls, invalid, duplicates = util.parse_link_list(text)
+        self.assertEqual(urls, ["https://x.com/a.zip", "HTTP://x.com/b.zip"])
+        self.assertEqual(duplicates, 1)
+        self.assertEqual([(number, reason) for number, _, reason in invalid], [
+            (4, "il manque https:// au début"),
+            (5, "seuls les liens http:// et https:// sont acceptés"),
+            (6, "un seul lien par ligne"),
+            (7, "adresse mal formée"),
+            (8, "seuls les liens http:// et https:// sont acceptés"),
+        ])
+        self.assertEqual(invalid[0][1], "www.x.com/c.zip")
+        self.assertEqual(util.parse_link_list(""), ([], [], 0))
+
     def test_plan_segments(self):
         segments = httpdl.plan_segments(10 * 1024 * 1024 + 3, 8)
         self.assertEqual(len(segments), 8)

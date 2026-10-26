@@ -83,6 +83,7 @@ Laisse le dépôt à sa place : le navigateur charge l'extension depuis ce dossi
 | Choisir la qualité | Icône PDM → **Vidéo de cette page** → qualité → **Télécharger**. |
 | Un média précis de la page | Icône PDM → **Médias détectés**, ou clic droit sur le lien → **Télécharger avec PDM**. |
 | Ajouter une adresse à la main | Gestionnaire → coller l'adresse → **Fichier** ou **Vidéo de la page** → **Ajouter**. |
+| Télécharger une liste de liens | Gestionnaire → **Importer une liste…**, ou `pdm-host add --file liens.txt`. Voir [ci-dessous](#télécharger-une-liste-de-liens). |
 | Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp). |
 
 Si un site très protégé refuse le moteur, **Avec Chrome** relance le téléchargement dans le navigateur,
@@ -107,6 +108,49 @@ avec sa propre session.
     </td>
   </tr>
 </table>
+
+### Télécharger une liste de liens
+
+Pour récupérer beaucoup de fichiers d'un coup, prépare un fichier texte avec **un lien par ligne** :
+
+```text
+# Cours de réseau (les lignes qui commencent par # sont ignorées)
+https://exemple.org/cours/chapitre-1.pdf
+https://exemple.org/cours/chapitre-2.pdf
+
+https://exemple.org/cours/annexes.zip
+```
+
+Puis, au choix :
+
+- **Gestionnaire** → **Importer une liste…** → **Charger un fichier .txt…** (ou colle les liens dans la zone) →
+  **Fichier** ou **Vidéo de la page** → **Ajouter N téléchargements**.
+- **Terminal** : `~/.local/share/pdm/app/pdm-host add --file liens.txt` (`--video` pour des pages vidéo,
+  `--file -` pour lire l'entrée standard).
+
+Ce qui se passe vraiment :
+
+1. **PDM lit la liste et te montre ce qu'il en a compris**, avant d'ajouter quoi que ce soit : les liens retenus,
+   les doublons, ceux déjà dans le gestionnaire, et chaque ligne refusée avec son numéro et la raison
+   (`il manque https:// au début`, `un seul lien par ligne`…).
+2. **Chaque lien devient un téléchargement en file d'attente**, dans l'ordre de la liste. Le moteur ne fait rien
+   de spécial : c'est comme si tu ajoutais les liens un par un à la main.
+3. **La file fait le reste.** PDM télécharge autant de fichiers à la fois que le réglage
+   **Téléchargements simultanés** (3 par défaut) ; dès qu'un fichier se termine, le suivant démarre.
+   Ça continue navigateur fermé, et ça reprend après un redémarrage.
+4. **Un lien qui échoue n'arrête pas les autres.** Il passe en *Échec* dans le gestionnaire, avec **Réessayer**.
+
+Bon à savoir :
+
+- Relancer la même liste n'ajoute que les nouveaux liens : ceux déjà dans le gestionnaire sont sautés, même en
+  échec (utilise **Réessayer**). Pour retélécharger un fichier terminé, **retire**-le d'abord du gestionnaire.
+- Le type (**Fichier** ou **Vidéo de la page**) vaut pour toute la liste. Pour mélanger fichiers directs et pages
+  YouTube, fais deux imports.
+- Depuis le gestionnaire, PDM transmet les cookies de chaque site (fichiers réservés aux membres…). Depuis le
+  terminal, il n'a pas accès au navigateur : pas de cookies.
+- 200 liens au maximum par import et 1 Mo pour le fichier : découpe une liste plus longue. Le gestionnaire
+  n'affiche que les 300 derniers téléchargements ; au-delà, le début de la liste sortirait de la vue.
+- Le moteur doit être installé : sans lui, pas de file d'attente, et Chrome lancerait tout en même temps.
 
 ## Fonctionnement
 

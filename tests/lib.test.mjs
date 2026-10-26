@@ -5,6 +5,7 @@ import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
 import { isStreamUrl, directFilename, videoJob } from '../extension/lib/jobs.js';
+import { MAX_LINKS, parseLinkList } from '../extension/lib/linklist.js';
 
 const h = (obj) => Object.entries(obj).map(([name, value]) => ({ name, value }));
 const resp = (url, headers, statusCode = 200) => ({ url, statusCode, responseHeaders: h(headers) });
@@ -117,4 +118,42 @@ test('jobs: une page vidéo part sans les en-têtes du navigateur', async () => 
   assert.equal(stream.title, 'Cours');
   assert.ok(stream.userAgent);
   delete globalThis.chrome;
+});
+
+test('linklist: un lien par ligne, dans l’ordre, commentaires et lignes vides ignorés', () => {
+  const text = '\uFEFF# Cours\r\nhttps://x.com/b.pdf\n\n   https://x.com/a.pdf  \r# fin\n';
+  assert.deepEqual(parseLinkList(text), { urls: ['https://x.com/b.pdf', 'https://x.com/a.pdf'], invalid: [], duplicates: 0 });
+});
+
+test('linklist: doublons comptés une fois, lignes refusées avec leur numéro et la raison', () => {
+  const text = [
+    'https://x.com/a.zip',
+    'HTTP://x.com/b.zip',
+    'https://x.com/a.zip',
+    'www.x.com/c.zip',
+    'ftp://x.com/d.zip',
+    'https://x.com/e.zip https://x.com/f.zip',
+    'https://',
+    'mailto:moi@x.com',
+  ].join('\n');
+  const { urls, invalid, duplicates } = parseLinkList(text);
+  assert.deepEqual(urls, ['https://x.com/a.zip', 'HTTP://x.com/b.zip']);
+  assert.equal(duplicates, 1);
+  assert.deepEqual(
+    invalid.map(({ line, reason }) => [line, reason]),
+    [
+      [4, 'il manque https:// au début'],
+      [5, 'seuls les liens http:// et https:// sont acceptés'],
+      [6, 'un seul lien par ligne'],
+      [7, 'adresse mal formée'],
+      [8, 'seuls les liens http:// et https:// sont acceptés'],
+    ],
+  );
+  assert.equal(invalid[0].text, 'www.x.com/c.zip');
+});
+
+test('linklist: liste vide et limite', () => {
+  assert.deepEqual(parseLinkList(''), { urls: [], invalid: [], duplicates: 0 });
+  const many = Array.from({ length: MAX_LINKS + 1 }, (_, i) => `https://x.com/${i}.bin`).join('\n');
+  assert.equal(parseLinkList(many).urls.length, MAX_LINKS + 1); // la limite est appliquée à l'import, pas à la lecture
 });

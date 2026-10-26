@@ -85,6 +85,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Pick the quality | PDM icon → **Vidéo de cette page** → choose a preset → **Télécharger**. |
 | Grab a specific media file | PDM icon → **Médias détectés**, or right-click a link → **Télécharger avec PDM**. |
 | Add a URL by hand | Manager → paste the address → **Fichier** or **Vidéo de la page** → **Ajouter**. |
+| Download a list of links | Manager → **Importer une liste…**, or `pdm-host add --file links.txt`. See [below](#downloading-a-list-of-links). |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp). |
 
 If a heavily protected site refuses the engine, **Avec Chrome** retries the download in the browser,
@@ -109,6 +110,49 @@ with the browser's own session.
     </td>
   </tr>
 </table>
+
+### Downloading a list of links
+
+To grab many files at once, prepare a text file with **one link per line**:
+
+```text
+# Networking course (lines starting with # are ignored)
+https://example.org/course/chapter-1.pdf
+https://example.org/course/chapter-2.pdf
+
+https://example.org/course/appendix.zip
+```
+
+Then either:
+
+- **Manager** → **Importer une liste…** → **Charger un fichier .txt…** (or paste the links into the box) →
+  **Fichier** or **Vidéo de la page** → **Ajouter N téléchargements**.
+- **Terminal**: `~/.local/share/pdm/app/pdm-host add --file links.txt` (`--video` for video pages,
+  `--file -` to read standard input).
+
+What actually happens:
+
+1. **PDM reads the list and shows you how it understood it** before adding anything: the links it kept,
+   duplicates, links already in the manager, and every rejected line with its number and the reason
+   (`il manque https:// au début`, `un seul lien par ligne`…).
+2. **Each link becomes a queued download**, in the order of the list. Nothing special happens in the engine:
+   it is the same as adding the links one by one by hand.
+3. **The queue does the rest.** PDM downloads as many files at once as the **Téléchargements simultanés**
+   setting (3 by default); as soon as one finishes, the next one starts. It keeps going with the browser
+   closed, and resumes after a reboot.
+4. **A failing link doesn't stop the others.** It shows up as failed in the manager, with **Réessayer**.
+
+Good to know:
+
+- Importing the same list again only adds the new links: those already in the manager are skipped, even failed
+  ones (use **Réessayer**). To download a finished file again, **remove** it from the manager first.
+- The type (**Fichier** or **Vidéo de la page**) applies to the whole list. To mix direct files and YouTube
+  pages, import twice.
+- From the manager, PDM forwards each site's cookies (members-only files…). From the terminal it has no access
+  to the browser: no cookies.
+- At most 200 links per import and 1 MB for the file: split a longer list. The manager only shows the last 300
+  downloads; beyond that, the start of the list would scroll out of view.
+- The engine must be installed: without it there is no queue, and Chrome would start everything at once.
 
 ## How it works
 

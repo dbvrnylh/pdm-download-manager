@@ -70,6 +70,8 @@ class BridgeTest(unittest.TestCase):
         cls.server = fx.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
         cls.hash = fx.make_file("bridge.bin", 20 * 1024 * 1024)
+        for name in ("list-a.bin", "list-b.bin"):
+            fx.make_file(name, 256 * 1024)
 
     def setUp(self):
         root = Path(tempfile.mkdtemp(prefix="pdm-bridge-", dir=os.environ.get("PDM_TEST_TMP")))
@@ -138,6 +140,42 @@ class BridgeTest(unittest.TestCase):
         job = jobs[job_id]
         self.assertEqual(job["status"], "completed")
         self.assertEqual(hashlib.sha256(Path(job["path"]).read_bytes()).hexdigest(), self.hash)
+
+    def test_cli_imports_a_list_of_links(self):
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+        links = self.downloads.parent / "liens.txt"
+        links.write_text("\n".join([
+            "# deux fichiers, dans cet ordre",
+            self.base + "/range/list-b.bin",
+            "",
+            self.base + "/range/list-a.bin",
+            self.base + "/range/list-b.bin",
+            "ftp://exemple.org/c.bin",
+        ]) + "\n")
+
+        def cli(*args):
+            return subprocess.run([str(HOST), "add", "--file", *args], capture_output=True, text=True,
+                                  env=self.env, timeout=30)
+
+        first = cli(str(links))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("Ligne 6 ignorée : seuls les liens http:// et https:// sont acceptés", first.stdout)
+        self.assertIn("2 ajouté(s) · 1 doublon(s) · 1 ligne(s) ignorée(s)", first.stdout)
+
+        jobs = chrome.request({"type": "list"})["jobs"]
+        self.assertEqual([j["url"].rsplit("/", 1)[1] for j in jobs], ["list-b.bin", "list-a.bin"])
+        self.assertEqual({j["source"] for j in jobs}, {"list"})
+
+        # La même liste une seconde fois (ici par l'entrée standard) : rien de nouveau.
+        again = subprocess.run([str(HOST), "add", "--file", "-"], input=links.read_text(), capture_output=True,
+                               text=True, env=self.env, timeout=30)
+        self.assertIn("0 ajouté(s) · 2 déjà dans la liste", again.stdout)
+        self.assertEqual(len(chrome.request({"type": "list"})["jobs"]), 2)
+
+        missing = cli(str(links) + ".absent")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("Impossible de lire", missing.stderr)
 
     def test_errors_are_replies_not_crashes(self):
         chrome = self.connect()

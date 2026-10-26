@@ -84,6 +84,45 @@ def sanitize_filename(name, fallback="telechargement"):
     return _truncate_bytes(base, MAX_NAME_BYTES - len(ext.encode("utf-8"))).rstrip(". ") + ext
 
 
+MAX_LINKS = 200  # par import, comme extension/lib/linklist.js
+
+
+def parse_link_list(text):
+    """Liste de liens, un par ligne. Mêmes règles que extension/lib/linklist.js.
+
+    Renvoie (liens dans l'ordre, lignes refusées [(numéro, texte, raison)], nombre de doublons).
+    """
+    urls, invalid, seen, duplicates = [], [], set(), 0
+    for number, raw in enumerate(re.split(r"\r\n|\r|\n", text.lstrip("﻿")), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        reason = _link_problem(line)
+        if reason:
+            invalid.append((number, line, reason))
+        elif line in seen:
+            duplicates += 1
+        else:
+            seen.add(line)
+            urls.append(line)
+    return urls, invalid, duplicates
+
+
+def _link_problem(line):
+    if re.search(r"\s", line):
+        return "un seul lien par ligne"
+    if not re.match(r"^[a-z][a-z0-9+.-]*:", line, re.I):
+        return "il manque https:// au début"
+    if not re.match(r"^https?://", line, re.I):
+        return "seuls les liens http:// et https:// sont acceptés"
+    try:
+        if urlparse(line).hostname:
+            return ""
+    except ValueError:
+        pass
+    return "adresse mal formée"
+
+
 def filename_from_url(url):
     path = urlparse(url).path
     last = [part for part in path.split("/") if part]

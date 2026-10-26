@@ -244,6 +244,115 @@ footer {
   font-style: italic;
 }
 
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Import d'une liste de liens. */
+#import-dialog {
+  width: min(640px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+
+#import-dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+
+#import-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.import-rules {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.import-rules li + li {
+  margin-top: 4px;
+}
+
+.import-rules strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+code,
+#import-text {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+code {
+  font-size: 12px;
+}
+
+#import-text {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+#import-text:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.import-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.import-preview {
+  min-height: 20px;
+  margin-top: 12px;
+}
+
+.import-preview p {
+  margin: 0;
+}
+
+.import-preview > * + * {
+  margin-top: 4px;
+}
+
+.import-preview .hint {
+  color: var(--muted);
+}
+
+.import-preview .blocked,
+.import-preview .problems {
+  color: var(--danger);
+}
+
+.import-preview .problems {
+  margin-bottom: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.import-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
 @media (max-width: 560px) {
   .download {
     grid-template-columns: 1fr;

@@ -3,6 +3,14 @@
 All notable changes to PDM. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Import a list of links (one per line) from the manager — **Importer une liste…**, from a `.txt` file or
+  pasted — or from the terminal with `pdm-host add --file links.txt`. A preview shows the links kept,
+  duplicates, links already in the manager and every rejected line with its reason; the links are queued
+  in order and downloaded as many at a time as the "Téléchargements simultanés" setting.
+
 ## [2.0.4] - 2026-10-22
 
 ### Added

@@ -22,6 +22,7 @@
         </select>
         <button type="submit" class="primary">Ajouter</button>
       </form>
+      <button id="open-import">Importer une liste…</button>
       <button id="open-options" class="link">Réglages</button>
     </header>
 
@@ -48,6 +49,52 @@
     </main>
 
     <footer id="summary"></footer>
+
+    <dialog id="import-dialog" aria-labelledby="import-title">
+      <form id="import-form">
+        <h2 id="import-title">Importer une liste de liens</h2>
+        <ul class="import-rules">
+          <li>
+            <strong>Un lien par ligne</strong>, commençant par <code>http://</code> ou <code>https://</code>.
+            Les lignes vides et celles qui commencent par <code>#</code> sont ignorées : tu peux annoter ta liste.
+          </li>
+          <li>
+            Les liens entrent dans la file <strong>dans l’ordre de la liste</strong>. PDM en télécharge
+            <span id="import-parallel">3</span> à la fois (réglage « Téléchargements simultanés ») ;
+            les suivants attendent leur tour, même navigateur fermé.
+          </li>
+          <li>
+            <strong>Fichier</strong> pour des liens directs (.zip, .iso, .pdf…),
+            <strong>Vidéo de la page</strong> pour des pages YouTube ou d’autres sites vidéo.
+            Le choix vaut pour toute la liste : pour une liste mélangée, fais deux imports.
+          </li>
+          <li>
+            Un lien en double, ou déjà dans le gestionnaire, n’est ajouté qu’une fois.
+            Avant l’ajout, PDM t’indique ce qu’il a compris de ta liste et les lignes refusées.
+          </li>
+        </ul>
+        <textarea
+          id="import-text"
+          rows="9"
+          spellcheck="false"
+          aria-label="Liens à télécharger, un par ligne"
+          placeholder="# Cours de réseau&#10;https://exemple.org/cours/chapitre-1.pdf&#10;https://exemple.org/cours/chapitre-2.pdf"
+        ></textarea>
+        <div class="import-row">
+          <button type="button" id="import-pick">Charger un fichier .txt…</button>
+          <input id="import-file" type="file" accept=".txt,text/plain" hidden />
+          <select id="import-kind" aria-label="Type de téléchargement pour toute la liste">
+            <option value="file">Fichier</option>
+            <option value="video">Vidéo de la page</option>
+          </select>
+        </div>
+        <div id="import-preview" class="import-preview" role="status"></div>
+        <div class="import-actions">
+          <button type="button" id="import-close">Fermer</button>
+          <button type="submit" id="import-submit" class="primary" disabled>Ajouter</button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="manager.js"></script>
   </body>
