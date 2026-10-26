@@ -236,10 +236,26 @@ class YtdlpTest(unittest.TestCase):
         self.assertEqual(job.status, "completed", job.error)
 
     def test_unsupported_page_fails_with_message(self):
+        fx.LOG.clear()
         job = self.engine.add({"kind": "ytdlp", "url": self.base + "/vide.html"})
         job = self.wait(job.id, {"failed", "completed"})
         self.assertEqual(job.status, "failed")
         self.assertIn("non pris en charge", job.error)
+        # Refusée dès l'analyse : la page n'est pas redemandée (face à un site qui
+        # bloque, comme YouTube et son 429, chaque demande en plus aggrave le blocage).
+        self.assertEqual(sum(1 for path, *_ in fx.LOG if path == "/vide.html"), 1)
+
+    def test_same_quality_twice_reuses_the_file_with_its_size(self):
+        spec = {"kind": "ytdlp", "url": self.base + "/multi/master.m3u8", "title": "Deux fois"}
+        first = self.wait(self.engine.add(dict(spec)).id, {"completed", "failed"})
+        self.assertEqual(first.status, "completed", first.error)
+        self.assertEqual(Path(first.path).stem, "Deux fois [360p]")
+        with self.assertLogs("pdm", "INFO") as logs:
+            again = self.wait(self.engine.add(dict(spec)).id, {"completed", "failed"})
+        self.assertEqual((again.status, again.path), ("completed", first.path))
+        # Rien reçu cette fois : la taille affichée est celle du fichier, pas 0 o.
+        self.assertEqual(again.size, Path(first.path).stat().st_size)
+        self.assertTrue(any("déjà présent" in line for line in logs.output), logs.output)
 
 
 class CommandTest(unittest.TestCase):

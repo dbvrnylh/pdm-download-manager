@@ -21,6 +21,8 @@ versions follow [Semantic Versioning](https://semver.org/).
   YouTube) comes first, followed by one track per chosen language that exists, each labeled with its
   language. Audio description and YouTube's automatic dubs are left out. The page is analyzed once and
   the analysis is reused for the download. Before, only one track was kept, chosen at random on Arte.
+  When the site refuses the analysis (HTTP 429, "Sign in to confirm you're not a bot"), its error is
+  shown without asking the site a second time.
 - "Réglages": one list of languages (French, Spanish and English by default) for subtitles and audio
   tracks, each with its own on/off box.
 - Video quality choices: best, 1080p, 720p (medium), 480p (small) and audio only (MP3). The video
@@ -32,6 +34,8 @@ versions follow [Semantic Versioning](https://semver.org/).
   list import treats the same video in another quality as a new link.
 
 ### Fixed
+- Finished video downloads show the size of the final file. They showed the size of the last track
+  received (often the audio after a merge), and 0 B when yt-dlp found the file already on disk.
 - Videos without sound (or sound without a picture) on sites that split HLS streams into tracks, such
   as Arte: the video button took the last playlist the player loaded, which is a single track. Each new
   `.m3u8` is now read once; a master playlist is kept with the list of its tracks, and those tracks are

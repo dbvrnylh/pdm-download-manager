@@ -162,6 +162,7 @@ class YtdlpDownload:
         self.stage = "Analyse de la page…"
         self.fragmented = False  # flux en fragments : yt-dlp en télécharge plusieurs à la fois
         self.final_path = None
+        self.received = False  # au moins une ligne de progression d'une piste
         self.output = collections.deque(maxlen=40)  # fin de la sortie, pour le journal
 
     def stop(self, reason):
@@ -200,7 +201,8 @@ class YtdlpDownload:
         try:
             if self._wants_audio_tracks():
                 self.audio_ids = self._analyse()
-            code = self._run_ytdlp()
+            # Analyse refusée par le site : lui redemander aussitôt aggraverait un blocage.
+            code = 1 if self.last_error else self._run_ytdlp()
             while self._drop_a_bonus(code):
                 code = self._run_ytdlp()
         finally:
@@ -214,10 +216,23 @@ class YtdlpDownload:
             if "403" in message:
                 message += f" (yt-dlp {self.tools.ytdlp_version} : s'il est ancien, relance install.sh)"
             raise DownloadError(message)
+        size = None
         if self.final_path:
             self.job.path = self.final_path
             self.job.filename = os.path.basename(self.final_path)
+            try:
+                # La taille du fichier final, pas celle de la dernière piste reçue :
+                # après une fusion, ou quand yt-dlp l'a trouvé déjà là (rien reçu).
+                size = os.path.getsize(self.final_path)
+            except OSError:
+                pass
+        if not self.received:
+            # yt-dlp ne le dit pas (--print implique --quiet) : terminé sans rien
+            # recevoir, c'est qu'il a trouvé le fichier final déjà sur le disque.
+            log.info("%s : déjà présent dans cette qualité, rien à télécharger", self.final_path)
         with self.lock:
+            if size:
+                self.size = size
             if self.size:
                 self.downloaded = self.size
         return "completed"
@@ -281,20 +296,30 @@ class YtdlpDownload:
             with self.lock:
                 if self.stop_reason:
                     return None
-                self.proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out,
-                                             stderr=subprocess.DEVNULL, start_new_session=True)
+                self.proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.PIPE,
+                                             text=True, encoding="utf-8", errors="replace", start_new_session=True)
             try:
-                code = self.proc.wait(timeout=ANALYSE_TIMEOUT)
+                _, errors = self.proc.communicate(timeout=ANALYSE_TIMEOUT)
             except subprocess.TimeoutExpired:
                 os.killpg(self.proc.pid, signal.SIGKILL)
-                code = self.proc.wait()
+                _, errors = self.proc.communicate()
+            code = self.proc.returncode
+        refused = [line[6:].strip() for line in errors.splitlines() if line.startswith("ERROR:")]
+        if code != 0 and refused and not self.stop_reason:
+            # Le site a répondu non (429, « Sign in to confirm you're not a bot »,
+            # page inconnue…) : run() affiche cette erreur sans redemander.
+            self.output.extend(errors.splitlines())
+            self.last_error = refused[-1]
+            self._forget_analysis()
+            return None
         try:
             if code != 0:
                 raise ValueError(f"code {code}")
             with open(self.info_path, encoding="utf-8") as f:
                 info = json.load(f)
         except (OSError, ValueError):
-            # Le téléchargement normal refera l'analyse et donnera la vraie erreur.
+            # Plantage ou délai dépassé, sans refus du site : le téléchargement
+            # normal refait l'analyse.
             self._forget_analysis()
             return None
         ids = pick_audio_tracks(info, self.config["languages"].split(","))
@@ -413,6 +438,7 @@ class YtdlpDownload:
             done, total, estimate, speed, eta = (_number(p) for p in parts[1:6])
             fragment, fragments = _number(parts[6]), _number(parts[7])
             self.fragmented = bool(fragments)
+            self.received = True
             with self.lock:
                 if status == "finished":
                     self.streams_done += 1
