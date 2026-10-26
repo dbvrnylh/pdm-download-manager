@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -35,6 +36,9 @@ PRESETS = {
 VIDEO_ONLY = {"best": "bv", "1080": "bv[height<=1080]", "720": "bv[height<=720]", "480": "bv[height<=480]"}
 SORT = "res,ext:mp4:m4a"  # à qualité égale, MP4/M4A : le fichier se lit partout
 ANALYSE_TIMEOUT = 120  # s
+# Dossier caché, dans le dossier de téléchargement, où yt-dlp prépare chaque
+# vidéo (voir _command). En ASCII, comme les dossiers de catégorie.
+WORK_DIR = ".pdm-en-cours"
 
 # Pistes audio jamais gardées : l'audiodescription (une voix décrit l'image)
 # et les doublages automatiques de YouTube, comme les sous-titres automatiques.
@@ -226,6 +230,7 @@ class YtdlpDownload:
                 size = os.path.getsize(self.final_path)
             except OSError:
                 pass
+        remove_work_dir(self.job)  # yt-dlp le laisse vide derrière lui
         if not self.received:
             # yt-dlp ne le dit pas (--print implique --quiet) : terminé sans rien
             # recevoir, c'est qu'il a trouvé le fichier final déjà sur le disque.
@@ -375,6 +380,7 @@ class YtdlpDownload:
             "--print", "before_dl:[PDMFMT]%(format_id)s",
             "--print", "after_move:[PDMFILE]%(filepath)s",
             "-P", str(directory),
+            "-P", f"temp:{self._work_dir(base)}",
             "-o", template,
             "--concurrent-fragments", str(min(self.config["connections"], 16)),
             "-f", selector,
@@ -403,6 +409,18 @@ class YtdlpDownload:
             return command + ["--load-info-json", str(self.info_path)]
         # « -- » : une URL commençant par « - » ne sera jamais prise pour une option.
         return command + ["--", job.url]
+
+    def _work_dir(self, base):
+        """Dossier de travail du téléchargement, gardé dans le job pour une reprise.
+
+        Les fichiers intermédiaires (des dizaines de morceaux HLS, les pistes avant
+        fusion, les sous-titres) n'encombrent plus le dossier que l'utilisateur
+        regarde : seul le fichier final y arrive. Même disque que le dossier final,
+        donc ce dernier déplacement est un simple renommage, instantané.
+        """
+        if not self.job.workDir:
+            self.job.workDir = str(base / WORK_DIR / self.job.id)
+        return self.job.workDir
 
     def _site_options(self):
         """Options d'accès au site, communes à l'analyse et au téléchargement."""
@@ -477,8 +495,23 @@ _PARTIAL = re.compile(
 )
 
 
+def remove_work_dir(job):
+    """Supprime le dossier de travail du téléchargement, et .pdm-en-cours s'il est vide."""
+    if not job.workDir:
+        return
+    shutil.rmtree(job.workDir, ignore_errors=True)
+    try:
+        os.rmdir(os.path.dirname(job.workDir))  # échoue tant qu'une autre vidéo s'y prépare
+    except OSError:
+        pass
+    job.workDir = None
+
+
 def cleanup_files(job):
-    """Annulation : supprime les morceaux laissés par yt-dlp (.part, .ytdl, pistes .fNNN, sous-titres)."""
+    """Annulation : supprime le dossier de travail, et les morceaux qu'un
+    téléchargement commencé avant ce dossier a laissés à côté du fichier
+    (.part, .ytdl, pistes .fNNN, sous-titres)."""
+    remove_work_dir(job)
     if not job.path:
         return
     stem = os.path.splitext(job.path)[0]

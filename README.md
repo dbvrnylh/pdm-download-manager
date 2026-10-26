@@ -197,6 +197,10 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official
 yt-dlp build — which bundles the JavaScript challenge solver YouTube now requires — and updates it daily.
+A streamed video arrives in dozens of fragments and separate tracks before being merged: yt-dlp prepares it in
+a hidden `.pdm-en-cours/` folder inside the download folder (same disk, so the final move is instant), and only
+the finished file appears next to your videos. The folder is removed once the download ends or is canceled;
+a paused download resumes from it.
 
 **Streams split into tracks.** Many sites (Arte…) serve an HLS *master playlist*: a menu listing video
 variants without sound (432p, 1080p…) and separate audio tracks (one per language). The player then loads the

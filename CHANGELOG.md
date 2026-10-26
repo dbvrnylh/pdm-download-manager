@@ -33,6 +33,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   the resolution obtained ("Title [720p].mp4"), so two qualities of one video get two files, and the
   list import treats the same video in another quality as a new link.
 
+### Changed
+- Video downloads are prepared in a hidden `.pdm-en-cours/` folder of the download folder: the dozens
+  of HLS fragments, the separate tracks and the subtitles no longer appear and disappear next to the
+  videos; only the finished file shows up. The folder is removed when the download ends or is canceled,
+  and kept for a paused download to resume from.
+
 ### Fixed
 - Finished video downloads show the size of the final file. They showed the size of the last track
   received (often the audio after a merge), and 0 B when yt-dlp found the file already on disk.

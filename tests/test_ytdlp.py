@@ -159,6 +159,9 @@ class YtdlpTest(unittest.TestCase):
         duration, streams = ffprobe(path)
         self.assertAlmostEqual(duration, 40, delta=1)
         self.assertEqual(streams, ["audio", "video"])
+        # Les ~20 morceaux du flux ont été préparés ailleurs, puis le dossier effacé.
+        self.assertEqual([p.name for p in path.parent.iterdir()], [path.name])
+        self.assertFalse((self.downloads / ".pdm-en-cours").exists())
 
     def test_video_found_in_web_page(self):
         job = self.engine.add({"kind": "ytdlp", "url": self.base + "/lecteur.html"})
@@ -180,8 +183,21 @@ class YtdlpTest(unittest.TestCase):
         job = self.engine.add({"kind": "ytdlp", "url": self.base + "/slow/hls/index.m3u8", "title": "lent"})
         time.sleep(2.5)
         self.assertEqual(self.engine.jobs[job.id].status, "downloading", self.engine.jobs[job.id].error)
+        # Attendre les premiers morceaux : sur ce flux lent, l'analyse prend déjà quelques secondes.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            work = self.engine.jobs[job.id].workDir
+            if work and Path(work).is_dir() and any(Path(work).iterdir()):
+                break
+            time.sleep(0.2)
         self.engine.pause(job.id)
         job = self.wait(job.id, {"paused"})
+        # En pause : les morceaux attendent dans le dossier de travail caché
+        # (la reprise en repart), pas à côté des vidéos.
+        work = Path(job.workDir)
+        self.assertEqual(work.parent, self.downloads / ".pdm-en-cours")
+        self.assertTrue(any(work.iterdir()))
+        self.assertEqual(list((self.downloads / "Videos").glob("lent*")), [])
         self.engine.resume(job.id)
         time.sleep(1.5)
         self.assertEqual(self.engine.jobs[job.id].status, "downloading")
@@ -189,6 +205,7 @@ class YtdlpTest(unittest.TestCase):
         self.wait(job.id, {"canceled"})
         leftovers = list((self.downloads / "Videos").glob("lent*")) if (self.downloads / "Videos").exists() else []
         self.assertEqual(leftovers, [])
+        self.assertFalse((self.downloads / ".pdm-en-cours").exists())
 
     def test_subtitles_are_embedded_then_removed_from_disk(self):
         # fr est demandé (réglage par défaut fr, es, en), de ne l'est pas.
@@ -307,6 +324,13 @@ class CommandTest(unittest.TestCase):
         runner = self.runner("https://www.youtube.com/watch?v=abc", preset="480")
         runner.audio_ids, runner.info_path = ["140-23"], Path("/data/a.json")
         self.assertTrue(runner._command()[runner._command().index("-f") + 1].startswith("bv[height<=480]+140-23/"))
+
+    def test_intermediate_files_go_to_a_hidden_work_dir(self):
+        runner = self.runner("https://www.youtube.com/watch?v=abc")
+        command = runner._command()
+        work = f"{runner.config.download_dir()}/.pdm-en-cours/{runner.job.id}"
+        self.assertIn(f"temp:{work}", command)
+        self.assertEqual(runner.job.workDir, work)  # gardé pour une reprise après une pause
 
     def test_file_name_carries_the_resolution(self):
         command = self.command("https://www.youtube.com/watch?v=abc")

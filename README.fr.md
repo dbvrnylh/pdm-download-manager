@@ -197,7 +197,10 @@ obtient une erreur ou une page HTML, Chrome continue.
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de
 l'exécutable officiel de yt-dlp — qui embarque le solveur JavaScript qu'exige désormais YouTube — et la met à
-jour chaque jour.
+jour chaque jour. Une vidéo en streaming arrive en dizaines de morceaux et en pistes séparées avant d'être assemblée : yt-dlp la
+prépare dans un dossier caché `.pdm-en-cours/` du dossier de téléchargement (même disque : le déplacement final
+est instantané), et seul le fichier terminé apparaît à côté de tes vidéos. Le dossier est effacé à la fin du
+téléchargement ou à son annulation ; un téléchargement en pause reprend à partir de lui.
 
 **Flux découpés en pistes.** Beaucoup de sites (Arte…) servent un *manifeste maître* HLS : un menu qui liste des
 variantes vidéo sans son (432p, 1080p…) et des pistes audio séparées (une par langue). Le lecteur charge ensuite la

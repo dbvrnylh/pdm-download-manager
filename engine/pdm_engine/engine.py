@@ -27,7 +27,7 @@ log = logging.getLogger("pdm")
 
 PERSISTED = {
     "id": None, "kind": "http", "url": "", "finalUrl": None, "referer": None, "cookies": None,
-    "userAgent": None, "source": "manual", "filename": None, "title": None, "path": None,
+    "userAgent": None, "source": "manual", "filename": None, "title": None, "path": None, "workDir": None,
     "category": "other", "mime": None, "preset": None, "status": "queued", "error": None,
     "size": None, "downloaded": 0, "resumable": False, "validator": None, "segments": [],
     "createdAt": 0, "completedAt": None,
