@@ -210,6 +210,15 @@ next to it. Only human-made subtitles are taken: YouTube also offers machine tra
 languages, of uneven quality, and requesting them gets you rate-limited. Subtitles are a bonus: if they fail to
 download, PDM downloads the video again without them rather than losing it.
 
+**Audio tracks.** Many videos come with several audio tracks: Arte offers the original version, French,
+German and audio description; YouTube offers dubs in up to twenty languages. By default yt-dlp keeps only one,
+and on Arte, where every track has the same priority, which one is down to luck. PDM first analyzes the page
+(`yt-dlp -J`), keeps the **original version** (marked "VO" by Arte, "original" by YouTube) followed by one track
+per language of yours that exists (the best quality of each), then reuses that analysis for the download
+(`--load-info-json`) so the site is only queried once. Audio description and YouTube's automatic dubs are left out.
+Each track is labeled with its language, and the original comes first, so it is the player's default. If one of
+the chosen tracks can't be downloaded, PDM downloads the video again with a single track.
+
 ## Configuration
 
 Everything lives in the extension's **Réglages** page:
@@ -222,7 +231,9 @@ Everything lives in the extension's **Réglages** page:
 | Sort by category | on | `Videos/`, `Musique/`, `Archives/`… (ASCII folder names on purpose). |
 | Desktop notifications | on | Needs `notify-send`. |
 | Auto-resume | on | Restarts interrupted downloads when the engine starts. |
-| Subtitles · languages | on · `fr, es, en` | Embedded into video downloads when they exist. Needs ffmpeg. |
+| Your languages | `fr, es, en` | Used for subtitles and extra audio tracks, in this order. |
+| Subtitles | on | Embedded into video downloads when they exist. Needs ffmpeg. |
+| Audio tracks | on | Keeps the original audio plus your languages when they exist. Needs ffmpeg. |
 | Take over browser downloads · Open manager · Video button | on | Browser-side settings. |
 
 Engine settings are stored in `~/.local/share/pdm/config.json`.

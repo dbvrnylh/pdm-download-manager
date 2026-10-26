@@ -52,16 +52,18 @@
           <label class="check"><input id="categorize" type="checkbox" /> Ranger par catégorie (Videos/, Musique/, Archives/…)</label>
           <label class="check"><input id="notify" type="checkbox" /> Notification du bureau à la fin de chaque téléchargement</label>
           <label class="check"><input id="auto-resume" type="checkbox" /> Reprendre automatiquement les téléchargements interrompus</label>
-          <label class="check"><input id="subtitles" type="checkbox" /> Ajouter aux vidéos les sous-titres qui existent</label>
-          <label class="field subtitle-langs">
-            <span>Langues des sous-titres</span>
-            <input id="subtitle-langs" type="text" spellcheck="false" placeholder="fr, es, en" />
-            <small>
-              Codes séparés par des virgules ; les pistes sont ajoutées dans cet ordre. Seuls les sous-titres
-              écrits par des humains sont pris, pas ceux que YouTube génère automatiquement. Ils sont intégrés
-              au fichier vidéo (il faut ffmpeg) : choisis la piste dans ton lecteur.
-            </small>
+          <label class="field languages">
+            <span>Tes langues, pour les vidéos</span>
+            <input id="languages" type="text" spellcheck="false" placeholder="fr, es, en" />
+            <small>Codes séparés par des virgules ; les pistes sont ajoutées dans cet ordre.</small>
           </label>
+          <label class="check"><input id="subtitles" type="checkbox" /> Ajouter les sous-titres dans ces langues</label>
+          <label class="check"><input id="audio-tracks" type="checkbox" /> Garder aussi les pistes audio dans ces langues, en plus de la version originale</label>
+          <p class="hint">
+            Seulement ce qui est fait par des humains : ni sous-titres générés automatiquement, ni doublage
+            automatique, ni audiodescription. Tout est intégré au fichier vidéo (il faut ffmpeg) : choisis la
+            langue dans ton lecteur. Chaque piste audio ajoute environ 1 Mo par minute.
+          </p>
           <div class="actions">
             <button type="submit" class="primary">Enregistrer</button>
             <span id="saved" class="saved" role="status"></span>

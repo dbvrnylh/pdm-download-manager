@@ -16,7 +16,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 - Subtitles for video downloads: when a page offers human-made subtitles in the chosen languages
   (French, Spanish and English by default), they are embedded into the video as selectable tracks.
   YouTube's machine translations are left out. If subtitles fail to download, the video is downloaded
-  again without them. New "Réglages" options: on/off and the list of languages. Needs ffmpeg.
+  again without them. Needs ffmpeg.
+- Several audio tracks for video downloads: the original version (marked "VO" by Arte, "original" by
+  YouTube) comes first, followed by one track per chosen language that exists, each labeled with its
+  language. Audio description and YouTube's automatic dubs are left out. The page is analyzed once and
+  the analysis is reused for the download. Before, only one track was kept, chosen at random on Arte.
+- "Réglages": one list of languages (French, Spanish and English by default) for subtitles and audio
+  tracks, each with its own on/off box.
 
 ### Fixed
 - Videos without sound (or sound without a picture) on sites that split HLS streams into tracks, such

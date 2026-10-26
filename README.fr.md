@@ -212,6 +212,15 @@ reste à côté. Seuls les sous-titres écrits par des humains sont pris : YouTu
 automatiques dans une centaine de langues, de qualité inégale, et les demander fait bloquer par le site. Les
 sous-titres sont un bonus : si leur téléchargement échoue, PDM refait la vidéo sans eux plutôt que de la perdre.
 
+**Pistes audio.** Beaucoup de vidéos ont plusieurs pistes audio : Arte propose la version originale, le français,
+l'allemand et l'audiodescription ; YouTube, des doublages dans une vingtaine de langues. Par défaut, yt-dlp n'en
+garde qu'une, et chez Arte, où toutes ont la même priorité, laquelle relève du hasard. PDM analyse d'abord la page
+(`yt-dlp -J`), garde la **version originale** (marquée « VO » par Arte, « original » par YouTube) puis une piste par
+langue à toi qui existe (la meilleure qualité de chacune), et réutilise cette analyse pour le téléchargement
+(`--load-info-json`) : le site n'est interrogé qu'une fois. L'audiodescription et les doublages automatiques de
+YouTube sont écartés. Chaque piste est étiquetée avec sa langue, l'originale en premier : c'est celle que le lecteur
+joue par défaut. Si l'une des pistes choisies ne se télécharge pas, PDM refait la vidéo avec une seule piste.
+
 ## Réglages
 
 Tout se règle dans la page **Réglages** de l'extension :
@@ -224,7 +233,9 @@ Tout se règle dans la page **Réglages** de l'extension :
 | Rangement par catégorie | activé | `Videos/`, `Musique/`, `Archives/`… (noms en ASCII exprès). |
 | Notifications du bureau | activé | Nécessite `notify-send`. |
 | Reprise automatique | activé | Relance les téléchargements interrompus au démarrage du moteur. |
-| Sous-titres · langues | activé · `fr, es, en` | Intégrés aux vidéos quand ils existent. Nécessite ffmpeg. |
+| Tes langues | `fr, es, en` | Pour les sous-titres et les pistes audio en plus, dans cet ordre. |
+| Sous-titres | activé | Intégrés aux vidéos quand ils existent. Nécessite ffmpeg. |
+| Pistes audio | activé | Garde la version originale plus tes langues quand elles existent. Nécessite ffmpeg. |
 | Prise de contrôle · Ouverture du gestionnaire · Bouton vidéo | activés | Réglages côté navigateur. |
 
 Les réglages du moteur sont enregistrés dans `~/.local/share/pdm/config.json`.

@@ -17,8 +17,9 @@ DEFAULTS = {
     "notify": True,  # notification du bureau à la fin
     "autoResume": True,  # reprendre les téléchargements interrompus au démarrage
     "ytdlpPath": None,  # chemin de yt-dlp (sinon recherche automatique)
+    "languages": "fr,es,en",  # langues voulues (sous-titres, pistes audio), dans l'ordre des pistes
     "subtitles": True,  # intégrer aux vidéos les sous-titres qui existent
-    "subtitleLangs": "fr,es,en",  # langues voulues, dans l'ordre des pistes
+    "audioTracks": True,  # garder aussi les pistes audio dans ces langues, en plus de l'originale
 }
 
 LIMITS = {"connections": (1, 32), "maxParallel": (1, 10)}
@@ -66,8 +67,8 @@ class Config:
                     raise ValueError(f"{key} doit être un chemin absolu")
                 else:
                     value = os.path.expanduser(value)
-            elif key == "subtitleLangs":
-                value = _subtitle_langs(value)
+            elif key == "languages":
+                value = _languages(value)
             elif not isinstance(value, bool):
                 raise ValueError(f"{key} doit valoir true ou false")
             clean[key] = value
@@ -79,7 +80,7 @@ class Config:
         return self.snapshot()
 
 
-def _subtitle_langs(value):
+def _languages(value):
     """« FR, es ,en » → « fr,es,en ».
 
     Rien que des codes de langue : ils servent ensuite à fabriquer les motifs
@@ -88,5 +89,5 @@ def _subtitle_langs(value):
     codes = [code.strip().lower() for code in value.split(",")] if isinstance(value, str) else []
     codes = [code for code in codes if code]
     if not codes or len(codes) > 10 or not all(LANG_CODE.match(code) for code in codes):
-        raise ValueError("langues des sous-titres : de 1 à 10 codes séparés par des virgules (ex. fr, es, en)")
+        raise ValueError("langues : de 1 à 10 codes séparés par des virgules (ex. fr, es, en)")
     return ",".join(dict.fromkeys(codes))  # sans doublons, dans l'ordre donné

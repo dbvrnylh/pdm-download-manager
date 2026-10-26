@@ -244,15 +244,15 @@ class EngineTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
-    def test_subtitle_languages_are_normalized_and_checked(self):
+    def test_languages_are_normalized_and_checked(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
-        self.assertEqual((config["subtitles"], config["subtitleLangs"]), (True, "fr,es,en"))
-        self.assertEqual(config.update({"subtitleLangs": " FR, es-419 ,fr,en "})["subtitleLangs"], "fr,es-419,en")
+        self.assertEqual((config["languages"], config["subtitles"], config["audioTracks"]), ("fr,es,en", True, True))
+        self.assertEqual(config.update({"languages": " FR, es-419 ,fr,en "})["languages"], "fr,es-419,en")
         too_many = ",".join(a + b for a in "ab" for b in "abcdef")
         # Les codes deviennent des motifs pour yt-dlp : rien d'autre que des lettres, chiffres et tirets.
         for bad in ("", " , ", "fr;rm", "fr|.*", "français", too_many, 42):
             with self.assertRaises(ValueError, msg=repr(bad)):
-                config.update({"subtitleLangs": bad})
+                config.update({"languages": bad})
         with self.assertRaises(ValueError):
             config.update({"subtitles": "oui"})
 

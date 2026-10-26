@@ -8,6 +8,7 @@ On le pilote comme un processus et on lit sa progression ligne par ligne.
 
 import collections
 import glob
+import json
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ import subprocess
 import threading
 from urllib.parse import urlparse
 
+from . import paths
 from .httpdl import DownloadError
 from .util import category_for, sanitize_filename
 
@@ -27,6 +29,28 @@ PRESETS = {
     "1080": ("bv*[height<=1080]+ba/b[height<=1080]/b", "b[height<=1080]/b"),
     "720": ("bv*[height<=720]+ba/b[height<=720]/b", "b[height<=720]/b"),
     "audio": ("ba/b", "ba/b"),
+}
+# La vidéo seule, quand on choisit soi-même les pistes audio à lui ajouter.
+VIDEO_ONLY = {"best": "bv", "1080": "bv[height<=1080]", "720": "bv[height<=720]"}
+SORT = "res,ext:mp4:m4a"  # à qualité égale, MP4/M4A : le fichier se lit partout
+ANALYSE_TIMEOUT = 120  # s
+
+# Pistes audio jamais gardées : l'audiodescription (une voix décrit l'image)
+# et les doublages automatiques de YouTube, comme les sous-titres automatiques.
+UNWANTED_AUDIO = re.compile(r"audio.?description|descriptive|dubbed-auto", re.I)
+# Version originale : « VO », « VOF », « VOA » chez Arte (pas « VOSTF »),
+# « original » chez YouTube.
+ORIGINAL_AUDIO = re.compile(r"(?<![A-Za-z])VO[AF]?(?![A-Za-z])|(?i:\boriginal\b)")
+
+# Les sites donnent la langue en 2 lettres (« fr », « en-US ») ; MP4 et MKV
+# veulent le code ISO 639-2 à 3 lettres, sans quoi le lecteur affiche « und ».
+ISO639_2 = {
+    "ar": "ara", "bg": "bul", "bn": "ben", "ca": "cat", "cs": "ces", "da": "dan", "de": "deu", "el": "ell",
+    "en": "eng", "es": "spa", "et": "est", "eu": "eus", "fa": "fas", "fi": "fin", "fr": "fra", "gl": "glg",
+    "he": "heb", "hi": "hin", "hr": "hrv", "hu": "hun", "id": "ind", "it": "ita", "ja": "jpn", "ko": "kor",
+    "lt": "lit", "lv": "lav", "ms": "msa", "nl": "nld", "no": "nor", "pl": "pol", "pt": "por", "ro": "ron",
+    "ru": "rus", "sk": "slk", "sl": "slv", "sr": "srp", "sv": "swe", "ta": "tam", "th": "tha", "tr": "tur",
+    "uk": "ukr", "vi": "vie", "zh": "zho",
 }
 
 PROGRESS_TEMPLATE = (
@@ -70,6 +94,43 @@ def subtitle_patterns(langs):
     return ",".join(f"{code}(-.*)?" for code in langs.split(","))
 
 
+def pick_audio_tracks(info, langs):
+    """Pistes audio à garder : l'originale, puis une par langue voulue qui existe.
+
+    Renvoie des identifiants de format, le meilleur de chaque langue (l'analyse
+    range les formats du moins bon au meilleur), ou None quand il n'y a rien à
+    choisir : yt-dlp prend alors une seule piste, comme avant.
+    """
+    def label(f):
+        return f"{f.get('format_id', '')} {f.get('format_note') or ''}"
+
+    def speaks(f, code):
+        lang = (f.get("language") or "").lower()
+        return lang == code or lang.startswith(code + "-")
+
+    audio = [f for f in info.get("formats") or []
+             if f.get("vcodec") == "none" and f.get("acodec") != "none" and not UNWANTED_AUDIO.search(label(f))]
+    if not audio:
+        return None
+    originals = [f for f in audio if ORIGINAL_AUDIO.search(label(f))]
+    if not originals:
+        # Sans marque, celle que le site préfère nettement. Chez Arte, toutes les
+        # pistes ont la même préférence : aucune n'est alors l'originale.
+        prefs = [f.get("language_preference") or 0 for f in audio]
+        if max(prefs) > 0 and min(prefs) < max(prefs):
+            originals = [f for f, pref in zip(audio, prefs) if pref == max(prefs)]
+    chosen = originals[-1:]
+    for code in langs:
+        if any(speaks(f, code) for f in chosen):
+            continue  # déjà là, souvent parce que c'est l'originale
+        chosen += [f for f in audio if speaks(f, code)][-1:]
+    ids = [f["format_id"] for f in chosen]
+    # Ils vont dans un sélecteur yt-dlp : lettres, chiffres, « . », « - » et « _ » seulement.
+    if not ids or not all(re.fullmatch(r"[\w.-]+", i) for i in ids):
+        return None
+    return ids
+
+
 def _friendly(error):
     for needle, message in ERROR_HINTS:
         if needle.lower() in error.lower():
@@ -94,6 +155,9 @@ class YtdlpDownload:
         self.streams_done = 0
         self.media_started = False  # avant : la progression est celle des sous-titres
         self.with_subtitles = True  # passe à False si les sous-titres font échouer yt-dlp
+        self.audio_ids = None  # pistes audio choisies par l'analyse (identifiants de format)
+        self.audio_langs = []  # leur langue en ISO 639-2 (None si inconnue), dans le même ordre
+        self.info_path = None  # analyse de la page, réutilisée par le téléchargement
         self.stage = "Analyse de la page…"
         self.fragmented = False  # flux en fragments : yt-dlp en télécharge plusieurs à la fois
         self.final_path = None
@@ -132,13 +196,14 @@ class YtdlpDownload:
         self.tools.ready.wait(30)
         if not self.tools.ytdlp:
             raise DownloadError("yt-dlp n'est pas installé (voir install.sh)")
-        code = self._run_ytdlp()
-        if code and not self.stop_reason and self._wants_subtitles() and "subtitles" in (self.last_error or ""):
-            # Les sous-titres sont un bonus : s'ils échouent (YouTube répond 429
-            # quand on en demande trop), on refait sans eux plutôt que de perdre la vidéo.
-            log.warning("sous-titres impossibles pour %s (%s) : nouvel essai sans", self.job.url, self.last_error)
-            self.with_subtitles, self.last_error = False, None
+        try:
+            if self._wants_audio_tracks():
+                self.audio_ids = self._analyse()
             code = self._run_ytdlp()
+            while self._drop_a_bonus(code):
+                code = self._run_ytdlp()
+        finally:
+            self._forget_analysis()
         if self.stop_reason:
             return self.stop_reason
         if code != 0:
@@ -179,6 +244,72 @@ class YtdlpDownload:
                 self._parse(line.rstrip("\n"))
         return self.proc.wait()
 
+    def _drop_a_bonus(self, code):
+        """Sous-titres et pistes audio choisies sont des bonus : si yt-dlp échoue
+        avec eux, on retente sans eux plutôt que de perdre la vidéo.
+        Renvoie True s'il faut relancer yt-dlp."""
+        if not code or self.stop_reason:
+            return False
+        if self._wants_subtitles() and "subtitles" in (self.last_error or ""):
+            # YouTube répond 429 quand on demande trop de sous-titres.
+            self.with_subtitles, bonus = False, "sous-titres"
+        elif self.audio_ids:
+            # Une seule piste introuvable fait échouer toute la sélection.
+            self.audio_ids, bonus = None, "pistes audio choisies"
+        else:
+            return False
+        log.warning("%s impossibles pour %s (%s) : nouvel essai sans", bonus, self.job.url, self.last_error)
+        self.last_error = None
+        return True
+
+    def _wants_audio_tracks(self):
+        # Il faut ffmpeg pour assembler les pistes ; un MP3 n'en garde qu'une.
+        return self.config["audioTracks"] and bool(self.tools.ffmpeg) and self.job.preset != "audio"
+
+    def _analyse(self):
+        """Analyse la page (yt-dlp -J) et choisit les pistes audio à garder.
+
+        L'analyse est gardée pour le téléchargement (--load-info-json) : le site
+        n'est interrogé qu'une fois. Renvoie les pistes choisies, ou None.
+        """
+        # Dossier de données (0700) : l'analyse peut contenir des en-têtes avec cookies.
+        self.info_path = paths.data_dir() / f"analyse-{self.job.id}.json"
+        command = list(self.tools.ytdlp) + ["-J", "--no-playlist", "--no-warnings", "-S", SORT]
+        command += self._site_options() + ["--", self.job.url]
+        with open(self.info_path, "w", encoding="utf-8") as out:
+            with self.lock:
+                if self.stop_reason:
+                    return None
+                self.proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out,
+                                             stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                code = self.proc.wait(timeout=ANALYSE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+                code = self.proc.wait()
+        try:
+            if code != 0:
+                raise ValueError(f"code {code}")
+            with open(self.info_path, encoding="utf-8") as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            # Le téléchargement normal refera l'analyse et donnera la vraie erreur.
+            self._forget_analysis()
+            return None
+        ids = pick_audio_tracks(info, self.config["languages"].split(","))
+        if ids:
+            language = {f.get("format_id"): (f.get("language") or "").lower() for f in info["formats"]}
+            self.audio_langs = [ISO639_2.get(language[i].split("-")[0]) for i in ids]
+        return ids
+
+    def _forget_analysis(self):
+        if self.info_path:
+            try:
+                os.unlink(self.info_path)
+            except OSError:
+                pass
+            self.info_path = None
+
     def _wants_subtitles(self):
         # Sans ffmpeg, impossible de les intégrer ; un MP3 n'en a pas l'usage.
         return (self.with_subtitles and self.config["subtitles"] and bool(self.tools.ffmpeg)
@@ -200,6 +331,12 @@ class YtdlpDownload:
             template = "%(title).180B.%(ext)s"
 
         with_ffmpeg, without_ffmpeg = PRESETS.get(job.preset or "best", PRESETS["best"])
+        selector = with_ffmpeg if tools.ffmpeg else without_ffmpeg
+        if self.audio_ids:
+            # La vidéo seule + les pistes audio choisies, l'originale d'abord (piste
+            # par défaut du lecteur). Sans vidéo seule sur le site : le préréglage.
+            video = VIDEO_ONLY.get(job.preset or "best", "bv")
+            selector = f"{video}+{'+'.join(self.audio_ids)}/{selector}"
         command = list(tools.ytdlp) + [
             "--newline", "--progress", "--no-colors", "--no-playlist", "--no-mtime",
             "--progress-template", PROGRESS_TEMPLATE,
@@ -209,21 +346,36 @@ class YtdlpDownload:
             "-P", str(directory),
             "-o", template,
             "--concurrent-fragments", str(min(self.config["connections"], 16)),
-            "-f", with_ffmpeg if tools.ffmpeg else without_ffmpeg,
+            "-f", selector,
         ]
+        if self.audio_ids:
+            command.append("--audio-multistreams")
+            # yt-dlp n'étiquette pas la langue des pistes qu'il fusionne : sans
+            # ça, le lecteur proposerait « Piste 1, Piste 2 » sans dire laquelle.
+            tags = [f"-metadata:s:a:{n} language={lang}" for n, lang in enumerate(self.audio_langs) if lang]
+            if tags:
+                command += ["--postprocessor-args", "Merger+ffmpeg_o:" + " ".join(tags)]
         if tools.ffmpeg:
             command += ["--ffmpeg-location", tools.ffmpeg]
             if audio_only:
                 command += ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
             else:
-                # Préférer MP4/M4A à qualité égale : le fichier se lit partout.
-                command += ["-S", "res,ext:mp4:m4a", "--merge-output-format", "mp4/mkv"]
+                command += ["-S", SORT, "--merge-output-format", "mp4/mkv"]
         if self._wants_subtitles():
             # Sous-titres écrits par des humains seulement : sans --write-auto-subs,
             # les traductions automatiques de YouTube (une centaine) sont ignorées.
             # Pas de --write-subs non plus : yt-dlp garderait alors les .vtt à côté
             # de la vidéo au lieu de les effacer une fois intégrés.
-            command += ["--embed-subs", "--sub-langs", subtitle_patterns(self.config["subtitleLangs"])]
+            command += ["--embed-subs", "--sub-langs", subtitle_patterns(self.config["languages"])]
+        command += self._site_options()
+        if self.info_path:
+            return command + ["--load-info-json", str(self.info_path)]
+        # « -- » : une URL commençant par « - » ne sera jamais prise pour une option.
+        return command + ["--", job.url]
+
+    def _site_options(self):
+        """Options d'accès au site, communes à l'analyse et au téléchargement."""
+        job, tools, command = self.job, self.tools, []
         if tools.js_runtimes_option and not tools.deno and tools.node:
             command += ["--js-runtimes", "node"]  # YouTube exige un moteur JavaScript
         # Les en-têtes du navigateur ne servent qu'aux flux bruts d'un CDN qui
@@ -237,8 +389,7 @@ class YtdlpDownload:
                 command += ["--user-agent", job.userAgent]
             if job.cookies:
                 command += ["--add-header", f"Cookie:{job.cookies}"]
-        # « -- » : une URL commençant par « - » ne sera jamais prise pour une option.
-        return command + ["--", job.url]
+        return command
 
     def _parse(self, line):
         if line.startswith("[PDM]"):

@@ -108,9 +108,14 @@ pre {
   display: none;
 }
 
-/* Rattaché à la case « sous-titres » juste au-dessus. */
-.subtitle-langs {
-  margin-left: 26px;
+.languages {
+  margin-top: 14px;
+}
+
+.hint {
+  margin: 4px 0 0 26px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .grid {

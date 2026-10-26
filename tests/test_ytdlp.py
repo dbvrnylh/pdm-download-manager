@@ -23,7 +23,7 @@ import fixture_server as fx  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine, Job  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
-from pdm_engine.ytdlp import YtdlpDownload  # noqa: E402
+from pdm_engine.ytdlp import YtdlpDownload, pick_audio_tracks  # noqa: E402
 
 YTDLP = os.environ.get("PDM_TEST_YTDLP") or shutil.which("yt-dlp")
 FFMPEG = shutil.which("ffmpeg")
@@ -47,6 +47,28 @@ def subtitle_langs(path):
 
 
 VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n{}\n"
+
+
+def audio_streams(path):
+    """Langue de chaque piste audio, dans l'ordre du fichier."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index:stream_tags=language",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+    ).stdout
+    return [line.split(",")[1] if "," in line else "und" for line in out.split()]
+
+
+# Comme chez Arte : un manifeste maître, une variante vidéo sans son, des pistes
+# audio séparées dont une en VO et une en audiodescription.
+MULTI_MASTER = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="audiodescription",LANGUAGE="fr",URI="pad.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="allemand",LANGUAGE="de",URI="pde.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="italien (VO)",LANGUAGE="it",URI="pit.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="français",LANGUAGE="fr",DEFAULT=YES,URI="pfr.m3u8"
+{extra}#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=640x360,CODECS="avc1.64001e,mp4a.40.2",AUDIO="aud"
+pvideo.m3u8
+"""
 
 
 @unittest.skipUnless(YTDLP and FFMPEG, "yt-dlp et ffmpeg nécessaires")
@@ -82,6 +104,25 @@ class YtdlpTest(unittest.TestCase):
             encoding="utf-8")
         (www / "sous-titres-absents.html").write_text(page.format(
             title="Sous-titres absents", tracks=track.format("fr", "/absent.fr.vtt")), encoding="utf-8")
+        # Flux multilingue : une variante vidéo et quatre pistes audio (440 à 880 Hz).
+        multi = www / "multi"
+        multi.mkdir()
+        tones = [f"sine=frequency={hz}:duration=6" for hz in (440, 550, 660, 880)]
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=6:size=640x360:rate=25"]
+            + [arg for tone in tones for arg in ("-f", "lavfi", "-i", tone)]
+            + ["-map", "0:v"] + [arg for i in range(1, 5) for arg in ("-map", f"{i}:a")]
+            + ["-c:v", "libx264", "-preset", "ultrafast", "-g", "50", "-c:a", "aac",
+               "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod", "-master_pl_name", "ffmpeg.m3u8",
+               "-var_stream_map", "v:0,agroup:a,name:video a:0,agroup:a,name:fr a:1,agroup:a,name:it "
+                                  "a:2,agroup:a,name:de a:3,agroup:a,name:ad",
+               "-hls_segment_filename", str(multi / "s%v_%03d.ts"), str(multi / "p%v.m3u8")],
+            check=True)
+        (multi / "master.m3u8").write_text(MULTI_MASTER.format(extra=""), encoding="utf-8")
+        # Une piste espagnole annoncée mais introuvable : la sélection entière échoue.
+        (multi / "master-es-absent.m3u8").write_text(MULTI_MASTER.format(
+            extra='#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="espagnol",LANGUAGE="es",URI="absent.m3u8"\n'),
+            encoding="utf-8")
         cls.server = fx.start(static_dir=str(www))
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
 
@@ -164,6 +205,23 @@ class YtdlpTest(unittest.TestCase):
         self.assertEqual(subtitle_langs(job.path), [])
         self.assertTrue(any("nouvel essai sans" in line for line in logs.output), logs.output)
 
+    def test_original_and_wanted_audio_tracks_are_kept(self):
+        # VO italienne d'abord (piste par défaut), puis le français ; ni l'allemand
+        # (pas demandé) ni l'audiodescription.
+        job = self.engine.add({"kind": "ytdlp", "url": self.base + "/multi/master.m3u8", "title": "Multilingue"})
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(audio_streams(job.path), ["ita", "fra"])
+        self.assertEqual(list(Path(os.environ["PDM_DATA_DIR"]).glob("analyse-*")), [], "analyse effacée")
+
+    def test_missing_extra_track_falls_back_to_one_track(self):
+        with self.assertLogs("pdm", "WARNING") as logs:
+            job = self.engine.add({"kind": "ytdlp", "url": self.base + "/multi/master-es-absent.m3u8", "title": "Repli"})
+            job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(len(audio_streams(job.path)), 1)
+        self.assertTrue(any("pistes audio choisies impossibles" in line for line in logs.output), logs.output)
+
     def test_waits_for_the_tools_lookup_at_startup(self):
         # Démon qui vient de démarrer : le premier téléchargement part avant la fin
         # de la recherche de yt-dlp. Il doit l'attendre, pas échouer.
@@ -185,7 +243,7 @@ class YtdlpTest(unittest.TestCase):
 class CommandTest(unittest.TestCase):
     """Règles de construction de la commande yt-dlp (sans lancer yt-dlp)."""
 
-    def command(self, url, preset="best", ffmpeg="/usr/bin/ffmpeg", **settings):
+    def runner(self, url, preset="best", ffmpeg="/usr/bin/ffmpeg", **settings):
         root = Path(tempfile.mkdtemp(prefix="pdm-cmd-", dir=os.environ.get("PDM_TEST_TMP")))
         config = Config(root / "config.json")
         config.update({"downloadDir": str(root / "dl"), **settings})
@@ -193,10 +251,13 @@ class CommandTest(unittest.TestCase):
                                 node=None, js_runtimes_option=True, ytdlp_version="test")
         job = Job(kind="ytdlp", url=url, referer="https://site.example/", userAgent="NavigateurUA",
                   cookies="session=1", preset=preset)
-        return YtdlpDownload(job, config, tools)._command()
+        return YtdlpDownload(job, config, tools)
+
+    def command(self, url, **options):
+        return self.runner(url, **options)._command()
 
     def test_subtitles_embedded_by_language_family(self):
-        command = self.command("https://www.youtube.com/watch?v=abc", subtitleLangs="fr,es-419")
+        command = self.command("https://www.youtube.com/watch?v=abc", languages="fr,es-419")
         self.assertIn("--embed-subs", command)
         # « fr » doit aussi prendre « fr-FR » ou « fr-CA » : yt-dlp compare le code entier.
         self.assertEqual(command[command.index("--sub-langs") + 1], "fr(-.*)?,es-419(-.*)?")
@@ -204,6 +265,20 @@ class CommandTest(unittest.TestCase):
         # les traductions automatiques de YouTube.
         self.assertNotIn("--write-subs", command)
         self.assertNotIn("--write-auto-subs", command)
+
+    def test_chosen_audio_tracks_reuse_the_analysis(self):
+        runner = self.runner("https://www.youtube.com/watch?v=abc")
+        runner.audio_ids, runner.info_path = ["140-23", "140-12"], Path("/data/analyse-x.json")
+        runner.audio_langs = ["eng", "fra"]
+        command = runner._command()
+        # Vidéo seule + pistes choisies ; sinon le préréglage habituel.
+        self.assertEqual(command[command.index("-f") + 1], "bv+140-23+140-12/bv*+ba/b")
+        self.assertIn("--audio-multistreams", command)
+        self.assertEqual(command[command.index("--postprocessor-args") + 1],
+                         "Merger+ffmpeg_o:-metadata:s:a:0 language=eng -metadata:s:a:1 language=fra")
+        # L'analyse déjà faite sert au téléchargement : pas de 2e visite du site.
+        self.assertEqual(command[-2:], ["--load-info-json", "/data/analyse-x.json"])
+        self.assertNotIn("https://www.youtube.com/watch?v=abc", command)
 
     def test_no_subtitles_when_off_for_audio_or_without_ffmpeg(self):
         url = "https://www.youtube.com/watch?v=abc"
@@ -225,6 +300,49 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(command[command.index("--user-agent") + 1], "NavigateurUA")
         self.assertEqual(command[command.index("--referer") + 1], "https://site.example/")
         self.assertIn("Cookie:session=1", command)
+
+
+class AudioTracksTest(unittest.TestCase):
+    """Choix des pistes audio à partir de l'analyse de la page (sans lancer yt-dlp)."""
+
+    LANGS = ["fr", "es", "en"]
+
+    @staticmethod
+    def audio(format_id, language, note="", pref=None):
+        return {"format_id": format_id, "vcodec": "none", "acodec": "aac", "language": language,
+                "format_note": note, "language_preference": pref}
+
+    def test_arte_original_marked_vo_then_wanted_languages(self):
+        formats = [self.audio("VF-STF-audio_0-allemand", "de", pref=110101),
+                   self.audio("VF-STF-audio_0-allemand__audiodescription_", "de", pref=110101),
+                   self.audio("VF-STF-audio_0-français__audiodescription_", "fr", pref=110101),
+                   self.audio("VF-STF-audio_0-italien__VO_", "it", pref=110101),
+                   self.audio("VF-STF-audio_0-français", "fr", pref=110101),
+                   {"format_id": "VF-STF-1620", "vcodec": "hev1", "acodec": "none"}]
+        self.assertEqual(pick_audio_tracks({"formats": formats}, self.LANGS),
+                         ["VF-STF-audio_0-italien__VO_", "VF-STF-audio_0-français"])
+
+    def test_arte_without_vo_has_no_original(self):
+        # Toutes les pistes ont la même préférence : aucune n'est « l'originale ».
+        formats = [self.audio("audio_0-français", "fr", pref=110101), self.audio("audio_0-allemand", "de", pref=110101)]
+        self.assertEqual(pick_audio_tracks({"formats": formats}, self.LANGS), ["audio_0-français"])
+
+    def test_youtube_original_best_quality_and_human_dubs_only(self):
+        formats = [self.audio("251-23", "en-US", "English (US) original (default), medium", 10),
+                   self.audio("140-23", "en-US", "English (US) original (default), medium", 10),
+                   self.audio("140-12", "fr", "French, medium", -1),
+                   self.audio("140-30", "fr-FR", "French descriptive, medium", -1),
+                   self.audio("140-9", "es-419", "Spanish dubbed-auto, medium", -1),
+                   self.audio("140-2", "de", "German, medium", -1)]
+        # en : déjà là grâce à l'originale ; es : seulement un doublage automatique.
+        self.assertEqual(pick_audio_tracks({"formats": formats}, self.LANGS), ["140-23", "140-12"])
+
+    def test_nothing_to_choose(self):
+        muxed = {"format_id": "18", "vcodec": "avc1", "acodec": "mp4a"}
+        self.assertIsNone(pick_audio_tracks({"formats": [muxed]}, self.LANGS))
+        self.assertIsNone(pick_audio_tracks({"formats": [self.audio("a-de", "de")]}, self.LANGS))
+        self.assertIsNone(pick_audio_tracks({"formats": [self.audio("bad id", "fr")]}, self.LANGS))
+        self.assertIsNone(pick_audio_tracks({"_type": "playlist", "entries": []}, self.LANGS))
 
 
 class ProgressTest(unittest.TestCase):
