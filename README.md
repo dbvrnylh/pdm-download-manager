@@ -229,7 +229,7 @@ Everything lives in the extension's **Réglages** page:
 
 | Setting | Default | Notes |
 |---|---|---|
-| Download folder | your XDG Downloads folder | Detected with `xdg-user-dir`. |
+| Download folder | your XDG Downloads folder | Detected with `xdg-user-dir`. **Choisir…** opens your desktop's folder picker (zenity or kdialog), or type a path (`~/Documents` works). Category folders are created inside it. Before saving, PDM creates the last folder level if needed and writes a test file: a folder you can't write to is refused with the reason, and the previous one is kept. |
 | Video quality | best | Best, 1080p, 720p, 480p or audio only: the highest picture height, or the best below it. Used whenever no quality is picked (button, manager, lists, terminal). File names carry the resolution obtained (`Title [720p].mp4`), so each quality gets its own file. |
 | Connections per file | 8 | 1–32. More only helps when a server throttles each connection. |
 | Simultaneous downloads | 3 | 1–10; the rest waits in the queue. |
@@ -272,6 +272,7 @@ Yes. The daemon is independent from the browser; reopen the manager to see the r
 | Symptom | Fix |
 |---|---|
 | "moteur PDM non installé" | Run `./install.sh` again, then reload the options page. |
+| "dossier de téléchargement introuvable" | The folder chosen in **Réglages** is gone (external disk unplugged?). PDM never recreates it, which would put your downloads on the internal disk unnoticed: plug the disk back in or choose another folder. |
 | The options page shows an old engine version | You ran an old `install.sh`; run the one from this repository. |
 | A YouTube video fails (403…) | Check that yt-dlp is the "copie PDM" in **Réglages**; if not, run `./install.sh` and accept it. Install [deno](https://deno.com) (or node) for full YouTube support. |
 | The video button doesn't appear | Players smaller than 240×135 px are ignored (thumbnails, ads). |

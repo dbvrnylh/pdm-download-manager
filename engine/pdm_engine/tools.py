@@ -21,6 +21,8 @@ from . import paths
 log = logging.getLogger("pdm")
 
 UPDATE_EVERY = 24 * 3600  # s entre deux vérifications de mise à jour de yt-dlp
+PICKER_TIMEOUT = 600  # s : la fenêtre du sélecteur de dossier attend l'utilisateur
+PICKER_TITLE = "PDM : dossier des téléchargements"
 
 # Chrome lance le moteur avec un PATH souvent réduit (sans ~/.local/bin) :
 # on cherche aussi aux emplacements habituels.
@@ -51,6 +53,8 @@ class Tools:
         self.ytdlp_version = None
         self.ytdlp_source = None  # "config", "pdm" (copie mise à jour par PDM) ou "system"
         self.ffmpeg = None
+        self.zenity = None  # sélecteurs de dossier du bureau : GNOME…
+        self.kdialog = None  # … et KDE
         self.deno = None
         self.node = None
         self.js_runtimes_option = False
@@ -68,6 +72,8 @@ class Tools:
     def refresh(self):
         try:
             self.ffmpeg = _which("ffmpeg")
+            self.zenity = _which("zenity")
+            self.kdialog = _which("kdialog")
             self.deno = _which("deno")
             self.node = _which("node")
             self.ytdlp, self.ytdlp_version, self.ytdlp_source = self._find_ytdlp()
@@ -130,4 +136,37 @@ class Tools:
             "ytdlpSource": self.ytdlp_source,
             "ffmpeg": bool(self.ffmpeg),
             "jsRuntime": "deno" if self.deno else ("node" if self.node else None),
+            "folderPicker": bool(self.zenity or self.kdialog),
         }
+
+    def choose_folder(self, start):
+        """Ouvre le sélecteur de dossier du bureau, sur `start`.
+
+        Une extension ne reçoit jamais le chemin réel d'un dossier choisi dans
+        Chrome (sécurité) : c'est donc le moteur qui ouvre la fenêtre. Renvoie le
+        chemin choisi, ou None si l'utilisateur a annulé.
+        """
+        start = start if start and os.path.isdir(start) else str(Path.home())
+        if self.zenity:
+            command = [self.zenity, "--file-selection", "--directory", f"--title={PICKER_TITLE}",
+                       f"--filename={start.rstrip('/')}/"]
+        elif self.kdialog:
+            command = [self.kdialog, "--title", PICKER_TITLE, "--getexistingdirectory", start]
+        else:
+            raise ValueError("aucun sélecteur de dossier sur ce bureau (zenity ou kdialog) : tape le chemin")
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                    timeout=PICKER_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return None
+        except OSError as e:
+            raise ValueError(f"impossible d'ouvrir le sélecteur de dossier : {e.strerror}") from e
+        # Code 1 : annulé. Mais zenity rend aussi 1 quand il ne peut pas ouvrir de
+        # fenêtre (pas d'affichage) ; GTK écrit par ailleurs des avertissements
+        # sans gravité sur stderr : seule la mention de l'affichage compte.
+        if result.returncode != 0:
+            if result.returncode == 1 and "display" not in result.stderr.lower():
+                return None
+            detail = result.stderr.strip().splitlines()[-1:] or [f"code {result.returncode}"]
+            raise ValueError(f"le sélecteur de dossier n'a pas pu s'ouvrir ({detail[0][:150]})")
+        return result.stdout.strip() or None

@@ -19,7 +19,7 @@ import threading
 from urllib.parse import urlparse
 
 from . import paths
-from .httpdl import DownloadError
+from .httpdl import DownloadError, target_dir
 from .util import category_for, sanitize_filename
 
 # Préréglages de qualité : (format avec ffmpeg, format sans ffmpeg).
@@ -349,10 +349,9 @@ class YtdlpDownload:
     def _command(self):
         job, tools = self.job, self.tools
         audio_only = job.preset == "audio"
-        base = self.config.download_dir()
         folder = ("Musique" if audio_only else "Videos") if self.config["categorize"] else ""
-        directory = base / folder if folder else base
-        directory.mkdir(parents=True, exist_ok=True)
+        directory = target_dir(self.config, folder)
+        base = self.config.download_dir()
 
         # La résolution obtenue dans le nom (« Titre [720p].mp4 ») : sinon deux
         # qualités de la même vidéo portent le même nom, et yt-dlp, trouvant le

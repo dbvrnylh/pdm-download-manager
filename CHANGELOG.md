@@ -33,7 +33,19 @@ versions follow [Semantic Versioning](https://semver.org/).
   the resolution obtained ("Title [720p].mp4"), so two qualities of one video get two files, and the
   list import treats the same video in another quality as a new link.
 
+- Choosing the download folder: a "Choisir…" button in "Réglages" opens the desktop's folder picker
+  (zenity or kdialog), run by the engine since an extension never gets the real path of a folder
+  picked in Chrome. Before saving, the folder is really checked: the last level is created if
+  missing (never a whole chain, which would hide a typo or an unplugged disk), and a test file is
+  written and deleted. A refused folder gives the reason (no permission, read-only disk, a file and
+  not a folder, missing parent) and keeps the previous one. "Réglages" shows the free space, and
+  warns when the chosen folder is missing; `pdm-host status` shows both too.
+
 ### Changed
+- A download folder chosen in "Réglages" that has disappeared (external disk unplugged) is no longer
+  recreated when downloading: it would have filled the internal disk unnoticed. The download fails
+  with "dossier de téléchargement introuvable". The default folder and category folders are still
+  created when missing.
 - Video downloads are prepared in a hidden `.pdm-en-cours/` folder of the download folder: the dozens
   of HLS fragments, the separate tracks and the subtitles no longer appear and disappear next to the
   videos; only the finished file shows up. The folder is removed when the download ends or is canceled,

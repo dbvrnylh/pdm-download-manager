@@ -218,6 +218,39 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("attend une valeur", cli(self.base + "/page/d", "--quality").stderr)
         self.assertIn("Usage", cli().stderr)
 
+    def test_folder_picker_opens_on_the_desktop(self):
+        # Faux zenity : selon le fichier « mode », il choisit un dossier, annule,
+        # ou ne trouve pas d'affichage. Il note les arguments reçus.
+        bin_dir = self.downloads.parent / "bin"
+        bin_dir.mkdir()
+        zenity = bin_dir / "zenity"
+        zenity.write_text("""#!/bin/sh
+here=$(dirname "$0")
+printf '%s\\n' "$@" > "$here/args"
+case $(cat "$here/mode") in
+  choisir) echo /home/test/Documents ;;
+  annuler) echo "Gtk-Message: GtkDialog mapped without a transient parent" >&2; exit 1 ;;
+  *) echo "cannot open display: :0" >&2; exit 1 ;;
+esac
+""")
+        zenity.chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}:{self.env['PATH']}"
+        chrome = self.connect()
+        self.assertTrue(chrome.request({"type": "hello"})["tools"]["folderPicker"])
+
+        start = str(self.downloads.parent)
+        answers = {}
+        for mode in ("choisir", "annuler", "sans-affichage"):
+            (bin_dir / "mode").write_text(mode)
+            answers[mode] = chrome.request({"type": "choose-folder", "start": start})
+        self.assertEqual(answers["choisir"]["path"], "/home/test/Documents")
+        self.assertEqual((answers["annuler"]["ok"], answers["annuler"]["path"]), (True, None))
+        self.assertFalse(answers["sans-affichage"]["ok"])
+        self.assertIn("n'a pas pu s'ouvrir", answers["sans-affichage"]["error"])
+        args = (bin_dir / "args").read_text().split("\n")
+        self.assertIn("--directory", args)
+        self.assertIn(f"--filename={start}/", args)
+
     def test_errors_are_replies_not_crashes(self):
         chrome = self.connect()
         bad = chrome.request({"type": "add", "job": {"url": "file:///etc/passwd"}})

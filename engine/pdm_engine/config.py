@@ -49,6 +49,8 @@ class Config:
         with self.lock:
             data = dict(self.data)
         data["effectiveDownloadDir"] = str(self.download_dir())
+        # None : dossier introuvable (disque débranché…), à signaler dans les réglages.
+        data["effectiveDownloadDirFree"] = paths.free_space(self.download_dir())
         return data
 
     def download_dir(self):
@@ -67,6 +69,8 @@ class Config:
                 if value in ("", None):
                     value = None
                 elif not os.path.isabs(os.path.expanduser(value)):
+                    if key == "downloadDir":
+                        raise ValueError("indique le chemin complet du dossier (qui commence par / ou ~)")
                     raise ValueError(f"{key} doit être un chemin absolu")
                 else:
                     value = os.path.expanduser(value)
@@ -79,7 +83,8 @@ class Config:
                 raise ValueError(f"{key} doit valoir true ou false")
             clean[key] = value
         if clean.get("downloadDir"):
-            Path(clean["downloadDir"]).mkdir(parents=True, exist_ok=True)
+            # Avant d'enregistrer : un dossier refusé laisse l'ancien en place.
+            clean["downloadDir"] = str(paths.check_download_dir(clean["downloadDir"]))
         with self.lock:
             self.data.update(clean)
             write_json_atomic(self.path, self.data, mode=0o644)

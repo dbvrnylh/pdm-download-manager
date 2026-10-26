@@ -21,7 +21,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import httpdl, util  # noqa: E402
+from pdm_engine import httpdl, paths, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
@@ -162,6 +162,33 @@ class EngineTest(unittest.TestCase):
 
     # ─── Erreurs et refus ──────────────────────────────────────────────────
 
+    def test_vanished_download_dir_is_not_recreated(self):
+        # Disque externe débranché : le dossier choisi a disparu. Le recréer le
+        # mettrait sur le disque interne, à l'insu de l'utilisateur.
+        chosen = self.root / "ssd" / "PDM"
+        chosen.parent.mkdir()
+        self.config.update({"downloadDir": str(chosen)})
+        shutil.rmtree(chosen.parent)
+        job = self.wait(self.add("/range/small.zip").id, {"failed", "completed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("introuvable", job.error)
+        self.assertFalse(chosen.exists())
+
+        # Le dossier par défaut (Téléchargements), lui, est créé s'il manque ; les catégories aussi.
+        class DefaultDir:
+            def __init__(self, base):
+                self.base = base
+
+            def download_dir(self):
+                return self.base
+
+            def __getitem__(self, key):
+                return None  # downloadDir non choisi
+
+        base = self.root / "Telechargements"
+        self.assertEqual(httpdl.target_dir(DefaultDir(base), "Videos"), base / "Videos")
+        self.assertTrue((base / "Videos").is_dir())
+
     def test_video_quality_defaults_to_the_setting(self):
         self.config.update({"videoQuality": "720"})
         url = "https://exemple.org/video"
@@ -267,6 +294,37 @@ class ConfigTest(unittest.TestCase):
                 config.update({"languages": bad})
         with self.assertRaises(ValueError):
             config.update({"subtitles": "oui"})
+
+    def test_download_dir_is_checked_before_saving(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        config = Config(root / "config.json")
+        good = root / "Documents"
+        good.mkdir()
+        # Dernier niveau créé ; « ~ » accepté.
+        self.assertEqual(config.update({"downloadDir": str(good / "PDM")})["downloadDir"], str(good / "PDM"))
+        self.assertTrue((good / "PDM").is_dir())
+        self.assertIsInstance(config.snapshot()["effectiveDownloadDirFree"], int)
+        self.assertEqual(Path(config.update({"downloadDir": "~"})["downloadDir"]), Path.home())
+        config.update({"downloadDir": str(good)})
+        file = root / "fichier.txt"
+        file.write_text("x")
+        cases = {
+            "Documents/PDM": "chemin complet",
+            str(root / "absent" / "PDM"): "n'existe pas (disque débranché",  # rien de fabriqué en chaîne
+            str(file): "est un fichier",
+        }
+        if os.geteuid() != 0:  # root écrit partout
+            locked = root / "lecture-seule"
+            locked.mkdir(mode=0o555)
+            cases[str(locked)] = "impossible d'écrire dans"
+        for value, message in cases.items():
+            with self.assertRaises(ValueError, msg=value) as caught:
+                config.update({"downloadDir": value})
+            self.assertIn(message, str(caught.exception))
+        self.assertFalse((root / "absent").exists())
+        self.assertEqual(config["downloadDir"], str(good), "un dossier refusé laisse l'ancien en place")
+        self.assertEqual(list(good.glob(".pdm-essai-*")), [], "le fichier d'essai est effacé")
+        self.assertIsNone(paths.free_space(root / "absent"))
 
     def test_video_quality_is_one_of_the_presets(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")

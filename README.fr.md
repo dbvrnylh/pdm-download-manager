@@ -230,7 +230,7 @@ Tout se règle dans la page **Réglages** de l'extension :
 
 | Réglage | Par défaut | Remarques |
 |---|---|---|
-| Dossier de destination | ton dossier Téléchargements (XDG) | Détecté avec `xdg-user-dir`. |
+| Dossier de destination | ton dossier Téléchargements (XDG) | Détecté avec `xdg-user-dir`. **Choisir…** ouvre le sélecteur de dossier de ton bureau (zenity ou kdialog), ou tape un chemin (`~/Documents` marche). Les dossiers de catégorie sont créés dedans. Avant d'enregistrer, PDM crée le dernier niveau s'il manque et écrit un fichier d'essai : un dossier où tu ne peux pas écrire est refusé avec la raison, et l'ancien est gardé. |
 | Qualité des vidéos | meilleure | Meilleure, 1080p, 720p, 480p ou audio seul : la hauteur d'image maximale, ou la meilleure en dessous. Sert dès qu'aucune qualité n'est choisie (bouton, gestionnaire, listes, terminal). Le nom du fichier porte la résolution obtenue (`Titre [720p].mp4`) : chaque qualité a son propre fichier. |
 | Connexions par fichier | 8 | De 1 à 32. Monter n'aide que si le serveur limite chaque connexion. |
 | Téléchargements simultanés | 3 | De 1 à 10 ; les suivants attendent dans la file. |
@@ -274,6 +274,7 @@ Oui. Le démon est indépendant du navigateur ; rouvre le gestionnaire pour voir
 | Symptôme | Solution |
 |---|---|
 | « moteur PDM non installé » | Relance `./install.sh`, puis recharge la page de réglages. |
+| « dossier de téléchargement introuvable » | Le dossier choisi dans **Réglages** a disparu (disque externe débranché ?). PDM ne le recrée jamais, ce qui mettrait tes téléchargements sur le disque interne sans que tu le saches : rebranche le disque ou choisis un autre dossier. |
 | Les réglages affichent une ancienne version du moteur | Tu as lancé un ancien `install.sh` : lance celui de ce dépôt. |
 | Une vidéo YouTube échoue (403…) | Vérifie dans **Réglages** que yt-dlp est la « copie PDM » ; sinon relance `./install.sh` et accepte. Installe [deno](https://deno.com) (ou node) pour tous les formats YouTube. |
 | Le bouton vidéo n'apparaît pas | Les lecteurs de moins de 240 × 135 px sont ignorés (miniatures, publicités). |

@@ -1,7 +1,10 @@
 """Emplacements des fichiers du moteur (conventions XDG)."""
 
+import errno
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -71,3 +74,47 @@ def default_download_dir():
         if (home / name).is_dir():
             return home / name
     return home / "Downloads"
+
+
+def check_download_dir(path):
+    """Vérifie qu'on peut télécharger dans `path` ; le crée si seul ce dernier niveau manque.
+
+    Lève ValueError, avec un message clair, sinon. Seul un vrai essai d'écriture
+    est fiable : les droits affichés ne disent rien d'un disque monté en lecture
+    seule, d'une clé en FAT ou d'un dossier partagé.
+    """
+    path = Path(os.path.normpath(path))
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"{path} est un fichier, pas un dossier")
+    if not path.exists():
+        # Un parent absent, c'est une faute de frappe ou un disque débranché :
+        # fabriquer toute l'arborescence le cacherait.
+        if not path.parent.is_dir():
+            raise ValueError(f"le dossier {path.parent} n'existe pas (disque débranché ou faute de frappe ?)")
+        try:
+            path.mkdir()
+        except OSError as e:
+            raise ValueError(f"impossible de créer {path} : {_why(e)}") from e
+    try:
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".pdm-essai-"):
+            pass
+    except OSError as e:
+        raise ValueError(f"impossible d'écrire dans {path} : {_why(e)}") from e
+    return path
+
+
+def free_space(path):
+    """Octets libres sur le disque de `path`, ou None si le dossier est introuvable."""
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
+def _why(error):
+    return {
+        errno.EACCES: "ton utilisateur n'a pas le droit d'y écrire",
+        errno.EPERM: "ton utilisateur n'a pas le droit d'y écrire",
+        errno.EROFS: "le disque est en lecture seule",
+        errno.ENOSPC: "le disque est plein",
+    }.get(error.errno, error.strerror or str(error))

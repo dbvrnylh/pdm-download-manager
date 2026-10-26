@@ -3,6 +3,7 @@
 
 import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
+import { formatBytes } from '../lib/format.js';
 import { PRESETS } from '../lib/jobs.js';
 import { getSettings, setSetting } from '../lib/settings.js';
 
@@ -16,6 +17,9 @@ const engine = new EngineClient();
 const form = document.getElementById('engine-form');
 const saved = document.getElementById('saved');
 const status = document.getElementById('engine-status');
+const chooseDir = document.getElementById('choose-dir');
+const dirWarning = document.getElementById('download-dir-warning');
+const PICKER_TIMEOUT = 10 * 60 * 1000; // la fenêtre attend l'utilisateur
 
 const fields = {
   downloadDir: document.getElementById('download-dir'),
@@ -77,6 +81,9 @@ try {
 function fillForm(config) {
   fields.downloadDir.value = config.downloadDir ?? '';
   fields.downloadDir.placeholder = config.effectiveDownloadDir;
+  // null : dossier introuvable. (undefined : moteur plus ancien, qui ne le dit pas.)
+  dirWarning.hidden = config.effectiveDownloadDirFree !== null;
+  dirWarning.textContent = `Dossier introuvable (disque débranché ?) : les téléchargements échoueront tant qu’il manque.`;
   fields.connections.value = config.connections;
   fields.maxParallel.value = config.maxParallel;
   fields.categorize.checked = config.categorize;
@@ -97,6 +104,7 @@ function fillForm(config) {
 }
 
 function renderTools(tools) {
+  chooseDir.hidden = !tools.folderPicker;
   const rows = [
     [
       'yt-dlp',
@@ -135,9 +143,28 @@ form.addEventListener('submit', async (event) => {
   try {
     const reply = await engine.request({ type: 'config', set: changes });
     fillForm(reply.config);
-    showSaved('Enregistré.');
+    const free = reply.config.effectiveDownloadDirFree;
+    showSaved(free == null ? 'Enregistré.' : `Enregistré · ${formatBytes(free)} libres dans ce dossier.`);
   } catch (err) {
     showSaved(err.message, true);
+  }
+});
+
+// Le sélecteur de dossier du bureau, ouvert par le moteur : seul lui peut
+// connaître le vrai chemin choisi.
+chooseDir.addEventListener('click', async () => {
+  chooseDir.disabled = true;
+  try {
+    const start = fields.downloadDir.value.trim() || fields.downloadDir.placeholder;
+    const reply = await engine.request({ type: 'choose-folder', start }, PICKER_TIMEOUT);
+    if (reply.path) {
+      fields.downloadDir.value = reply.path;
+      showSaved('Dossier choisi : clique sur Enregistrer pour l’utiliser.');
+    }
+  } catch (err) {
+    showSaved(err.message, true);
+  } finally {
+    chooseDir.disabled = false;
   }
 });
 

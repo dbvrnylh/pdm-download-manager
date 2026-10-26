@@ -98,6 +98,21 @@ pre {
   color: var(--text);
 }
 
+.field .input-row {
+  display: flex;
+  gap: 8px;
+  font-weight: normal;
+}
+
+.field .input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.field .warning {
+  color: var(--danger);
+}
+
 .field select {
   font: inherit;
   justify-self: start;

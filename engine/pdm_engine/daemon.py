@@ -178,6 +178,9 @@ class Daemon:
             elif kind == "remove":
                 self.engine.remove(message["id"], bool(message.get("deleteFile")))
                 reply()
+            elif kind == "choose-folder":
+                # La fenêtre attend l'utilisateur : on ne bloque pas ce client.
+                threading.Thread(target=self._choose_folder, args=(message, reply), daemon=True).start()
             elif kind == "clear":
                 self.engine.clear_finished()
                 reply()
@@ -202,6 +205,12 @@ class Daemon:
         except Exception as e:
             log.exception("commande %s", kind)
             reply(False, error=f"erreur interne : {e}")
+
+    def _choose_folder(self, message, reply):
+        try:
+            reply(path=self.tools.choose_folder(message.get("start") or str(self.config.download_dir())))
+        except ValueError as e:
+            reply(False, error=str(e))
 
     def _add(self, message, reply):
         try:

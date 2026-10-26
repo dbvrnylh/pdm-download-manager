@@ -34,8 +34,15 @@
           <h2>Téléchargements</h2>
           <label class="field">
             <span>Dossier de destination</span>
-            <input id="download-dir" type="text" spellcheck="false" />
-            <small>Laisse vide pour utiliser ton dossier Téléchargements.</small>
+            <span class="input-row">
+              <input id="download-dir" type="text" spellcheck="false" />
+              <button type="button" id="choose-dir" hidden>Choisir…</button>
+            </span>
+            <small>
+              Laisse vide pour utiliser ton dossier Téléchargements. Les dossiers de catégorie (Videos, Musique,
+              Archives…) sont créés dedans. PDM vérifie qu'il peut y écrire avant d'enregistrer.
+            </small>
+            <small id="download-dir-warning" class="warning" hidden></small>
           </label>
           <div class="grid">
             <label class="field">

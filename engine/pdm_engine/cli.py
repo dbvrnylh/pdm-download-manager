@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from . import VERSION, paths
+from .util import human_size
 
 
 class _Connection:
@@ -125,7 +126,9 @@ def main(args):
         reply = _request({"type": "hello"})
         tools = reply["tools"]
         print(f"PDM {reply['version']} — moteur actif")
-        print(f"  Dossier : {reply['config']['effectiveDownloadDir']}")
+        free = reply["config"].get("effectiveDownloadDirFree")
+        state = f"{human_size(free)} libres" if free is not None else "INTROUVABLE (disque débranché ?)"
+        print(f"  Dossier : {reply['config']['effectiveDownloadDir']} · {state}")
         source = {"pdm": " (copie PDM)", "system": " (système)", "config": ""}.get(tools.get("ytdlpSource"), "")
         print(f"  yt-dlp : {tools['ytdlp'] or 'absent'}{source} · ffmpeg : {'oui' if tools['ffmpeg'] else 'non'}"
               f" · JavaScript : {tools['jsRuntime'] or 'aucun'}")

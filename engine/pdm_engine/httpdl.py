@@ -48,6 +48,30 @@ class DownloadError(Exception):
     """Erreur affichée telle quelle à l'utilisateur (en français)."""
 
 
+def target_dir(config, folder):
+    """Dossier où ranger le fichier : celui des réglages, plus sa catégorie (`folder`, ou "").
+
+    Un dossier choisi dans les réglages qui a disparu (disque externe débranché,
+    dossier supprimé) n'est jamais recréé : il le serait sur le disque interne,
+    à l'insu de l'utilisateur. Seul le dossier par défaut (Téléchargements) l'est,
+    comme les dossiers de catégorie.
+    """
+    base = config.download_dir()
+    if not base.is_dir():
+        if config["downloadDir"]:
+            raise DownloadError(f"dossier de téléchargement introuvable : {base} (disque débranché ?)")
+        base.mkdir(parents=True, exist_ok=True)
+    directory = base / folder if folder else base
+    try:
+        directory.mkdir(exist_ok=True)
+    except OSError as e:
+        raise DownloadError(f"impossible de créer {directory} : {e.strerror}") from e
+    # Vérifié à l'enregistrement, mais les droits ont pu changer depuis.
+    if not os.access(directory, os.W_OK):
+        raise DownloadError(f"pas le droit d'écrire dans {directory}")
+    return directory
+
+
 class Rejected(DownloadError):
     """La sonde montre que ce n'est pas un fichier que le moteur doit prendre."""
 
@@ -312,10 +336,8 @@ class HttpDownload:
         job = self.job
         if job.path:  # nouvelle tentative depuis zéro : on jette l'ancien partiel
             self.cleanup()
-        base = self.config.download_dir()
-        folder = category_for(job.filename, job.mime)[1]
-        directory = base / folder if self.config["categorize"] else base
-        directory.mkdir(parents=True, exist_ok=True)
+        folder = category_for(job.filename, job.mime)[1] if self.config["categorize"] else ""
+        directory = target_dir(self.config, folder)
         if self.size and shutil.disk_usage(directory).free < self.size:
             raise DownloadError(f"espace disque insuffisant ({human_size(self.size)} nécessaires)")
         job.path = str(self.reserve(directory, sanitize_filename(job.filename)))
