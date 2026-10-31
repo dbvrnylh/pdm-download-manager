@@ -193,7 +193,15 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
 3. When the server provides an `ETag` or `Last-Modified`, every range request carries `If-Range`, so a file that
    changes on the server is detected instead of silently corrupted. Servers that answer inconsistently get a
    single-connection fallback.
-4. Segment state is saved every two seconds: pause, crash or reboot, each segment resumes where it stopped.
+4. Segment state is saved every two seconds, but only promises what the disk has confirmed (`fdatasync` every
+   five seconds and at each pause): after a pause, a crash, a reboot or a power cut, each segment resumes from its
+   last safe point, a few seconds back at worst. A file is only "Terminé" once the disk has confirmed it and its
+   name.
+5. Many servers only accept a few connections per IP address and refuse the next ones (503, 429…). At the first
+   refusal, PDM notes what that site accepts — the most connections it accepted at once — and sticks to it for all
+   its downloads: one more connection waits for a slot ("En attente du serveur…") instead of failing, and a file
+   starts with only as many segments as the site accepts. The limit goes up by one connection every 15 seconds
+   without a refusal, and is forgotten after ten minutes.
 
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official
@@ -232,7 +240,7 @@ Everything lives in the extension's **Réglages** page:
 |---|---|---|
 | Download folder | your XDG Downloads folder | Detected with `xdg-user-dir`. **Choisir…** opens your desktop's folder picker (zenity or kdialog), or type a path (`~/Documents` works). Category folders are created inside it. Before saving, PDM creates the last folder level if needed and writes a test file: a folder you can't write to is refused with the reason, and the previous one is kept. |
 | Video quality | best | Best, 1080p, 720p, 480p or audio only: the highest picture height, or the best below it. Used whenever no quality is picked (button, manager, lists, terminal). File names carry the resolution obtained (`Title [720p].mp4`), so each quality gets its own file. |
-| Connections per file | 8 | 1–32. More only helps when a server throttles each connection. |
+| Connections per file | 8 | 1–32. More only helps when a server throttles each connection. A site that accepts fewer is followed automatically (see [How it works](#how-it-works)). |
 | Speed limit | none | For PDM as a whole, all downloads together, so a big download doesn't saturate the home connection. Files share one token bucket; each yt-dlp video gets a fixed share of it when it starts (an approximation: a new limit applies to videos from their next start). |
 | Time window | 23:00 → 06:00 | When downloads marked **Plus tard** progress; it may cross midnight. When it closes, an unfinished one goes back to the queue and resumes from what it received at the next window. The computer must stay on (the engine stays up by itself while downloads are waiting). |
 | Simultaneous downloads | 3 | 1–10; the rest waits in the queue. |
@@ -311,6 +319,7 @@ extension/                 Chrome extension (Manifest V3, ES modules, no build s
 engine/
   pdm-host                 entry point (bridge, daemon, CLI)
   pdm_engine/              httpdl.py (segmented HTTP) · ytdlp.py · engine.py (queue, persistence)
+                           hosts.py (connections per site) · limiter.py (speed limit)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
 tests/                     Python integration tests against a local HTTP server, Node unit tests
 install.sh · uninstall.sh
@@ -325,7 +334,8 @@ npx eslint extension                       # lint
 ```
 
 The Python suite spins up a real HTTP server that simulates range support, per-connection throttling,
-dropped connections, files changing mid-download, unstable ETags and cross-host redirects, then checks the
+dropped connections, servers limiting connections per IP, files changing mid-download, unstable ETags and
+cross-host redirects, then checks the
 SHA-256 of every downloaded file. The yt-dlp tests generate their own HLS stream with ffmpeg; they are skipped
 when yt-dlp or ffmpeg is missing. CI runs everything on every push.
 
@@ -338,7 +348,6 @@ Design choices worth knowing:
 
 ## Roadmap
 
-- Adapt to servers that limit the number of connections instead of failing.
 - Automatic hand-back to Chrome with a per-site exception list.
 - English interface.
 - Firefox support and distribution packages (`.deb`, AUR).

@@ -20,6 +20,7 @@ from urllib.parse import quote
 from . import httpdl, paths
 from .config import QUALITIES
 from .config import MIN_SPEED
+from .hosts import Hosts
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
 from .limiter import Limiter
 from .util import filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
@@ -86,6 +87,7 @@ class Engine:
         # Limite de vitesse : un seau pour tout le moteur HTTP, et une part fixe
         # pour chaque yt-dlp (processus à part, qui ne peut pas y puiser).
         self.limiter = Limiter(self._http_rate)
+        self.hosts = Hosts()  # connexions ouvertes chez chaque site, et la limite de chacun
         self.ytdlp_shares = {}  # id → part donnée (octets/s)
         self.ytdlp_reserved = 0  # leur total, lu sans verrou par le seau
         self.now = time.localtime  # horloge de la plage horaire (remplacée dans les tests)
@@ -338,7 +340,7 @@ class Engine:
                 self.ytdlp_reserved += runner.limit_rate
         else:
             runner = HttpDownload(job, self.config, lambda d, n: self._reserve(job.id, d, n), first,
-                                  limiter=self.limiter)
+                                  limiter=self.limiter, hosts=self.hosts)
         self.runners[job.id] = runner
         job.status, job.error, job.sample, job.speed = "downloading", None, None, 0.0
         self.dirty = True

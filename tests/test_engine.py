@@ -4,15 +4,18 @@ Lancer : python3 -m unittest discover -s tests -v   (depuis la racine du projet)
 """
 
 import hashlib
+import http.client
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import threading
 import time
 import unittest
 import unittest.mock
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +31,7 @@ os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 from pdm_engine import daemon, httpdl, paths, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine, in_window  # noqa: E402
+from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
 from pdm_engine.limiter import Limiter  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
 
@@ -310,6 +314,56 @@ class EngineTest(unittest.TestCase):
                 self.engine.add({"url": self.base + "/range/small.zip", "headers": bad})
         self.assertEqual(self.engine.jobs, {})
 
+    # ─── Serveurs qui limitent les connexions ──────────────────────────────
+
+    def busy_server(self, path, connections):
+        """Lance un téléchargement et attend qu'il occupe `connections` places chez /limited/."""
+        job = self.add(path)
+        deadline = time.time() + 10
+        while fx.LIMITED["active"] < connections and time.time() < deadline:
+            time.sleep(0.02)
+        return job
+
+    def test_a_server_limiting_connections_is_followed_instead_of_failing(self):
+        fx.LIMITED.update(peak=0, refused=0)
+        job = self.wait(self.add("/limited/3/big.bin").id, {"completed", "failed"}, timeout=60)
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["big.bin"])
+        self.assertEqual(self.engine.hosts.limit("127.0.0.1"), 3)
+        self.assertEqual(self.engine.hosts.connected, {})
+        # Apprise d'emblée : les 5 connexions de trop (8 - 3), puis quelques refus isolés en fin
+        # de segment (le serveur compte encore la connexion fermée), qui ne la font pas baisser.
+        self.assertLessEqual(fx.LIMITED["refused"], 20, fx.LIMITED)
+        self.assertEqual(self.engine.hosts.open, {}, "toutes les places sont rendues")
+
+    def test_a_download_waits_while_another_fills_a_limited_server(self):
+        first = self.busy_server("/limited/2/big.bin", 2)
+        second = self.add("/limited/2/small.zip")
+        stages, deadline = set(), time.time() + 60
+        while second.status not in ("completed", "failed") and time.time() < deadline:
+            stages.add(second.stage)
+            time.sleep(0.05)
+        second = self.wait(second.id, {"completed", "failed"})
+        # Avant : son premier essai recevait 503 et il échouait aussitôt.
+        self.assertEqual(second.status, "completed", second.error)
+        self.assertIn(httpdl.WAITING, stages)
+        self.assertEqual(sha(second.path), self.hashes["small.zip"])
+        self.assertEqual(sha(self.wait(first.id, {"completed"}).path), self.hashes["big.bin"])
+        self.assertEqual(self.engine.hosts.open, {})
+
+    def test_a_full_site_does_not_hold_up_the_others(self):
+        first = self.busy_server("/limited/2/big.bin", 2)
+        started = time.time()
+        # Même serveur de test, autre nom : pour le moteur, un autre site.
+        other = self.engine.add({"url": self.base.replace("127.0.0.1", "localhost") + "/range/small.zip"})
+        other = self.wait(other.id, {"completed", "failed"}, timeout=10)
+        self.assertEqual(other.status, "completed", other.error)
+        self.assertLess(time.time() - started, 3)
+        self.assertEqual(self.engine.jobs[first.id].status, "downloading")
+        self.engine.cancel(first.id)
+        self.wait(first.id, {"canceled"})
+        self.assertEqual(self.engine.hosts.open, {})
+
     # ─── Limite de vitesse et plage horaire ────────────────────────────────
 
     def test_speed_limit_holds_for_one_file_and_is_shared_by_two(self):
@@ -564,6 +618,63 @@ class ConfigTest(unittest.TestCase):
         for bad in ("4k", "", None, 720):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 config.update({"videoQuality": bad})
+
+
+class HostsTest(unittest.TestCase):
+    def test_a_limit_is_what_the_server_proved_it_accepts(self):
+        now = [0.0]
+        hosts = Hosts(clock=lambda: now[0])
+        self.assertTrue(all(hosts.take("site") for _ in range(5)), "rien d'appris : pas de limite")
+        for _ in range(3):
+            hosts.accepted("site")  # le serveur en accepte 3…
+        self.assertTrue(hosts.refused("site"))  # … et refuse la 4e
+        self.assertEqual(hosts.limit("site"), 3)
+        self.assertTrue(hosts.refused("site"))  # la 5e aussi
+        self.assertEqual(hosts.limit("site"), 3)
+        self.assertFalse(hosts.take("site"), "plein : attendre")
+        self.assertTrue(hosts.take("autre"), "chaque site a ses places")
+        # On ferme une connexion, le serveur la compte encore un instant et refuse la suivante :
+        # il en acceptait 3 à l'instant, la limite ne baisse pas.
+        hosts.closed("site")
+        hosts.give_back("site")
+        self.assertTrue(hosts.take("site"))
+        self.assertTrue(hosts.refused("site"))
+        self.assertEqual(hosts.limit("site"), 3)
+        # Passé PEAK_WINDOW, ces 3 ne prouvent plus rien : un refus avec 2 acceptées, c'est 2.
+        now[0] += PEAK_WINDOW + 1
+        self.assertTrue(hosts.take("site"))
+        self.assertTrue(hosts.refused("site"))
+        self.assertEqual(hosts.limit("site"), 2)
+        # Une connexion acceptée au-delà de la limite la relève aussitôt.
+        self.assertTrue(hosts.take("site", force=True))
+        hosts.accepted("site")
+        self.assertEqual(hosts.limit("site"), 3)
+        # Sans refus, elle remonte d'une connexion à la fois, puis s'oublie.
+        now[0] += RAISE_EVERY
+        self.assertEqual(hosts.limit("site"), 4)
+        now[0] += FORGET_AFTER
+        self.assertIsNone(hosts.limit("site"), "un refus passager ne bride pas pour toujours")
+
+    def test_a_lone_refusal_is_a_real_error(self):
+        hosts = Hosts()
+        hosts.take("site")
+        self.assertFalse(hosts.refused("site"), "seule chez ce site : une vraie erreur")
+        self.assertEqual(hosts.open, {"site": 1}, "elle garde sa place")
+        self.assertIsNone(hosts.limit("site"))
+
+    def test_what_counts_as_a_refusal(self):
+        def status(code):
+            return urllib.error.HTTPError("http://site/f", code, "", {}, None)
+
+        self.assertTrue(httpdl.is_refusal(status(503)))
+        self.assertTrue(httpdl.is_refusal(status(429)))
+        self.assertFalse(httpdl.is_refusal(status(403)), "un lien neuf refusé : un vrai refus")
+        self.assertTrue(httpdl.is_refusal(status(403), accepted=True), "un segment de plus : une limite")
+        self.assertFalse(httpdl.is_refusal(status(404), accepted=True))
+        self.assertTrue(httpdl.is_refusal(urllib.error.URLError(ConnectionRefusedError())))
+        self.assertTrue(httpdl.is_refusal(http.client.RemoteDisconnected()))
+        self.assertTrue(httpdl.is_refusal(TimeoutError()))
+        self.assertFalse(httpdl.is_refusal(urllib.error.URLError(socket.gaierror())))
 
 
 class LimiterTest(unittest.TestCase):

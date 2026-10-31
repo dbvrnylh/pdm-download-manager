@@ -57,6 +57,20 @@ versions follow [Semantic Versioning](https://semver.org/).
   midnight); everything else starts right away. When the window closes, an unfinished one goes back to
   the queue and resumes from what it received at the next window. "Maintenant" undoes it.
 
+- Servers that limit connections per IP address are followed instead of failing. Many servers accept
+  only a few connections (4, 2, sometimes 1) and refuse the next ones with 503, 429 or a closed
+  connection: the extra connections of a download used to retry until they made the whole download
+  fail, and a download started while another one filled the site failed at its first request ("erreur
+  du serveur (503)"). At the first refusal, the engine now notes what the site accepts — the most
+  connections it accepted at once in the last seconds, not the engine's own count, which misses a
+  connection the server still counts just after it closed — and sticks to it for all the downloads of
+  that site: one more connection waits for a free slot ("En attente du serveur…"), and a file starts
+  with only as many segments as the site accepts. A lone refusal right after a connection closed gets
+  a second chance 0.25 s later rather than lowering the limit. The limit goes up by one connection
+  every 15 seconds without a refusal, rises at once when more connections get accepted, and is
+  forgotten after ten minutes. Other sites are not held up. Real errors (404, 410, a 403 on a new link)
+  still fail right away.
+
 - Taken-over downloads replay the browser's own request, as IDM does: the extension notes the headers
   Chrome sends (webRequest with extraHeaders, in memory only, 60 s, used once) and the engine replays
   them, so it carries the original cookies, Accept-Language, sec-ch-ua, sec-fetch-*… that some anti-bot

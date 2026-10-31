@@ -192,8 +192,15 @@ obtient une erreur ou une page HTML, Chrome continue.
 3. Quand le serveur fournit un `ETag` ou un `Last-Modified`, chaque requête porte `If-Range` : un fichier modifié
    sur le serveur est détecté au lieu d'être corrompu en silence. Un serveur incohérent d'une requête à l'autre
    passe automatiquement en une seule connexion.
-4. L'état des segments est sauvegardé toutes les deux secondes : après une pause, un plantage ou un redémarrage,
-   chaque segment repart là où il s'était arrêté.
+4. L'état des segments est sauvegardé toutes les deux secondes, mais ne promet que ce que le disque a confirmé
+   (`fdatasync` toutes les cinq secondes et à chaque pause) : après une pause, un plantage, un redémarrage ou une
+   coupure de courant, chaque segment repart de son dernier point sûr, au pire quelques secondes en arrière. Un
+   fichier n'est « Terminé » qu'une fois que le disque l'a confirmé, lui et son nom.
+5. Beaucoup de serveurs n'acceptent que quelques connexions par adresse IP et refusent les suivantes (503, 429…).
+   Au premier refus, PDM note ce que ce site accepte — le plus de connexions qu'il a acceptées à la fois — et s'y
+   tient pour tous ses téléchargements : une connexion de plus attend une place (« En attente du serveur… ») au
+   lieu d'échouer, et un fichier ne démarre qu'avec autant de segments que le site en accepte. La limite remonte
+   d'une connexion toutes les 15 secondes sans refus, et s'oublie après dix minutes.
 
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de
@@ -233,7 +240,7 @@ Tout se règle dans la page **Réglages** de l'extension :
 |---|---|---|
 | Dossier de destination | ton dossier Téléchargements (XDG) | Détecté avec `xdg-user-dir`. **Choisir…** ouvre le sélecteur de dossier de ton bureau (zenity ou kdialog), ou tape un chemin (`~/Documents` marche). Les dossiers de catégorie sont créés dedans. Avant d'enregistrer, PDM crée le dernier niveau s'il manque et écrit un fichier d'essai : un dossier où tu ne peux pas écrire est refusé avec la raison, et l'ancien est gardé. |
 | Qualité des vidéos | meilleure | Meilleure, 1080p, 720p, 480p ou audio seul : la hauteur d'image maximale, ou la meilleure en dessous. Sert dès qu'aucune qualité n'est choisie (bouton, gestionnaire, listes, terminal). Le nom du fichier porte la résolution obtenue (`Titre [720p].mp4`) : chaque qualité a son propre fichier. |
-| Connexions par fichier | 8 | De 1 à 32. Monter n'aide que si le serveur limite chaque connexion. |
+| Connexions par fichier | 8 | De 1 à 32. Monter n'aide que si le serveur limite chaque connexion. Un site qui en accepte moins est suivi automatiquement (voir [Fonctionnement](#fonctionnement)). |
 | Vitesse maximale | aucune | Pour tout PDM, tous téléchargements confondus : un gros téléchargement ne sature plus la connexion de la maison. Les fichiers puisent dans un même seau de jetons ; chaque vidéo yt-dlp en reçoit une part fixe à son démarrage (approximatif : une nouvelle limite s'applique aux vidéos à leur prochain démarrage). |
 | Plage horaire | 23:00 → 06:00 | Quand avancent les téléchargements marqués **Plus tard** ; elle peut passer minuit. À sa fermeture, un téléchargement pas fini retourne en file et reprend, à la plage suivante, à partir de ce qu'il a reçu. Le PC doit rester allumé (le moteur, lui, reste actif tant que des téléchargements attendent). |
 | Téléchargements simultanés | 3 | De 1 à 10 ; les suivants attendent dans la file. |
@@ -313,6 +320,7 @@ extension/                 extension Chrome (Manifest V3, modules ES, sans compi
 engine/
   pdm-host                 point d'entrée (pont, démon, ligne de commande)
   pdm_engine/              httpdl.py (HTTP segmenté) · ytdlp.py · engine.py (file d'attente, persistance)
+                           hosts.py (connexions par site) · limiter.py (vitesse maximale)
                            daemon.py (socket Unix) · host.py (pont Native Messaging)
 tests/                     tests d'intégration Python contre un serveur HTTP local, tests unitaires Node
 install.sh · uninstall.sh
@@ -327,7 +335,7 @@ npx eslint extension                       # analyse du code
 ```
 
 La suite Python démarre un vrai serveur HTTP qui simule les plages d'octets, un débit limité par connexion, des
-coupures, des fichiers modifiés en cours de route, des ETag instables et des redirections vers un autre hôte, puis
+coupures, des serveurs qui limitent les connexions par IP, des fichiers modifiés en cours de route, des ETag instables et des redirections vers un autre hôte, puis
 vérifie le SHA-256 de chaque fichier téléchargé. Les tests yt-dlp génèrent leur propre flux HLS avec ffmpeg ; ils
 sont ignorés si yt-dlp ou ffmpeg manquent. La CI lance tout à chaque envoi.
 
@@ -342,7 +350,6 @@ Choix de conception :
 
 ## Feuille de route
 
-- S'adapter aux serveurs qui limitent le nombre de connexions au lieu d'échouer.
 - Retour automatique vers Chrome, avec une liste de sites exclus.
 - Interface en anglais.
 - Prise en charge de Firefox et paquets (`.deb`, AUR).

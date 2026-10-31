@@ -24,6 +24,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .hosts import Hosts
 from .util import (
     ensure_extension,
     extension_of,
@@ -41,9 +42,13 @@ CHUNK = 64 * 1024
 MIN_SPLIT = 1024 * 1024  # en dessous, une connexion de plus ne fait rien gagner
 MAX_RETRIES = 6
 TIMEOUT = 30
+PLACE_WAIT = 0.5  # s entre deux coups d'œil quand le serveur n'accepte pas plus de connexions
+LAG_WAIT = 0.25  # s avant de réessayer après un refus isolé (le serveur range une connexion fermée)
+WAITING = "En attente du serveur…"
 SYNC_EVERY = 5.0  # s entre deux points de reprise sûrs (fdatasync) : au pire, autant à refaire
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) PDM/2.0"
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+LIMIT_HTTP = {429, 503}  # « trop de connexions » (nginx limit_conn, mod_limitipconn…)
 CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
 
 
@@ -112,6 +117,19 @@ def http_error_message(error):
     if code in known:
         return known[code]
     return f"erreur du serveur ({code})" if code >= 500 else f"erreur HTTP {code}"
+
+
+def is_refusal(error, accepted=False):
+    """L'erreur qu'un serveur renvoie quand il a assez de connexions de nous ?
+
+    `accepted` : la même requête marche déjà sur une autre connexion (un segment
+    de plus). Un 403 y est alors une limite ; pour un lien neuf, c'est le plus
+    souvent un vrai refus, qu'il ne faut pas attendre.
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in LIMIT_HTTP or (accepted and error.code == 403)
+    reason = getattr(error, "reason", error)  # URLError enveloppe l'erreur de la socket
+    return isinstance(reason, (ConnectionError, TimeoutError))
 
 
 def _reason(error):
@@ -268,10 +286,13 @@ class _DiskError(DownloadError):
 class HttpDownload:
     """Exécute un téléchargement HTTP. Une instance par démarrage (ou reprise)."""
 
-    def __init__(self, job, config, reserve, first=None, limiter=None):
+    def __init__(self, job, config, reserve, first=None, limiter=None, hosts=None):
         self.job = job
         self.config = config
         self.limiter = limiter  # limite de vitesse globale (limiter.Limiter), partagée
+        self.hosts = hosts or Hosts()  # places chez chaque site (hosts.Hosts), partagées
+        self.site = urlparse(job.url).hostname or ""
+        self.waiting = 0  # connexions qui attendent une place chez le serveur
         self.reserve = reserve  # fonction du moteur : choisit et réserve un chemin libre
         self.first = first  # ProbeResult déjà ouvert (sonde faite à l'ajout)
         self.lock = threading.Lock()
@@ -305,12 +326,14 @@ class HttpDownload:
 
     def progress(self):
         with self.lock:
+            connections = sum(1 for s in self.segments if s.active)
             return {
                 "downloaded": self.downloaded,
                 "size": self.size,
                 "segments": [s.to_list() for s in self.segments],
                 "saved": self.saved,
-                "connections": sum(1 for s in self.segments if s.active),
+                "connections": connections,
+                "stage": WAITING if self.waiting and not connections else None,
             }
 
     def checkpoint(self):
@@ -373,23 +396,54 @@ class HttpDownload:
     def _run_once(self):
         job = self.job
         first, self.first = self.first, None
+        if first is not None:
+            self.hosts.take(self.site, force=True)  # la sonde faite à l'ajout est une connexion ouverte
         resuming = (
             first is None and self.segments and job.resumable and job.path
             and os.path.exists(job.path + PART_SUFFIX)
         )
-        if resuming:
-            self.fd = os.open(job.path + PART_SUFFIX, os.O_RDWR)
-        else:
-            if first is None:
-                first = probe(job)
-            self._apply_probe(first)
-            self._create_file()
         try:
+            if resuming:
+                self.fd = os.open(job.path + PART_SUFFIX, os.O_RDWR)
+            else:
+                if first is None:
+                    first = self._probe()
+                    if first is None:
+                        return self.stop_reason or "paused"  # arrêté en attendant le serveur
+                self._apply_probe(first)
+                self._create_file()
             self._download(first)
         finally:
             if first is not None:
+                if first.resp is not None:  # pas confiée à une connexion : sa place est libre
+                    self.hosts.give_back(self.site)
                 first.close()
         return self._finish()
+
+    def _probe(self):
+        """Sonde d'un téléchargement parti de la file. None : arrêté en attendant le serveur.
+
+        Si le serveur refuse parce que d'autres téléchargements occupent le site,
+        elle attend et recommence, sans compter ces refus comme des échecs : le
+        téléchargement passera quand une place se libérera.
+        """
+        retries = 0
+        while self._wait_place(lambda: True)[0]:
+            for attempt in range(2):  # un refus isolé : une seconde chance, un peu plus tard (voir _fetch)
+                if attempt:
+                    self.stop_event.wait(LAG_WAIT)
+                try:
+                    return probe(self.job)  # sa place passera à la première connexion
+                except DownloadError as e:
+                    error = e
+                    if self.stop_event.is_set() or not is_refusal(e.__cause__):
+                        break
+            if self.stop_event.is_set() or not is_refusal(error.__cause__) or not self.hosts.refused(self.site):
+                self.hosts.give_back(self.site)
+                raise error
+            retries += 1
+            self._pause_waiting(min(2 ** retries, 30))
+        return None
 
     def _apply_probe(self, result):
         job = self.job
@@ -416,7 +470,11 @@ class HttpDownload:
         with self.lock:
             self.downloaded = 0
             if job.resumable and self.size is not None:
-                self.segments = plan_segments(self.size, self.config["connections"])
+                # Un site qui n'accepte que 2 connexions : 2 segments, pas 8 qui se
+                # passeraient la main (la segmentation dynamique ajoute ce qu'il faut).
+                limit = self.hosts.limit(self.site)
+                connections = self.config["connections"] if limit is None else min(self.config["connections"], limit)
+                self.segments = plan_segments(self.size, connections)
             else:
                 end = None if self.size is None else self.size - 1
                 self.segments = [] if self.size == 0 else [Segment(0, end, 0)]
@@ -428,6 +486,7 @@ class HttpDownload:
         threads = []
         if first is not None and self.segments:
             # La réponse de la sonde sert de première connexion : pas de requête perdue.
+            # Elle garde la place prise pour la sonde chez le serveur.
             self.segments[0].active = True
             threads.append(threading.Thread(target=self._worker, args=(self.segments[0], first.resp)))
             first.resp = None
@@ -455,14 +514,9 @@ class HttpDownload:
                 if not seg.active and not seg.done():
                     seg.active = True
                     return seg
-            if not self.job.resumable or self.size is None:
-                return None
             # Segmentation dynamique : on coupe en deux le plus gros segment en cours.
-            active = [s for s in self.segments if s.active]
-            if not active:
-                return None
-            victim = max(active, key=Segment.remaining)
-            if victim.remaining() < 2 * MIN_SPLIT:
+            victim = self._victim()
+            if victim is None:
                 return None
             middle = victim.pos + victim.remaining() // 2
             stolen = Segment(middle, victim.end, middle)
@@ -471,14 +525,64 @@ class HttpDownload:
             self.segments.append(stolen)
             return stolen
 
+    def _victim(self):
+        """Le segment en cours à couper en deux pour une connexion de plus, ou None (sous verrou)."""
+        if not self.job.resumable or self.size is None:
+            return None
+        active = [s for s in self.segments if s.active]
+        if not active:
+            return None
+        victim = max(active, key=Segment.remaining)
+        return victim if victim.remaining() >= 2 * MIN_SPLIT else None
+
+    def _has_work(self):
+        """Une connexion de plus aurait-elle quelque chose à télécharger ?"""
+        with self.lock:
+            return any(not s.active and not s.done() for s in self.segments) or self._victim() is not None
+
+    def _wait_place(self, has_work):
+        """Prend une place chez le serveur, en attendant s'il est plein.
+
+        Renvoie (prise, à l'aveugle). Pas prise : arrêt, ou plus rien à faire pour
+        cette connexion (`has_work`). À l'aveugle : prise du premier coup, sans
+        limite connue pour ce site (une limite apprise entre-temps compte comme
+        connue : au pire, on apprendra au refus suivant).
+        """
+        first = True
+        while not self.stop_event.is_set() and has_work():
+            if self.hosts.take(self.site):
+                return True, first and self.hosts.limit(self.site) is None
+            first = False
+            self._pause_waiting(PLACE_WAIT)
+        return False, False
+
+    def _pause_waiting(self, delay):
+        with self.lock:
+            self.waiting += 1
+        try:
+            self.stop_event.wait(delay)  # interrompue par une pause
+        finally:
+            with self.lock:
+                self.waiting -= 1
+
     def _worker(self, seg, resp):
+        # La première connexion (la sonde, `resp`) a déjà sa place chez le serveur.
+        placed, blind = resp is not None, False
         try:
             while not self.stop_event.is_set():
+                if not placed:
+                    placed, blind = self._wait_place(self._has_work)
+                    if not placed:
+                        return
                 if seg is None:
                     seg = self._next_segment()
                     if seg is None:
                         return
-                self._fetch(seg, resp)
+                if self._fetch(seg, resp, blind):
+                    blind = False
+                else:  # refusée : place rendue, le segment reste à prendre
+                    placed = False
+                    self._pause_waiting(PLACE_WAIT)
                 resp = None
                 with self.lock:
                     seg.active = False
@@ -492,54 +596,85 @@ class HttpDownload:
                 with self.lock:
                     seg.active = False
             self._release(resp)
+            if placed:
+                self.hosts.give_back(self.site)
 
     def _track(self, resp):
         with self.lock:
             self.responses.add(resp)
+        self.hosts.accepted(self.site)  # le serveur l'a acceptée : une preuve de ce qu'il permet
 
     def _release(self, resp):
         if resp is None:
             return
         with self.lock:
+            tracked = resp in self.responses
             self.responses.discard(resp)
+        if tracked:
+            self.hosts.closed(self.site)
         try:
             resp.close()
         except Exception:
             pass
 
-    def _fetch(self, seg, resp):
+    def _fetch(self, seg, resp, blind=False):
+        """Télécharge le segment. False : le serveur refuse cette connexion de plus.
+
+        Un refus quand d'autres connexions tiennent déjà ce site, c'est la limite
+        du serveur, pas une panne : plutôt qu'insister jusqu'à faire échouer tout
+        le téléchargement, la connexion rend sa place et son segment, que les
+        autres prendront, et attendra qu'une place se libère (voir hosts.py).
+
+        `blind` : la place a été prise sans limite connue (les premières
+        connexions) : un refus, c'est la limite, inutile d'insister. Sinon, un refus
+        isolé vient le plus souvent du serveur qui n'a pas encore compté une
+        connexion qu'on vient de fermer (fin d'un segment), même quand celle-ci
+        est seule : elle garde sa place et réessaie une fois, un peu plus tard,
+        avant d'en conclure.
+        """
         retries = 0
+        opened = resp is not None  # le serveur a accepté une connexion pour ce segment
+        lagged = False  # déjà réessayé après un refus isolé
         while not self.stop_event.is_set():
             with self.lock:
                 if seg.done():
                     break
+            opening = resp is None
             try:
-                if resp is None:
+                if opening:
                     resp = self._open_range(seg)
+                    opening, opened = False, True
                 self._track(resp)
                 if self._stream(seg, resp):
                     break
                 raise http.client.IncompleteRead(b"")
             except (_DiskError, ResourceChanged):
                 raise
-            except urllib.error.HTTPError as e:
-                if e.code not in RETRYABLE_HTTP:
-                    raise DownloadError(http_error_message(e)) from e
-                error = e
             except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError,
                     AttributeError) as e:
-                error = e
+                error = e  # HTTPError compris (c'est une URLError)
             finally:
                 self._release(resp)
                 resp = None
             if self.stop_event.is_set():
                 break
+            if opening and self.job.resumable and is_refusal(error, accepted=True):
+                if not lagged and not (blind and not opened):
+                    lagged = True
+                    self.stop_event.wait(LAG_WAIT)
+                    continue
+                if self.hosts.refused(self.site):  # False : seule chez ce site, une vraie erreur
+                    return False
+            lagged = False
+            if isinstance(error, urllib.error.HTTPError) and error.code not in RETRYABLE_HTTP:
+                raise DownloadError(http_error_message(error)) from error
             if not self.job.resumable:
                 raise DownloadError("connexion perdue, et ce serveur ne permet pas la reprise")
             retries += 1
             if retries > MAX_RETRIES:
                 raise DownloadError(f"connexion perdue : {_reason(error)}")
             self.stop_event.wait(min(2 ** retries, 30))  # attente croissante, interrompue par une pause
+        return True
 
     def _stream(self, seg, resp):
         """Lit la réponse dans le segment. True si le segment est terminé."""

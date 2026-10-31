@@ -12,6 +12,7 @@ Routes :
   /cookies          renvoie en JSON les cookies reçus par cette requête
   /headers          renvoie en JSON tous les en-têtes reçus par cette requête
   /strict/NOM       comme /range, mais 403 sans les en-têtes d'un navigateur (anti-robot)
+  /limited/N/NOM    comme /range, mais 503 au-delà de N connexions à la fois (limite par IP)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 """
@@ -32,6 +33,8 @@ VERSION = {}  # nom → numéro de version (change l'ETag)
 LOG = []  # (chemin, en-tête Range, cookies)
 FLAKY_SEEN = set()
 UNSTABLE = [0]
+LIMITED = {"active": 0, "peak": 0, "refused": 0}  # connexions de /limited/ (serveur entier)
+LIMITED_LOCK = threading.Lock()
 
 
 def make_file(name, size, seed=None):
@@ -101,6 +104,23 @@ class Handler(SimpleHTTPRequestHandler):
                     or "Sec-Fetch-Mode" not in self.headers or "_abck=ok" not in cookie):
                 return self._send(403, {"Content-Type": "text/html"}, b"<html>Access Denied</html>")
             return self._file(rest, ranges=True)
+        if route == "limited":
+            # Comme nginx limit_conn : au-delà de N connexions de la même IP, 503.
+            allowed, _, name = rest.partition("/")
+            with LIMITED_LOCK:
+                full = LIMITED["active"] >= int(allowed)
+                if full:
+                    LIMITED["refused"] += 1
+                else:
+                    LIMITED["active"] += 1
+                    LIMITED["peak"] = max(LIMITED["peak"], LIMITED["active"])
+            if full:
+                return self._send(503, {"Content-Type": "text/plain"}, b"too many connections")
+            try:
+                return self._file(name, ranges=True)
+            finally:
+                with LIMITED_LOCK:
+                    LIMITED["active"] -= 1
         if route == "cookies":
             body = json.dumps({"cookie": self.headers.get("Cookie")}).encode()
             return self._send(200, {"Content-Type": "application/json"}, body)
