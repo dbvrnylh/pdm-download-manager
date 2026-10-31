@@ -200,6 +200,10 @@ def write_json_atomic(path, data, mode=0o600):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
+            # Sur le disque avant de remplacer l'ancien : après une coupure de courant,
+            # on retrouve l'un ou l'autre, jamais un fichier vide.
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:

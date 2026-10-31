@@ -50,6 +50,9 @@ class Job:
         self.connections = 0
         self.stage = None
         self.sample = None
+        # Segments affichés : ceux reçus. `segments`, sauvegardé, ne garde que ceux
+        # déjà sur le disque (point de reprise sûr, voir HttpDownload.checkpoint).
+        self.bar = None
 
     def to_dict(self):
         return {name: getattr(self, name) for name in PERSISTED}
@@ -59,6 +62,8 @@ class Job:
         data.update(speed=self.speed, eta=self.eta, connections=self.connections, stage=self.stage)
         if self.status not in ("downloading", "paused"):
             data["segments"] = []
+        elif self.bar is not None:
+            data["segments"] = self.bar
         return data
 
 
@@ -441,7 +446,8 @@ class Engine:
         if progress.get("size") is not None:
             job.size = progress["size"]
         if "segments" in progress:
-            job.segments = progress["segments"]
+            job.bar = progress["segments"]
+            job.segments = progress.get("saved", progress["segments"])
         job.connections = progress.get("connections", 0)
         job.stage = progress.get("stage")
 
@@ -468,7 +474,7 @@ class Engine:
 
     @staticmethod
     def _reset(job):
-        job.segments, job.downloaded = [], 0
+        job.segments, job.bar, job.downloaded = [], None, 0
         if job.kind == "http":
             job.path = None
 

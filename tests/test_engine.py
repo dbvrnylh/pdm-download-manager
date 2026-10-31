@@ -191,6 +191,36 @@ class EngineTest(unittest.TestCase):
         self.assertGreater(after, before, "les autres connexions avancent pendant ce temps")
         self.assertEqual(sha(job.path), self.hashes["mid.bin"])
 
+    def test_saved_progress_never_promises_more_than_the_disk_has(self):
+        # Sans point de reprise (fdatasync) pendant le test, la sauvegarde ne doit
+        # rien promettre, même si l'affichage avance : c'est encore dans le cache.
+        with unittest.mock.patch.object(httpdl, "SYNC_EVERY", 60):
+            job = self.add("/range/big.bin")
+            time.sleep(0.6)
+            self.engine.save()
+            stored = {j["id"]: j for j in json.loads(paths.jobs_path().read_text())}[job.id]
+            self.assertTrue(any(pos > start for start, _, pos in job.public()["segments"]), "l'affichage avance")
+            self.assertTrue(stored["segments"])
+            self.assertTrue(all(pos == start for start, _, pos in stored["segments"]), stored["segments"])
+            # La pause, elle, fait un point de reprise : tout ce qui est écrit est promis.
+            self.engine.pause(job.id)
+            job = self.wait(job.id, {"paused"})
+        self.assertEqual(job.segments, job.bar)
+        self.assertEqual(sum(pos - start for start, _, pos in job.segments), job.downloaded)
+        self.engine.resume(job.id)
+        self.assertEqual(sha(self.wait(job.id, {"completed"}).path), self.hashes["big.bin"])
+
+    def test_unconfirmed_data_is_never_finished(self):
+        def refused(fd):
+            raise OSError(5, "Input/output error")  # disque débranché pendant le téléchargement
+
+        with unittest.mock.patch.object(os, "fdatasync", refused):
+            job = self.wait(self.add("/range/small.zip").id, {"failed", "completed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("le disque n'a pas confirmé", job.error)
+        self.assertTrue(Path(job.path + ".pdm").exists(), "le fichier n'est pas présenté comme fini")
+        self.assertFalse(Path(job.path).exists())
+
     def test_short_disk_writes_are_completed(self):
         real = os.pwrite
         # Le noyau peut écrire moins que demandé : le reste ne doit pas devenir un trou.

@@ -14,6 +14,7 @@ Principe (celui d'IDM) :
 
 import errno
 import http.client
+import logging
 import os
 import re
 import shutil
@@ -33,11 +34,14 @@ from .util import (
     unique_path,
 )
 
+log = logging.getLogger("pdm")
+
 PART_SUFFIX = ".pdm"
 CHUNK = 64 * 1024
 MIN_SPLIT = 1024 * 1024  # en dessous, une connexion de plus ne fait rien gagner
 MAX_RETRIES = 6
 TIMEOUT = 30
+SYNC_EVERY = 5.0  # s entre deux points de reprise sûrs (fdatasync) : au pire, autant à refaire
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) PDM/2.0"
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)")
@@ -277,7 +281,11 @@ class HttpDownload:
         self.fd = None
         self.responses = set()
         self.segments = [Segment(*s) for s in (job.segments or [])]
-        self.downloaded = job.downloaded or 0
+        # Point de reprise sûr : les segments tels qu'ils sont sur le disque, pas
+        # seulement dans le cache du système. C'est lui que le moteur sauvegarde.
+        self.saved = [s.to_list() for s in self.segments]
+        # Ce qui est reçu se déduit des segments, qui ne promettent que ce qui est sur le disque.
+        self.downloaded = sum(s.pos - s.start for s in self.segments) if self.segments else job.downloaded or 0
         self.size = job.size
         self.single = False  # repli : une connexion, sans requêtes partielles
 
@@ -301,8 +309,29 @@ class HttpDownload:
                 "downloaded": self.downloaded,
                 "size": self.size,
                 "segments": [s.to_list() for s in self.segments],
+                "saved": self.saved,
                 "connections": sum(1 for s in self.segments if s.active),
             }
+
+    def checkpoint(self):
+        """Fait du reçu un point de reprise sûr. False si le disque refuse (débranché…).
+
+        Sans cela, une coupure de courant pourrait laisser des segments sauvegardés
+        « reçus jusqu'à 600 Mo » quand le disque n'a que des zéros : le cache du
+        système n'avait pas encore été écrit. La reprise sauterait ces zéros, et le
+        fichier corrompu finirait « Terminé ». Les positions sont relevées avant
+        fdatasync : tout ce qu'elles promettent est donc sur le disque après.
+        """
+        with self.lock:
+            snapshot = [s.to_list() for s in self.segments]
+        try:
+            os.fdatasync(self.fd)
+        except OSError as e:
+            log.warning("%s : données non confirmées par le disque (%s)", self.job.path, e.strerror)
+            return False  # l'ancien point de reprise reste : il était déjà sûr
+        with self.lock:
+            self.saved = snapshot
+        return True
 
     def cleanup(self):
         """Annulation : supprime le fichier partiel."""
@@ -337,7 +366,7 @@ class HttpDownload:
                     self.error = None
                     self.stop_event.clear()
                     with self.lock:
-                        self.segments = []
+                        self.segments, self.saved = [], []
         finally:
             self._close_fd()
 
@@ -391,6 +420,7 @@ class HttpDownload:
             else:
                 end = None if self.size is None else self.size - 1
                 self.segments = [] if self.size == 0 else [Segment(0, end, 0)]
+            self.saved = [s.to_list() for s in self.segments]  # rien de reçu : rien à promettre
 
     def _download(self, first):
         job = self.job
@@ -406,8 +436,18 @@ class HttpDownload:
         for thread in threads:
             thread.daemon = True
             thread.start()
+        done = threading.Event()
+        saver = threading.Thread(target=self._checkpoints, args=(done,), daemon=True)
+        saver.start()
         for thread in threads:
             thread.join()
+        done.set()
+        saver.join()
+
+    def _checkpoints(self, done):
+        # À part des connexions : fdatasync peut attendre le disque plusieurs secondes.
+        while not done.wait(SYNC_EVERY):
+            self.checkpoint()
 
     def _next_segment(self):
         with self.lock:
@@ -586,15 +626,34 @@ class HttpDownload:
                 return self.stop_reason or "paused"
             raise DownloadError("téléchargement incomplet")
         # Tout est arrivé, même si une pause a été demandée à la dernière seconde.
+        # « Terminé » veut dire « sur le disque » : une coupure de courant juste
+        # après ne doit pas laisser un fichier terminé plein de zéros.
+        if not self.checkpoint():
+            raise DownloadError("écriture impossible : le disque n'a pas confirmé les données")
         self._close_fd()
         final = Path(self.job.path)
         if final.exists():
             final = unique_path(final.parent, final.name)
         os.replace(self.job.path + PART_SUFFIX, final)
+        _sync_dir(final.parent)  # le nouveau nom aussi
         self.job.path = str(final)
         return "completed"
 
     def _close_fd(self):
         if self.fd is not None:
+            self.checkpoint()  # pause, erreur : la reprise partira de tout ce qui est écrit
             os.close(self.fd)
             self.fd = None
+
+
+def _sync_dir(directory):
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # certains systèmes de fichiers (FUSE…) refusent : le fichier, lui, est sûr
+    finally:
+        os.close(fd)

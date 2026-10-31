@@ -78,6 +78,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   and kept for a paused download to resume from.
 
 ### Fixed
+- A power cut or a crash of the system during a download could leave a corrupted file shown as
+  finished: the saved progress could promise data that was still in the system's cache, and resuming
+  skipped the zeros left in its place. Saved progress now only covers data the disk has confirmed
+  (`fdatasync` every 5 seconds and at each pause), so at worst a few seconds are downloaded again. A
+  download is only "Terminé" once the disk has confirmed the whole file and its final name; when the
+  disk refuses (unplugged), it fails with "le disque n'a pas confirmé les données" and resumes from its
+  last safe point. `jobs.json` and `config.json` are on the disk before they replace the old ones.
 - A disk write that the kernel only partly carried out (a disk nearly full) left a hole of zeros in the
   file, which was then shown as finished. The engine now writes the rest, and fails with "disque plein"
   only when the disk really refuses.
