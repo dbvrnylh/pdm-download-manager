@@ -3,6 +3,7 @@
 Lancer : python3 -m unittest discover -s tests -v   (depuis la racine du projet)
 """
 
+import base64
 import errno
 import hashlib
 import http.client
@@ -29,7 +30,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import daemon, httpdl, paths, util  # noqa: E402
+from pdm_engine import checksum, daemon, httpdl, paths, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine, in_window  # noqa: E402
 from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
@@ -370,6 +371,112 @@ class EngineTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(bad)[:60]):
                 self.engine.add({"url": self.base + "/range/small.zip", "headers": bad})
         self.assertEqual(self.engine.jobs, {})
+
+    # ─── Intégrité ─────────────────────────────────────────────────────────
+
+    def test_every_finished_file_gets_its_sha256(self):
+        job = self.wait(self.add("/range/big.bin").id, {"completed"})  # 8 connexions, octets dans le désordre
+        self.assertEqual(job.sha256, self.hashes["big.bin"])
+        self.assertIsNone(job.verified, "rien à quoi le comparer")
+        self.assertEqual(job.public()["sha256"], self.hashes["big.bin"])
+        unknown = self.wait(self.add("/chunked/small.zip").id, {"completed"})  # une connexion, taille inconnue
+        self.assertEqual(unknown.sha256, self.hashes["small.zip"])
+
+    def test_a_resumed_download_counts_what_it_already_had(self):
+        job = self.add("/range/big.bin")
+        time.sleep(0.8)
+        self.engine.pause(job.id)
+        self.wait(job.id, {"paused"})
+        self.engine.save()
+        second = self._engine()  # comme après un redémarrage : rien de calculé en mémoire
+        second.resume(job.id)
+        job = self.wait(job.id, {"completed"}, engine=second)
+        self.assertEqual(job.sha256, self.hashes["big.bin"])
+
+    def test_a_checksum_announced_by_the_server_is_checked(self):
+        md5 = hashlib.md5(fx.FILES["mid.bin"]).hexdigest()
+        for kind, expected in (("repr", ("sha-256", self.hashes["mid.bin"])),
+                               ("rfc3230", ("sha-256", self.hashes["mid.bin"])),  # la plus sûre des deux
+                               ("goog", ("md5", md5))):
+            with self.subTest(kind):
+                job = self.wait(self.add(f"/digest/{kind}/mid.bin").id, {"completed", "failed"})
+                self.assertEqual(job.status, "completed", job.error)
+                self.assertEqual(job.checksums, [{"algo": expected[0], "hex": expected[1], "source": "server"}])
+                self.assertTrue(job.verified)
+
+    def test_a_file_that_does_not_match_is_never_delivered(self):
+        fx.LOG.clear()
+        job = self.wait(self.add("/digest/wrong/mid.bin").id, {"completed", "failed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("vérification échouée : SHA-256 différent de celui annoncé par le serveur", job.error)
+        self.assertFalse(Path(job.path).exists(), "pas livré sous son nom")
+        self.assertTrue(Path(job.path + ".pdm").exists())
+        self.assertEqual((job.segments, job.downloaded, job.sha256), ([], 0, None))
+        # On ne sait pas quels octets sont faux : « Réessayer » repart de zéro.
+        fx.LOG.clear()
+        self.engine.retry(job.id)
+        job = self.wait(job.id, {"failed"})
+        self.assertIn("bytes=0-", [r for p, r, _ in fx.LOG])
+        self.assertIn("vérification échouée", job.error)
+
+    def test_a_checksum_from_the_page_or_the_user_is_checked(self):
+        md5 = hashlib.md5(fx.FILES["small.zip"]).hexdigest()
+        page = [{"algo": "md5", "hex": md5.upper(), "source": "page"}]
+        job = self.wait(self.add("/range/small.zip", checksums=page).id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(job.checksums, [{"algo": "md5", "hex": md5, "source": "page"}])
+        self.assertTrue(job.verified)
+        wrong = [{"algo": "sha-256", "hex": "0" * 64, "source": "user"}]
+        job = self.wait(self.add("/range/small.zip", checksums=wrong).id, {"completed", "failed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("différent de celui donné (attendu 00000000…, obtenu", job.error)
+
+    def test_checksums_sent_with_a_download_are_checked(self):
+        url = self.base + "/range/small.zip"
+        for bad in ([{"algo": "sha-256", "hex": "0" * 64, "source": "server"}],  # seul le moteur l'écrit
+                    [{"algo": "crc32", "hex": "0" * 8, "source": "page"}],
+                    [{"algo": "md5", "hex": "0" * 31, "source": "page"}],
+                    [{"algo": "md5", "hex": "g" * 32, "source": "page"}],
+                    "md5=00", [{"algo": "md5", "hex": "0" * 32, "source": "page"}] * 5):
+            with self.assertRaises(ValueError, msg=repr(bad)[:60]):
+                self.engine.add({"url": url, "checksums": bad})
+        self.assertEqual(self.engine.jobs, {})
+
+    def test_the_probe_asks_for_the_checksum_unless_it_replays_the_browser(self):
+        def received(**extra):
+            job = self.wait(self.add("/headers", filename="recu.json", **extra).id, {"completed"})
+            return {name.lower() for name in json.loads(Path(job.path).read_text())}
+
+        self.assertTrue({"want-repr-digest", "want-digest"} <= received())
+        self.assertFalse({"want-repr-digest", "want-digest"} & received(headers=self.BROWSER))
+
+    def test_a_finished_file_is_checked_as_it_is_on_the_disk(self):
+        job = self.wait(self.add("/range/mid.bin").id, {"completed"})
+        md5 = hashlib.md5(fx.FILES["mid.bin"]).hexdigest()
+        self.assertTrue(self.engine.verify(job.id, f"MD5: {md5}"))
+        self.assertEqual((job.verified, job.stage), (True, None))
+        self.assertEqual(job.checksums, [{"algo": "md5", "hex": md5, "source": "user"}])
+        stages = {e["job"]["stage"] for e in self.events if e["type"] == "job" and e["job"]["id"] == job.id}
+        self.assertIn("Vérification… 0 %", stages)
+        # Abîmé après coup : relu, pas jugé d'après la somme du téléchargement.
+        with open(job.path, "r+b") as f:
+            f.write(b"x")
+        self.assertFalse(self.engine.verify(job.id, f"{self.hashes['mid.bin']}  mid.bin"))
+        self.assertFalse(job.verified)
+        self.assertEqual(len(job.checksums), 1, "la somme donnée remplace la précédente")
+        self.assertNotEqual(job.sha256, self.hashes["mid.bin"], "le SHA-256 affiché est celui du fichier actuel")
+        for text in ("", "pas une somme", "sha-256=abcd"):
+            with self.assertRaises(ValueError):
+                self.engine.verify(job.id, text)
+        broken = OSError(errno.EIO, "Input/output error")
+        with unittest.mock.patch.object(checksum.Digester, "feed", side_effect=broken), \
+                self.assertRaisesRegex(ValueError, "lecture impossible : Input/output error"):
+            self.engine.verify(job.id, md5)
+        last = [e["job"] for e in self.events if e["type"] == "job" and e["job"]["id"] == job.id][-1]
+        self.assertIsNone(last["stage"], "la ligne ne reste pas figée sur « Vérification… »")
+        os.unlink(job.path)
+        with self.assertRaisesRegex(ValueError, "introuvable"):
+            self.engine.verify(job.id, md5)
 
     # ─── Serveurs qui limitent les connexions ──────────────────────────────
 
@@ -798,6 +905,110 @@ class DaemonIdleTest(unittest.TestCase):
         watcher.clients.clear()
         self.assertFalse(check(12.04))
         self.assertTrue(check(15.05))
+
+
+class ChecksumTest(unittest.TestCase):
+    DATA = b"PDM"
+    SHA256 = hashlib.sha256(DATA).hexdigest()
+    MD5 = hashlib.md5(DATA).hexdigest()
+
+    def b64(self, algo):
+        return base64.b64encode(hashlib.new(algo, self.DATA).digest()).decode()
+
+    def headers(self, *pairs):
+        message = http.client.HTTPMessage()
+        for name, value in pairs:
+            message[name] = value
+        return message
+
+    def found(self, *pairs, full=True, redirects=(), size=None):
+        result = checksum.from_headers(self.headers(*pairs), full, redirects, size)
+        return result and (result["algo"], result["hex"])
+
+    def test_what_a_user_may_paste(self):
+        for text, expected in (
+            (f"sha-256={self.SHA256}", ("sha-256", self.SHA256)),  # --checksum d'aria2
+            (f"SHA256: {self.SHA256.upper()}", ("sha-256", self.SHA256)),
+            (f"  {self.SHA256}  pdm.tar.gz\n", ("sha-256", self.SHA256)),  # ligne de SHA256SUMS
+            (f"md5 {self.MD5}", ("md5", self.MD5)),
+            (self.MD5, ("md5", self.MD5)),  # reconnue à sa longueur
+            (f"sha-256={self.b64('sha256')}", ("sha-256", self.SHA256)),  # base64, comme dans les en-têtes
+            (f"sha1:{hashlib.sha1(self.DATA).hexdigest()}", ("sha-1", hashlib.sha1(self.DATA).hexdigest())),
+        ):
+            with self.subTest(text):
+                self.assertEqual(tuple(checksum.parse(text).values()), expected)
+        for text in ("", "   ", "abc", f"md5={self.SHA256}", f"crc32={self.MD5}", "z" * 64):
+            with self.subTest(text), self.assertRaises(ValueError):
+                checksum.parse(text)
+
+    def test_what_a_server_may_announce(self):
+        sha256, md5 = f"sha-256=:{self.b64('sha256')}:", self.b64("md5")
+        self.assertEqual(self.found(("Repr-Digest", sha256)), ("sha-256", self.SHA256))
+        self.assertEqual(self.found(("Repr-Digest", sha256), full=False), ("sha-256", self.SHA256))
+        # Content-Digest porte sur le contenu de la réponse : un morceau, pour une plage.
+        self.assertEqual(self.found(("Content-Digest", sha256)), ("sha-256", self.SHA256))
+        self.assertIsNone(self.found(("Content-Digest", sha256), full=False))
+        self.assertEqual(self.found(("Digest", f"MD5={md5},SHA-256={self.b64('sha256')}")), ("sha-256", self.SHA256))
+        self.assertEqual(self.found(("Digest", f"md5={md5}")), ("md5", self.MD5))
+        goog = (("x-goog-hash", "crc32c=AAAAAA=="), ("x-goog-hash", f"md5={md5}"))
+        self.assertEqual(self.found(*goog, full=False), ("md5", self.MD5))
+        self.assertIsNone(self.found(*goog, ("x-goog-stored-content-encoding", "gzip")))
+        self.assertEqual(self.found(("Content-MD5", md5)), ("md5", self.MD5))
+        self.assertIsNone(self.found(("Content-MD5", md5), full=False))
+        self.assertIsNone(self.found(("Repr-Digest", sha256), ("Content-Encoding", "gzip")))
+        self.assertIsNone(self.found(("Repr-Digest", "sha-256=:AAAA:"), ("Digest", "SHA-256=nope")))
+        self.assertIsNone(self.found(("ETag", f'"{self.MD5}"')), "une ETag n'est pas une somme")
+
+    def test_hugging_face_announces_large_files_on_its_redirect(self):
+        def redirect(url, etag, size="3"):
+            return [(url, self.headers(("X-Linked-Etag", etag), ("X-Linked-Size", size)))]
+
+        hub = "https://huggingface.co/org/model/resolve/main/model.safetensors"
+        self.assertEqual(self.found(redirects=redirect(hub, f'"{self.SHA256}"'), size=3), ("sha-256", self.SHA256))
+        sha1 = hashlib.sha1(self.DATA).hexdigest()  # petit fichier : la somme de git, pas celle du fichier
+        self.assertIsNone(self.found(redirects=redirect(hub, f'"{sha1}"'), size=3))
+        self.assertIsNone(self.found(redirects=redirect(hub, f'"{self.SHA256}"', size="4"), size=3))
+        self.assertIsNone(self.found(redirects=redirect("https://example.org/x", f'"{self.SHA256}"'), size=3))
+
+    def test_redirects_are_remembered_on_the_response(self):
+        server = fx.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            fx.make_file("redirected.bin", 1000)
+            with httpdl._opener.open(base + "/redirect/range/redirected.bin", timeout=5) as resp:
+                self.assertEqual(resp.read(), fx.FILES["redirected.bin"])
+                [(url, headers)] = resp.redirects
+            self.assertEqual(url, base + "/redirect/range/redirected.bin")
+            self.assertEqual(headers["Location"], base + "/range/redirected.bin")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_digester_follows_the_file_in_order(self):
+        fd, name = tempfile.mkstemp(dir=TMP)
+        try:
+            os.write(fd, self.DATA * 1000)
+            digester = checksum.Digester(["sha-256", "md5"])
+            self.assertFalse(digester.feed(fd, 3000, stop=lambda: True))
+            self.assertTrue(digester.feed(fd, 1500))
+            self.assertTrue(digester.feed(fd, 3000))
+            self.assertEqual(digester.hexdigest("md5"), hashlib.md5(self.DATA * 1000).hexdigest())
+            with self.assertRaises(OSError):
+                digester.feed(fd, 3001)  # fichier plus court que prévu
+        finally:
+            os.close(fd)
+            os.unlink(name)
+
+    def test_the_terminal_takes_a_checksum_for_one_file(self):
+        from pdm_engine import cli
+
+        url = "https://example.org/a.iso"
+        *_, expected = cli._parse_add([url, "--checksum", f"sha-256={self.SHA256}"])
+        self.assertEqual(expected, [{"algo": "sha-256", "hex": self.SHA256, "source": "user"}])
+        for args in ([url, "--checksum", "abc"], ["--file", "x.txt", "--checksum", self.MD5],
+                     [url, "--video", "--checksum", self.MD5]):
+            with self.subTest(args), self.assertRaises(SystemExit):
+                cli._parse_add(args)
 
 
 class UtilTest(unittest.TestCase):

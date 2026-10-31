@@ -17,7 +17,7 @@ import time
 import uuid
 from urllib.parse import quote
 
-from . import httpdl, paths
+from . import checksum, httpdl, paths
 from .config import QUALITIES
 from .config import MIN_SPEED
 from .hosts import Hosts
@@ -34,6 +34,9 @@ PERSISTED = {
     "category": "other", "mime": None, "preset": None, "status": "queued", "error": None,
     "size": None, "downloaded": 0, "resumable": False, "validator": None, "segments": [],
     "createdAt": 0, "completedAt": None, "scheduled": False, "headers": None,
+    # Intégrité : sommes attendues (voir checksum.py), SHA-256 du fichier terminé,
+    # et résultat de la dernière comparaison (None : rien à quoi comparer).
+    "checksums": [], "sha256": None, "verified": None,
 }
 SECRET = {"cookies", "headers", "userAgent", "validator"}  # jamais envoyés à l'interface
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
@@ -82,6 +85,7 @@ class Engine:
         self.runners = {}
         self.reserved = {}  # chemin réservé → id du téléchargement
         self.cancelled = set()  # annulés pendant leur sonde, avant même d'exister
+        self.verifying = set()  # fichiers terminés en cours de vérification (« Vérifier… »)
         self.dirty = False
         self.last_save = 0.0
         # Limite de vitesse : un seau pour tout le moteur HTTP, et une part fixe
@@ -152,6 +156,7 @@ class Engine:
             id=spec.get("id"), kind=kind, url=url, referer=spec.get("referer"),
             cookies=spec.get("cookies") or None, userAgent=spec.get("userAgent"),
             headers=clean_headers(spec.get("headers")) if kind == "http" else None,
+            checksums=checksum.clean(spec.get("checksums")) if kind == "http" else [],
             source=spec.get("source") or "manual", mime=spec.get("mime"),
             filename=sanitize_filename(spec["filename"]) if spec.get("filename") else None,
             title=spec.get("title"), preset=preset, size=spec.get("size"),
@@ -282,6 +287,52 @@ class Engine:
         for job_id in done:
             self.emit({"type": "removed", "id": job_id})
         self.save()
+
+    def verify(self, job_id, text):
+        """Compare un fichier terminé à la somme donnée par l'utilisateur. Long : à appeler hors du client.
+
+        Le fichier est relu tel qu'il est sur le disque, pas d'après la somme
+        calculée au téléchargement : il a pu être abîmé ou modifié depuis.
+        Renvoie True s'il correspond.
+        """
+        expected = dict(checksum.parse(text), source="user")
+        with self.lock:
+            job = self._get(job_id)
+            if job.status != "completed" or not job.path or not os.path.isfile(job.path):
+                raise ValueError("fichier introuvable (déplacé ou supprimé ?)")
+            if job_id in self.verifying:
+                raise ValueError("vérification déjà en cours")
+            self.verifying.add(job_id)
+            job.checksums = [c for c in job.checksums if c["source"] != "user"] + [expected]
+            job.verified = None
+            path = job.path
+        digester = checksum.Digester(checksum.algorithms([expected]))
+        try:
+            with open(path, "rb") as f:
+                size = os.fstat(f.fileno()).st_size
+                shown = 0.0
+                while digester.offset < size:
+                    if time.monotonic() - shown >= self.TICK:
+                        shown = time.monotonic()
+                        self._set_stage(job, f"{httpdl.VERIFYING} {digester.offset * 100 // size} %")
+                    digester.feed(f.fileno(), min(size, digester.offset + 64 * checksum.BLOCK))
+        except OSError as e:
+            raise ValueError(f"lecture impossible : {e.strerror}") from e
+        else:
+            with self.lock:
+                job.sha256 = digester.hexdigest("sha-256")
+                job.verified = checksum.mismatch(digester, [expected]) is None
+                self.dirty = True
+            log.info("%s %s : %s", job.id, job.filename, "vérifié" if job.verified else "ne correspond pas")
+            return job.verified
+        finally:
+            # Résultat ou erreur : la ligne ne doit pas rester figée sur « Vérification… ».
+            with self.lock:
+                self.verifying.discard(job_id)
+                job.stage = None
+            if job_id in self.jobs:
+                self._publish(job)
+                self.save()
 
     def open_file(self, job_id):
         path = self._completed_path(job_id)
@@ -477,6 +528,7 @@ class Engine:
     @staticmethod
     def _reset(job):
         job.segments, job.bar, job.downloaded = [], None, 0
+        job.sha256 = job.verified = None
         if job.kind == "http":
             job.path = None
 
@@ -494,6 +546,13 @@ class Engine:
         with self.lock:
             data = job.public()
         self.emit({"type": "job", "job": data})
+
+    def _set_stage(self, job, stage):
+        with self.lock:
+            job.stage = stage
+            removed = job.id not in self.jobs
+        if not removed:
+            self._publish(job)
 
     def _notify(self, job):
         if not self.config["notify"] or job.status not in ("completed", "failed"):

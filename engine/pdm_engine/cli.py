@@ -37,14 +37,18 @@ def _request(message):
 
 
 ADD_USAGE = ("Usage : pdm-host add [--video] [--quality best|1080|720|480|audio] [--later] "
-             "(ADRESSE | --file liens.txt)")
+             "(ADRESSE [--checksum sha-256=SOMME] | --file liens.txt)")
 
 
 def _parse_add(args):
-    """Arguments de « add » → (adresse, liste, type, qualité, programmé). --file et --quality attendent une valeur."""
+    """Arguments de « add » → (adresse, liste, type, qualité, programmé, sommes attendues).
+
+    --file, --quality et --checksum attendent une valeur.
+    """
+    from .checksum import parse
     from .config import QUALITIES
 
-    url = source = quality = None
+    url = source = quality = expected = None
     video = later = False
     rest = list(args)
     while rest:
@@ -53,14 +57,19 @@ def _parse_add(args):
             video = True
         elif arg == "--later":
             later = True  # attendre la plage horaire des réglages
-        elif arg in ("--file", "--quality"):
+        elif arg in ("--file", "--quality", "--checksum"):
             if not rest:
                 sys.exit(f"{arg} attend une valeur. {ADD_USAGE}")
             value = rest.pop(0)
             if arg == "--file":
                 source = value
-            else:
+            elif arg == "--quality":
                 quality = value
+            else:
+                try:
+                    expected = dict(parse(value), source="user")  # comme --checksum d'aria2
+                except ValueError as e:
+                    sys.exit(f"--checksum : {e}")
         elif arg.startswith("--"):
             sys.exit(f"Option inconnue : {arg}. {ADD_USAGE}")
         else:
@@ -71,7 +80,9 @@ def _parse_add(args):
         if quality not in QUALITIES:
             sys.exit(f"Qualité inconnue : {quality} (choix : {', '.join(QUALITIES)})")
         video = True  # une qualité ne concerne que les vidéos
-    return url, source, "ytdlp" if video else "http", quality, later
+    if expected and (source is not None or video):
+        sys.exit("--checksum vaut pour un seul fichier : ni --file, ni --video.")
+    return url, source, "ytdlp" if video else "http", quality, later, [expected] if expected else []
 
 
 def _add_list(source, kind, quality, later):
@@ -139,12 +150,12 @@ def main(args):
         for job in reply["jobs"][-10:]:
             print(f"  [{job['status']:<11}] {job['filename'] or job['url']}")
     elif command == "add":
-        url, source, kind, quality, later = _parse_add(args[1:])
+        url, source, kind, quality, later, expected = _parse_add(args[1:])
         if source is not None:
             _add_list(source, kind, quality, later)
             return
         reply = _request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "cli",
-                                                 "scheduled": later}})
+                                                 "scheduled": later, "checksums": expected}})
         print("Ajouté." if reply["ok"] else f"Erreur : {reply['error']}")
     elif command == "stop":
         from .host import connect

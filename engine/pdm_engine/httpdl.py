@@ -10,6 +10,8 @@ Principe (celui d'IDM) :
    travaillent jusqu'au bout, au lieu d'attendre la plus lente.
 4. L'état des segments est sauvegardé : après une pause, une coupure ou un
    redémarrage, chaque segment repart de là où il s'était arrêté.
+5. Le fichier est vérifié : son SHA-256 est calculé au fil du téléchargement, et
+   comparé à la fin aux sommes attendues (serveur, page, utilisateur).
 """
 
 import ctypes
@@ -27,6 +29,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import checksum
 from .hosts import Hosts
 from .util import (
     ensure_extension,
@@ -59,7 +62,9 @@ TIMEOUT = 30
 PLACE_WAIT = 0.5  # s entre deux coups d'œil quand le serveur n'accepte pas plus de connexions
 LAG_WAIT = 0.25  # s avant de réessayer après un refus isolé (le serveur range une connexion fermée)
 WAITING = "En attente du serveur…"
+VERIFYING = "Vérification…"
 SYNC_EVERY = 5.0  # s entre deux points de reprise sûrs (fdatasync) : au pire, autant à refaire
+HASH_EVERY = 0.2  # s entre deux coups d'œil du calcul des sommes, quand il a rattrapé le téléchargement
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) PDM/2.0"
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 LIMIT_HTTP = {429, 503}  # « trop de connexions » (nginx limit_conn, mod_limitipconn…)
@@ -113,6 +118,17 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
             new.remove_header("Cookie")
             new.remove_header("Authorization")
         return new
+
+    # Les en-têtes des redirections sont perdus une fois la réponse finale
+    # obtenue : on les garde sur elle (`redirects`), certains annoncent la somme
+    # du fichier (Hugging Face, voir checksum.from_headers).
+    def http_error_302(self, req, fp, code, msg, headers):
+        resp = super().http_error_302(req, fp, code, msg, headers)
+        if resp is not None:
+            resp.redirects = [(req.full_url, headers)] + getattr(resp, "redirects", [])
+        return resp
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
 _opener = urllib.request.build_opener(_SafeRedirect)
@@ -209,7 +225,7 @@ def build_request(job, url, start=None, end=None, validator=None):
 
 
 class ProbeResult:
-    def __init__(self, resp, size, resumable, filename, final_url, validator, mime):
+    def __init__(self, resp, size, resumable, filename, final_url, validator, mime, digest=None):
         self.resp = resp
         self.size = size
         self.resumable = resumable
@@ -217,6 +233,7 @@ class ProbeResult:
         self.final_url = final_url
         self.validator = validator
         self.mime = mime
+        self.digest = digest  # somme du fichier annoncée par le serveur, ou None
 
     def close(self):
         if self.resp is not None:
@@ -225,9 +242,15 @@ class ProbeResult:
 
 
 def probe(job, timeout=TIMEOUT):
-    """Première requête : taille, reprise possible, nom du fichier."""
+    """Première requête : taille, reprise possible, nom du fichier, somme annoncée."""
+    request = build_request(job, job.url, 0, None)
+    if not job.headers:
+        # « Donne aussi la somme du fichier » (RFC 9530, et RFC 3230 avant elle).
+        # Pas dans une requête rejouée du navigateur : elle doit rester celle de Chrome.
+        request.add_header("Want-Repr-Digest", "sha-256=10, sha-512=3")
+        request.add_header("Want-Digest", "SHA-256;q=1, SHA-512;q=0.3")
     try:
-        resp = _opener.open(build_request(job, job.url, 0, None), timeout=timeout)
+        resp = _opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as e:
         raise DownloadError(http_error_message(e)) from e
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
@@ -252,11 +275,12 @@ def probe(job, timeout=TIMEOUT):
             resp.close()
             raise Rejected("page web reçue au lieu d'un fichier : pour une vidéo, choisis « Vidéo de la page »")
 
-    size, resumable = None, False
+    size, resumable, full = None, False, resp.status == 200
     if resp.status == 206:
         match = CONTENT_RANGE.match(headers.get("Content-Range") or "")
         if match and match.group(1) == "0" and match.group(3) != "*":
             size, resumable = int(match.group(3)), True
+            full = int(match.group(2)) == size - 1
     else:
         length = headers.get("Content-Length") or ""
         size = int(length) if length.isdigit() else None
@@ -265,7 +289,8 @@ def probe(job, timeout=TIMEOUT):
     # Une ETag « faible » (W/…) n'est pas acceptée par If-Range.
     validator = etag if etag and not etag.startswith("W/") else headers.get("Last-Modified")
     filename = sanitize_filename(ensure_extension(name, mime))
-    return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime)
+    digest = checksum.from_headers(headers, full, getattr(resp, "redirects", ()), size)
+    return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime, digest)
 
 
 def hang_up(resp):
@@ -400,6 +425,8 @@ class HttpDownload:
         self.downloaded = sum(s.pos - s.start for s in self.segments) if self.segments else job.downloaded or 0
         self.size = job.size
         self.single = False  # repli : une connexion, sans requêtes partielles
+        self.digester = None  # sommes du fichier, calculées au fil du téléchargement (voir _hash)
+        self.verifying = False
 
     # ─── Pilotage par le moteur ────────────────────────────────────────────
 
@@ -415,13 +442,16 @@ class HttpDownload:
     def progress(self):
         with self.lock:
             connections = sum(1 for s in self.segments if s.active)
+            stage = WAITING if self.waiting and not connections else None
+            if self.verifying and self.size:
+                stage = f"{VERIFYING} {self.digester.offset * 100 // self.size} %"
             return {
                 "downloaded": self.downloaded,
                 "size": self.size,
                 "segments": [s.to_list() for s in self.segments],
                 "saved": self.saved,
                 "connections": connections,
-                "stage": WAITING if self.waiting and not connections else None,
+                "stage": stage,
             }
 
     def checkpoint(self):
@@ -500,6 +530,8 @@ class HttpDownload:
                         return self.stop_reason or "paused"  # arrêté en attendant le serveur
                 self._apply_probe(first)
                 self._create_file()
+            # Une reprise recompte depuis le début, en relisant ce qui est déjà sur le disque.
+            self.digester = checksum.Digester(checksum.algorithms(job.checksums))
             self._download(first)
         finally:
             if first is not None:
@@ -542,6 +574,8 @@ class HttpDownload:
         job.mime = result.mime or job.mime
         job.filename = job.filename or result.filename
         job.category = self.config.category_for(job.filename, job.mime)[0]
+        # Celle d'une sonde précédente ne vaut plus : le fichier a pu changer depuis.
+        job.checksums = [c for c in job.checksums if c["source"] != "server"] + ([result.digest] if result.digest else [])
 
     def _create_file(self):
         job = self.job
@@ -584,12 +618,14 @@ class HttpDownload:
             thread.daemon = True
             thread.start()
         done = threading.Event()
-        watcher = threading.Thread(target=self._watch, args=(done,), daemon=True)
-        watcher.start()
+        helpers = [threading.Thread(target=target, args=(done,), daemon=True) for target in (self._watch, self._hash)]
+        for helper in helpers:
+            helper.start()
         for thread in threads:
             thread.join()
         done.set()
-        watcher.join()
+        for helper in helpers:
+            helper.join()
 
     def _watch(self, done):
         # À part des connexions : fdatasync peut attendre le disque plusieurs secondes.
@@ -599,6 +635,39 @@ class HttpDownload:
             if time.monotonic() - synced >= SYNC_EVERY:
                 self.checkpoint()
                 synced = time.monotonic()
+
+    def _hash(self, done):
+        """Calcule les sommes du fichier au fil du téléchargement.
+
+        Une somme se calcule dans l'ordre des octets : ce thread suit le début du
+        fichier reçu sans trou, en relisant ce qui vient d'être écrit, le plus
+        souvent encore en mémoire. Avec une connexion, il ne reste presque rien à
+        relire à la fin ; avec plusieurs, ce qui suit le premier segment, qui
+        finit avec les autres (relu en mémoire à plusieurs Go/s, s'il y tient).
+        Une reprise, elle, relit ici ce qui était déjà reçu, pendant que la suite arrive.
+        """
+        while not done.is_set():
+            with self.lock:
+                end = self._written()
+            if end - self.digester.offset < checksum.BLOCK:  # pas pour quelques Ko : la fin s'en chargera
+                done.wait(HASH_EVERY)
+                continue
+            try:
+                self.digester.feed(self.fd, end, done.is_set)
+            except OSError as e:
+                log.warning("%s : relecture impossible (%s), reprise à la fin", self.job.path, e.strerror)
+                return
+
+    def _written(self):
+        """Jusqu'où le fichier est écrit sans trou depuis le début (sous verrou)."""
+        end = 0
+        for seg in sorted(self.segments, key=lambda s: s.start):
+            if seg.start > end:
+                break
+            end = max(end, seg.pos)
+            if not seg.done():
+                break
+        return end
 
     def _kick_slow(self):
         """Coupe les connexions qui traînent loin derrière ; elles se rouvrent aussitôt.
@@ -934,6 +1003,7 @@ class HttpDownload:
         # après ne doit pas laisser un fichier terminé plein de zéros.
         if not self.checkpoint():
             raise DownloadError("écriture impossible : le disque n'a pas confirmé les données")
+        self._verify()
         self._close_fd()
         final = Path(self.job.path)
         if final.exists():
@@ -942,6 +1012,34 @@ class HttpDownload:
         _sync_dir(final.parent)  # le nouveau nom aussi
         self.job.path = str(final)
         return "completed"
+
+    def _verify(self):
+        """Termine les sommes du fichier et les compare à celles attendues.
+
+        Un fichier qui ne correspond pas n'est jamais livré : il reste en .pdm, et
+        le téléchargement échoue. Rien à reprendre (on ne sait pas quels octets
+        sont faux) : « Réessayer » repart de zéro.
+        """
+        job = self.job
+        with self.lock:
+            self.verifying = True
+            end = self._written()
+        try:
+            self.digester.feed(self.fd, end)
+        except OSError as e:
+            raise DownloadError(f"relecture impossible pour vérifier le fichier : {e.strerror}") from e
+        finally:
+            with self.lock:
+                self.verifying = False
+        wrong = checksum.mismatch(self.digester, job.checksums)
+        if wrong:
+            with self.lock:
+                self.segments, self.saved, self.downloaded = [], [], 0
+            raise DownloadError(checksum.failure(wrong, self.digester.hexdigest(wrong["algo"])))
+        job.sha256 = self.digester.hexdigest("sha-256")
+        job.verified = True if job.checksums else None
+        if job.checksums:
+            log.info("%s : vérifié (%s)", job.filename, ", ".join(c["algo"] + " " + c["source"] for c in job.checksums))
 
     def _close_fd(self):
         if self.fd is not None:

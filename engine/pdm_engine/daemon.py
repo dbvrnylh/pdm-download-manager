@@ -186,6 +186,9 @@ class Daemon:
             elif kind == "show":
                 self.engine.show_file(message["id"])
                 reply()
+            elif kind == "verify":
+                # Relire un gros fichier prend du temps : on ne bloque pas ce client.
+                threading.Thread(target=self._verify, args=(message, reply), daemon=True).start()
             elif kind == "remove":
                 self.engine.remove(message["id"], bool(message.get("deleteFile")))
                 reply()
@@ -222,6 +225,15 @@ class Daemon:
             reply(path=self.tools.choose_folder(message.get("start") or str(self.config.download_dir())))
         except ValueError as e:
             reply(False, error=str(e))
+
+    def _verify(self, message, reply):
+        try:
+            reply(verified=self.engine.verify(message["id"], message.get("checksum")))
+        except (ValueError, KeyError) as e:
+            reply(False, error=str(e))
+        except Exception as e:
+            log.exception("vérification")
+            reply(False, error=f"erreur interne : {e}")
 
     def _add(self, message, reply):
         try:

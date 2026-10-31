@@ -15,10 +15,13 @@ Routes :
   /limited/N/NOM    comme /range, mais 503 au-delà de N connexions à la fois (limite par IP)
   /tortoise/NOM     comme /range, mais la connexion qui part du début du fichier est lente (64 Ko/s)
   /stall/NOM        comme /range, mais la connexion qui part du début se bloque après 64 Ko
+  /digest/SORTE/NOM comme /range, avec la somme du fichier dans les en-têtes : repr (Repr-Digest),
+                    rfc3230 (Digest), goog (x-goog-hash), wrong (Repr-Digest d'un autre fichier)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -88,6 +91,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self._file(rest, ranges=True, unstable=True)
         if route in ("tortoise", "stall"):  # une route lente, ou un serveur surchargé, pour une connexion
             return self._file(rest, ranges=True, lagging=route)
+        if route == "digest":
+            kind, _, name = rest.partition("/")
+            return self._file(name, ranges=True, digest=kind)
         if route == "login-required":  # page de connexion déguisée en téléchargement
             return self._send(200, {"Content-Type": "text/html; charset=utf-8",
                                     "Content-Disposition": 'attachment; filename="rapport.pdf"'},
@@ -152,7 +158,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, body.encode())
         return super().do_GET()
 
-    def _file(self, name, ranges, chunked=False, flaky=False, unstable=False, lagging=None):
+    def _file(self, name, ranges, chunked=False, flaky=False, unstable=False, lagging=None, digest=None):
         data = FILES.get(name)
         if data is None:
             return self._send(404, {"Content-Type": "text/plain"}, b"not found")
@@ -180,6 +186,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("ETag", etag)
         if code == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        for key, value in _digest_headers(digest, data):
+            self.send_header(key, value)
         if chunked:
             self.send_header("Connection", "close")
         else:
@@ -205,6 +213,23 @@ class Handler(SimpleHTTPRequestHandler):
                 time.sleep(len(chunk) / rate)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+
+def _b64(algo, data):
+    return base64.b64encode(hashlib.new(algo, data).digest()).decode()
+
+
+def _digest_headers(kind, data):
+    """En-têtes annonçant la somme du fichier entier, comme les serveurs qui le font."""
+    if kind == "repr":
+        return [("Repr-Digest", f"sha-256=:{_b64('sha256', data)}:")]
+    if kind == "rfc3230":
+        return [("Digest", f"MD5={_b64('md5', data)}, SHA-256={_b64('sha256', data)}")]
+    if kind == "goog":
+        return [("x-goog-hash", "crc32c=AAAAAA=="), ("x-goog-hash", f"md5={_b64('md5', data)}")]
+    if kind == "wrong":
+        return [("Repr-Digest", f"sha-256=:{_b64('sha256', data + b'!')}:")]
+    return []
 
 
 def start(port=0, static_dir=None):
