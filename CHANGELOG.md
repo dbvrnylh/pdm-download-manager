@@ -78,6 +78,11 @@ versions follow [Semantic Versioning](https://semver.org/).
   and kept for a paused download to resume from.
 
 ### Fixed
+- A disk write that the kernel only partly carried out (a disk nearly full) left a hole of zeros in the
+  file, which was then shown as finished. The engine now writes the rest, and fails with "disque plein"
+  only when the disk really refuses.
+- A slow disk (USB stick, hard disk busy flushing) no longer holds up every connection of a download
+  and the progress display: each connection writes outside the download's lock.
 - The idle engine could quit right after its last download or client instead of waiting its full
   delay: idleness was counted from the last check that saw it busy, so a check landing just after the
   work ended found it "idle" for a whole check interval already. It now counts from the first check

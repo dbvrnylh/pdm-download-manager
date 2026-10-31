@@ -165,6 +165,39 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([r for p, r, _ in fx.LOG[last_probe + 1:] if p == "/unstable/mid.bin"], [],
                          "une seule requête après le repli")
 
+    # ─── Disque ────────────────────────────────────────────────────────────
+
+    def test_a_slow_disk_write_does_not_block_the_other_connections(self):
+        entered, release = threading.Event(), threading.Event()
+        real = os.pwrite
+
+        def stuck_once(fd, data, position):  # une écriture qui traîne (disque lent)
+            if not entered.is_set():
+                entered.set()
+                release.wait(10)
+            return real(fd, data, position)
+
+        with unittest.mock.patch.object(os, "pwrite", stuck_once):
+            job = self.add("/range/mid.bin")
+            self.assertTrue(entered.wait(10))
+            runner = self.engine.runners[job.id]
+            started = time.monotonic()
+            before = runner.progress()["downloaded"]
+            time.sleep(0.5)
+            after = runner.progress()["downloaded"]
+            self.assertLess(time.monotonic() - started, 1, "la progression ne doit pas attendre le disque")
+            release.set()
+            job = self.wait(job.id, {"completed"})
+        self.assertGreater(after, before, "les autres connexions avancent pendant ce temps")
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+
+    def test_short_disk_writes_are_completed(self):
+        real = os.pwrite
+        # Le noyau peut écrire moins que demandé : le reste ne doit pas devenir un trou.
+        with unittest.mock.patch.object(os, "pwrite", lambda fd, data, pos: real(fd, data[:7000], pos)):
+            job = self.wait(self.add("/range/small.zip").id, {"completed"})
+        self.assertEqual(sha(job.path), self.hashes["small.zip"])
+
     # ─── Erreurs et refus ──────────────────────────────────────────────────
 
     def test_downloads_follow_the_categories_of_the_settings(self):

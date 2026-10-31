@@ -519,12 +519,14 @@ class HttpDownload:
                 limit = len(data) if seg.end is None else min(len(data), seg.end - seg.pos + 1)
                 if limit <= 0:
                     return True
-                try:
-                    os.pwrite(self.fd, memoryview(data)[:limit], seg.pos)
-                except OSError as e:
-                    if e.errno == errno.ENOSPC:
-                        raise _DiskError("disque plein") from e
-                    raise _DiskError(f"écriture impossible : {e.strerror}") from e
+                position = seg.pos
+            # Écriture hors du verrou : un disque lent (clé USB, disque dur plein de
+            # données en attente) ne bloque plus les autres connexions ni l'affichage.
+            # Sans danger : seule cette connexion écrit dans son segment, et un découpage
+            # ne lui prend que ce qui est au-delà de pos + MIN_SPLIT, loin de ces octets.
+            # `pos` n'avance qu'une fois les octets écrits : il ne promet rien d'avance.
+            self._write(memoryview(data)[:limit], position)
+            with self.lock:
                 seg.pos += limit
                 self.downloaded += limit
                 if seg.end is not None and seg.pos > seg.end:
@@ -533,6 +535,20 @@ class HttpDownload:
             # verrou (les autres connexions continuent), interrompu par une pause.
             if self.limiter:
                 self.stop_event.wait(self.limiter.take(limit))
+
+    def _write(self, data, position):
+        # pwrite peut écrire moins que demandé (disque presque plein…) : on
+        # continue jusqu'au bout, sinon un trou resterait dans le fichier.
+        while data:
+            try:
+                written = os.pwrite(self.fd, data, position)
+            except OSError as e:
+                if e.errno == errno.ENOSPC:
+                    raise _DiskError("disque plein") from e
+                raise _DiskError(f"écriture impossible : {e.strerror}") from e
+            if not written:
+                raise _DiskError("écriture impossible : le disque n'accepte plus rien")
+            data, position = data[written:], position + written
 
     def _open_range(self, seg):
         job = self.job
