@@ -26,7 +26,8 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
 ## Highlights
 
 - **Faster downloads.** Up to 32 connections per file with dynamic segmentation: when a connection finishes,
-  it splits the largest remaining segment and takes half of it, so no connection sits idle until the end.
+  it splits the segment that would finish last and takes half of it, and a lagging connection is reopened, so
+  no connection sits idle and none holds up the others.
 - **Takes over the browser's downloads** — safely. The engine probes the file first; if the server refuses it
   (login page, one-time link…), Chrome simply carries on. A download is never lost.
 - **Pause, resume, survive.** Progress is persisted per segment: downloads resume after a network drop,
@@ -202,6 +203,11 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    its downloads: one more connection waits for a slot ("En attente du serveur…") instead of failing, and a file
    starts with only as many segments as the site accepts. The limit goes up by one connection every 15 seconds
    without a refusal, and is forgotten after ten minutes.
+6. A connection can land on a slow route or an overloaded server and keep the end of the file to itself. PDM
+   measures each connection: one going eight times slower than the download's best, or receiving nothing for five
+   seconds, is closed and reopened (it often lands elsewhere), without waiting for the 30-second network timeout.
+   Near the end, a free connection takes half of what is left to the one that would finish last, even a small
+   remainder when that one lags.
 
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official

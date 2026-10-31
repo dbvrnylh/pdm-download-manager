@@ -26,7 +26,8 @@ dans l'esprit d'Internet Download Manager — pour Chrome, Chromium, Brave, Edge
 ## Points forts
 
 - **Téléchargements accélérés.** Jusqu'à 32 connexions par fichier, avec segmentation dynamique : une connexion
-  qui a fini coupe en deux le plus gros segment restant et en prend la moitié. Aucune ne reste inactive.
+  qui a fini coupe en deux le segment qui finirait le dernier et en prend la moitié ; une connexion qui traîne est
+  rouverte. Aucune ne reste inactive, aucune ne fait attendre les autres.
 - **Prise de contrôle sans risque.** Le moteur fait d'abord une requête d'essai ; si le serveur refuse (page de
   connexion, lien à usage unique…), Chrome continue normalement. Aucun téléchargement n'est perdu.
 - **Pause, reprise, résistance.** La progression est sauvegardée segment par segment : reprise après une coupure
@@ -201,6 +202,11 @@ obtient une erreur ou une page HTML, Chrome continue.
    tient pour tous ses téléchargements : une connexion de plus attend une place (« En attente du serveur… ») au
    lieu d'échouer, et un fichier ne démarre qu'avec autant de segments que le site en accepte. La limite remonte
    d'une connexion toutes les 15 secondes sans refus, et s'oublie après dix minutes.
+6. Une connexion peut tomber sur une route lente ou un serveur surchargé et garder pour elle seule la fin du
+   fichier. PDM mesure chaque connexion : celle qui va huit fois moins vite que la meilleure du téléchargement, ou
+   qui ne reçoit plus rien depuis cinq secondes, est coupée et rouverte (elle repart souvent ailleurs), sans
+   attendre les 30 secondes du délai réseau. En fin de fichier, une connexion libre reprend la moitié de ce qui
+   reste à celle qui finira la dernière, même pour un petit reste quand celle-ci traîne.
 
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de

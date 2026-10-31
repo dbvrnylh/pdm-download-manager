@@ -57,6 +57,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   midnight); everything else starts right away. When the window closes, an unfinished one goes back to
   the queue and resumes from what it received at the next window. "Maintenant" undoes it.
 
+- Connections that lag are reopened. A connection on a slow route or an overloaded server could keep the
+  end of the file to itself: 1 MB at 64 KB/s took 16 s while the other connections had finished in
+  0.5 s, since a segment under 2 MB was never split. Each connection is now measured; one eight times
+  slower than the download's best, or receiving nothing for five seconds, is closed and reopened (often
+  elsewhere) without counting as an error, three times per segment at most. Near the end, a free
+  connection takes half of the segment that would finish last at its speed, down to 512 KB when that one
+  lags; healthy connections under 2 MB still finish alone. Not done under a speed limit, which slows
+  connections on purpose.
 - Servers that limit connections per IP address are followed instead of failing. Many servers accept
   only a few connections (4, 2, sometimes 1) and refuse the next ones with 503, 429 or a closed
   connection: the extra connections of a download used to retry until they made the whole download
@@ -98,6 +106,9 @@ versions follow [Semantic Versioning](https://semver.org/).
   and kept for a paused download to resume from.
 
 ### Fixed
+- Pausing or canceling a download whose server had stopped sending took up to 30 seconds: closing a
+  response doesn't wake a read waiting on its socket, which waited for the network timeout. The socket
+  is now shut down, which wakes it at once (under 2 seconds in the test, 29 before).
 - A power cut or a crash of the system during a download could leave a corrupted file shown as
   finished: the saved progress could promise data that was still in the system's cache, and resuming
   skipped the zeros left in its place. Saved progress now only covers data the disk has confirmed

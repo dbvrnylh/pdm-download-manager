@@ -13,6 +13,8 @@ Routes :
   /headers          renvoie en JSON tous les en-têtes reçus par cette requête
   /strict/NOM       comme /range, mais 403 sans les en-têtes d'un navigateur (anti-robot)
   /limited/N/NOM    comme /range, mais 503 au-delà de N connexions à la fois (limite par IP)
+  /tortoise/NOM     comme /range, mais la connexion qui part du début du fichier est lente (64 Ko/s)
+  /stall/NOM        comme /range, mais la connexion qui part du début se bloque après 64 Ko
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 """
@@ -84,6 +86,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._file(rest, ranges=True, flaky=True)
         if route == "unstable":
             return self._file(rest, ranges=True, unstable=True)
+        if route in ("tortoise", "stall"):  # une route lente, ou un serveur surchargé, pour une connexion
+            return self._file(rest, ranges=True, lagging=route)
         if route == "login-required":  # page de connexion déguisée en téléchargement
             return self._send(200, {"Content-Type": "text/html; charset=utf-8",
                                     "Content-Disposition": 'attachment; filename="rapport.pdf"'},
@@ -148,7 +152,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, body.encode())
         return super().do_GET()
 
-    def _file(self, name, ranges, chunked=False, flaky=False, unstable=False):
+    def _file(self, name, ranges, chunked=False, flaky=False, unstable=False, lagging=None):
         data = FILES.get(name)
         if data is None:
             return self._send(404, {"Content-Type": "text/plain"}, b"not found")
@@ -187,14 +191,18 @@ class Handler(SimpleHTTPRequestHandler):
             FLAKY_SEEN.add((start, name))
             cut = start + 300 * 1024
         pos, step = start, 32 * 1024
+        rate = SLOW_RATE if lagging and start == 0 else RATE
         try:
             while pos <= end:
                 if cut is not None and pos >= cut:
                     return  # coupure brutale
+                if lagging == "stall" and start == 0 and pos >= 64 * 1024:
+                    time.sleep(60)  # plus rien, sans fermer : le client finira par abandonner
+                    return
                 chunk = data[pos: min(pos + step, end + 1)]
                 self.wfile.write(chunk)
                 pos += len(chunk)
-                time.sleep(len(chunk) / RATE)
+                time.sleep(len(chunk) / rate)
         except (BrokenPipeError, ConnectionResetError):
             pass
 

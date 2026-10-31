@@ -19,7 +19,9 @@ import logging
 import os
 import re
 import shutil
+import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -40,7 +42,18 @@ log = logging.getLogger("pdm")
 
 PART_SUFFIX = ".pdm"
 CHUNK = 64 * 1024
-MIN_SPLIT = 1024 * 1024  # en dessous, une connexion de plus ne fait rien gagner
+MIN_SPLIT = 1024 * 1024  # découpage de départ : en dessous, une connexion de plus ne fait rien gagner
+# Sous 2 × MIN_SPLIT, une connexion libre ne prend la moitié du reste d'une autre que
+# si celle-ci traîne (deux fois plus lente que la meilleure), dès 2 × MIN_STEAL : c'est
+# en fin de fichier qu'une connexion lente fait attendre tout le monde. Une connexion
+# saine, elle, finit seule : une requête de plus coûterait plus qu'elle ne rapporte.
+MIN_STEAL = 256 * 1024
+assert MIN_STEAL >= 2 * CHUNK  # voir _stream : un découpage ne touche jamais les octets en cours d'écriture
+WATCH_EVERY = 1.0  # s entre deux coups d'œil aux connexions (vitesse, connexions qui traînent)
+SLOW_GRACE = 3.0  # s avant de juger une connexion : le temps que TCP prenne son élan
+SLOW_RATIO = 8  # une connexion 8 fois plus lente que la meilleure du téléchargement est rouverte
+STALL = 5.0  # s sans rien recevoir : rouverte, sans attendre les 30 s du délai réseau
+MAX_KICKS = 3  # rouvertures d'un même segment : au-delà, ce serveur est lent partout
 MAX_RETRIES = 6
 TIMEOUT = 30
 PLACE_WAIT = 0.5  # s entre deux coups d'œil quand le serveur n'accepte pas plus de connexions
@@ -255,12 +268,41 @@ def probe(job, timeout=TIMEOUT):
     return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime)
 
 
+def hang_up(resp):
+    """Ferme une réponse, même quand un autre thread attend dans sa lecture.
+
+    close() seul ne réveille pas une lecture bloquée (serveur qui n'envoie plus
+    rien) : la socket reste ouverte jusqu'au délai réseau, 30 s. shutdown() la
+    réveille aussitôt.
+    """
+    try:
+        resp.fp.raw._sock.shutdown(socket.SHUT_RDWR)  # SocketIO de http.client
+    except (AttributeError, OSError):
+        pass  # déjà fermée, ou lue jusqu'au bout
+    try:
+        resp.close()
+    except Exception:
+        pass
+
+
 class Segment:
-    __slots__ = ("start", "end", "pos", "active")
+    __slots__ = ("start", "end", "pos", "active", "resp", "since", "origin", "moved", "kicked", "kicks")
 
     def __init__(self, start, end, pos):
         self.start, self.end, self.pos = start, end, pos  # end inclus ; None = inconnu
         self.active = False
+        # Sa connexion en cours (voir HttpDownload._watch) : la réponse, quand et à
+        # quelle position elle a commencé, la dernière fois qu'elle a reçu quelque
+        # chose, et si elle vient d'être coupée exprès (combien de fois en tout).
+        self.resp, self.since, self.origin, self.moved = None, 0.0, pos, 0.0
+        self.kicked, self.kicks = False, 0
+
+    def rate(self, now, grace=SLOW_GRACE):
+        """Vitesse de sa connexion depuis son ouverture (octets/s), ou None : trop tôt pour juger."""
+        age = now - self.since
+        if self.resp is None or age < grace:
+            return None
+        return (self.pos - self.origin) / age
 
     def remaining(self):
         return 0 if self.end is None else self.end - self.pos + 1
@@ -341,6 +383,7 @@ class HttpDownload:
         self.hosts = hosts or Hosts()  # places chez chaque site (hosts.Hosts), partagées
         self.site = urlparse(job.url).hostname or ""
         self.waiting = 0  # connexions qui attendent une place chez le serveur
+        self.best_rate = 0.0  # la meilleure vitesse d'une connexion de ce téléchargement (octets/s)
         self.reserve = reserve  # fonction du moteur : choisit et réserve un chemin libre
         self.first = first  # ProbeResult déjà ouvert (sonde faite à l'ajout)
         self.lock = threading.Lock()
@@ -367,10 +410,7 @@ class HttpDownload:
         with self.lock:
             responses = list(self.responses)
         for resp in responses:
-            try:
-                resp.close()
-            except Exception:
-                pass
+            hang_up(resp)
 
     def progress(self):
         with self.lock:
@@ -544,17 +584,56 @@ class HttpDownload:
             thread.daemon = True
             thread.start()
         done = threading.Event()
-        saver = threading.Thread(target=self._checkpoints, args=(done,), daemon=True)
-        saver.start()
+        watcher = threading.Thread(target=self._watch, args=(done,), daemon=True)
+        watcher.start()
         for thread in threads:
             thread.join()
         done.set()
-        saver.join()
+        watcher.join()
 
-    def _checkpoints(self, done):
+    def _watch(self, done):
         # À part des connexions : fdatasync peut attendre le disque plusieurs secondes.
-        while not done.wait(SYNC_EVERY):
-            self.checkpoint()
+        synced = time.monotonic()
+        while not done.wait(WATCH_EVERY):
+            self._kick_slow()
+            if time.monotonic() - synced >= SYNC_EVERY:
+                self.checkpoint()
+                synced = time.monotonic()
+
+    def _kick_slow(self):
+        """Coupe les connexions qui traînent loin derrière ; elles se rouvrent aussitôt.
+
+        Une connexion peut tomber sur un serveur surchargé ou une route lente, et
+        garder pour elle seule la fin du fichier quand les autres ont fini. Rouverte,
+        elle repart le plus souvent ailleurs (un autre serveur derrière la même
+        adresse, une autre route). aria2 coupe sous un seuil fixe (--lowest-speed-limit) ;
+        ici, elle se mesure à la meilleure connexion du téléchargement, qu'on sait
+        possible. Une connexion qui ne reçoit plus rien est rouverte après STALL, sans
+        attendre le délai réseau.
+        """
+        if not self.job.resumable or (self.limiter and self.limiter.rate()):
+            return  # sous une limite de vitesse, les connexions sont lentes exprès
+        now = time.monotonic()
+        with self.lock:
+            live = [seg for seg in self.segments if seg.resp is not None and not seg.kicked]
+            for seg in live:
+                rate = seg.rate(now, grace=1.0)
+                if rate:
+                    self.best_rate = max(self.best_rate, rate)
+            if not self.best_rate:
+                return
+            slow = [
+                seg for seg in live
+                if seg.kicks < MAX_KICKS and seg.remaining() > 2 * CHUNK and now - seg.since >= SLOW_GRACE
+                and (now - seg.moved >= STALL or seg.rate(now) * SLOW_RATIO < self.best_rate)
+            ]
+            for seg in slow:
+                seg.kicked, seg.kicks = True, seg.kicks + 1
+            responses = [seg.resp for seg in slow]
+        for resp in responses:
+            hang_up(resp)  # sa lecture échoue, et _fetch la rouvre
+        if responses:
+            log.info("%s : %d connexion(s) trop lente(s) rouverte(s)", self.job.filename, len(responses))
 
     def _next_segment(self):
         with self.lock:
@@ -574,14 +653,32 @@ class HttpDownload:
             return stolen
 
     def _victim(self):
-        """Le segment en cours à couper en deux pour une connexion de plus, ou None (sous verrou)."""
+        """Le segment en cours à couper en deux pour une connexion de plus, ou None (sous verrou).
+
+        Celui qui finira le dernier à sa vitesse, pas le plus gros : une connexion
+        lente garde peu d'octets mais beaucoup de temps. Vitesse encore inconnue :
+        on la suppose aussi bonne que la meilleure.
+        """
         if not self.job.resumable or self.size is None:
             return None
-        active = [s for s in self.segments if s.active]
-        if not active:
+        now = time.monotonic()
+        rates = {s: s.rate(now, grace=1.0) for s in self.segments if s.active}
+        fastest = max([r for r in rates.values() if r is not None] + [self.best_rate]) or 1
+
+        def lagging(seg):
+            return rates[seg] is not None and rates[seg] * 2 < fastest
+
+        candidates = [
+            s for s in rates
+            if s.remaining() >= 2 * MIN_SPLIT or (s.remaining() >= 2 * MIN_STEAL and lagging(s))
+        ]
+        if not candidates:
             return None
-        victim = max(active, key=Segment.remaining)
-        return victim if victim.remaining() >= 2 * MIN_SPLIT else None
+
+        def finish(seg):
+            return seg.remaining() / max(fastest if rates[seg] is None else rates[seg], 1)
+
+        return max(candidates, key=finish)
 
     def _has_work(self):
         """Une connexion de plus aurait-elle quelque chose à télécharger ?"""
@@ -693,6 +790,7 @@ class HttpDownload:
                     resp = self._open_range(seg)
                     opening, opened = False, True
                 self._track(resp)
+                self._attach(seg, resp)
                 if self._stream(seg, resp):
                     break
                 raise http.client.IncompleteRead(b"")
@@ -702,10 +800,15 @@ class HttpDownload:
                     AttributeError) as e:
                 error = e  # HTTPError compris (c'est une URLError)
             finally:
+                self._detach(seg)
                 self._release(resp)
                 resp = None
             if self.stop_event.is_set():
                 break
+            with self.lock:
+                kicked, seg.kicked = seg.kicked, False
+            if kicked:  # trop lente, coupée exprès (voir _kick_slow) : rouverte aussitôt, sans attente
+                continue
             if opening and self.job.resumable and is_refusal(error, accepted=True):
                 if not lagged and not (blind and not opened):
                     lagged = True
@@ -723,6 +826,23 @@ class HttpDownload:
                 raise DownloadError(f"connexion perdue : {_reason(error)}")
             self.stop_event.wait(min(2 ** retries, 30))  # attente croissante, interrompue par une pause
         return True
+
+    def _attach(self, seg, resp):
+        now = time.monotonic()
+        with self.lock:
+            seg.resp, seg.since, seg.origin, seg.moved = resp, now, seg.pos, now
+
+    def _detach(self, seg):
+        now = time.monotonic()
+        with self.lock:
+            if seg.resp is None:
+                return
+            # Une connexion trop brève pour _kick_slow compte aussi : c'est souvent
+            # en fin de fichier qu'une seule reste, lente, sans personne à qui se comparer.
+            got, age = seg.pos - seg.origin, now - seg.since
+            if age >= 0.2 and got >= MIN_STEAL:
+                self.best_rate = max(self.best_rate, got / age)
+            seg.resp = None
 
     def _stream(self, seg, resp):
         """Lit la réponse dans le segment. True si le segment est terminé."""
@@ -746,11 +866,12 @@ class HttpDownload:
             # Écriture hors du verrou : un disque lent (clé USB, disque dur plein de
             # données en attente) ne bloque plus les autres connexions ni l'affichage.
             # Sans danger : seule cette connexion écrit dans son segment, et un découpage
-            # ne lui prend que ce qui est au-delà de pos + MIN_SPLIT, loin de ces octets.
+            # ne lui prend que ce qui est au-delà de pos + MIN_STEAL, loin de ces octets.
             # `pos` n'avance qu'une fois les octets écrits : il ne promet rien d'avance.
             self._write(memoryview(data)[:limit], position)
             with self.lock:
                 seg.pos += limit
+                seg.moved = time.monotonic()
                 self.downloaded += limit
                 if seg.end is not None and seg.pos > seg.end:
                     return True

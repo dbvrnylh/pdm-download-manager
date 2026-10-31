@@ -146,6 +146,30 @@ class EngineTest(unittest.TestCase):
         job = self.wait(job.id, {"completed"}, timeout=60)
         self.assertEqual(sha(job.path), self.hashes["mid.bin"])
 
+    def test_a_lagging_connection_does_not_hold_up_the_end(self):
+        # La connexion de la sonde (début du fichier) tombe sur une route à 64 Ko/s : son
+        # segment de 1 Mo demandait 16 s, quand les autres avaient fini en 0,5 s.
+        started = time.time()
+        job = self.wait(self.add("/tortoise/mid.bin").id, {"completed", "failed"}, timeout=30)
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+        self.assertLess(time.time() - started, 8)
+
+    def test_a_stalled_connection_is_reopened_without_waiting_for_the_timeout(self):
+        started = time.time()
+        job = self.wait(self.add("/stall/mid.bin").id, {"completed", "failed"}, timeout=60)
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+        self.assertLess(time.time() - started, 12, "sans attendre les 30 s du délai réseau")
+
+    def test_pause_does_not_wait_for_a_stalled_connection(self):
+        job = self.add("/stall/mid.bin")
+        time.sleep(1.5)  # les autres connexions ont fini ; celle du début est bloquée
+        started = time.time()
+        self.engine.pause(job.id)
+        self.wait(job.id, {"paused"})
+        self.assertLess(time.time() - started, 2, "la pause n'attend pas le délai réseau")
+
     def test_file_changed_on_server_restarts(self):
         fx.make_file("changing.bin", 24 * 1024 * 1024, seed="v1")
         job = self.add("/range/changing.bin")
