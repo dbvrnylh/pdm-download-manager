@@ -4,6 +4,7 @@ Lancer : python3 -m unittest discover -s tests -v   (depuis la racine du projet)
 """
 
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -205,6 +206,46 @@ class EngineTest(unittest.TestCase):
         base = self.root / "Telechargements"
         self.assertEqual(httpdl.target_dir(DefaultDir(base), "Videos"), base / "Videos")
         self.assertTrue((base / "Videos").is_dir())
+
+    # ─── En-têtes rejoués du navigateur ────────────────────────────────────
+
+    BROWSER = [
+        ["User-Agent", "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0"], ["Accept-Language", "fr-FR,fr;q=0.9"],
+        ["Sec-Fetch-Mode", "navigate"], ["Cookie", "_abck=ok; session=1"], ["Authorization", "Bearer secret"],
+        ["Accept-Encoding", "gzip, br"], ["Range", "bytes=5-"], ["If-None-Match", '"ancien"'],
+    ]
+
+    def test_browser_headers_get_past_a_strict_server(self):
+        refused = self.wait(self.add("/strict/small.zip").id, {"failed", "completed"})
+        self.assertEqual((refused.status, refused.error), ("failed", "accès refusé (403)"))
+        job = self.wait(self.add("/strict/small.zip", headers=self.BROWSER).id, {"failed", "completed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["small.zip"])  # en plusieurs connexions, toutes rejouées
+        self.assertNotIn("headers", job.public(), "jamais envoyés à l'interface (cookies)")
+
+    def test_replayed_headers_stay_safe(self):
+        # /headers renvoie ce qu'il a reçu : téléchargé comme un fichier, puis relu.
+        def received(path):
+            job = self.wait(self.add(path, headers=self.BROWSER, filename="recu.json").id, {"completed"})
+            return {name.lower(): value for name, value in json.loads(Path(job.path).read_text()).items()}
+
+        same = received("/headers")
+        self.assertEqual(same["accept-language"], "fr-FR,fr;q=0.9")
+        self.assertEqual(same["authorization"], "Bearer secret")  # même site : gardé
+        self.assertEqual(same["accept-encoding"], "identity")  # sinon les plages d'octets portent sur du compressé
+        self.assertEqual(same["range"], "bytes=0-")  # celle du moteur, pas « bytes=5- »
+        self.assertNotIn("if-none-match", same)  # sinon « 304 Not Modified » au lieu du fichier
+        # Redirection vers un autre site : la session ne suit pas, le reste si.
+        other = received("/cross/headers")
+        self.assertNotIn("cookie", other)
+        self.assertNotIn("authorization", other)
+        self.assertEqual(other["accept-language"], "fr-FR,fr;q=0.9")
+
+    def test_trapped_headers_are_refused(self):
+        for bad in ([["X-Test", "a\r\nInjected: 1"]], [["Mauvais nom", "x"]], [["X", "y"]] * 41, [["X"]]):
+            with self.assertRaises(ValueError, msg=repr(bad)[:60]):
+                self.engine.add({"url": self.base + "/range/small.zip", "headers": bad})
+        self.assertEqual(self.engine.jobs, {})
 
     # ─── Limite de vitesse et plage horaire ────────────────────────────────
 

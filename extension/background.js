@@ -12,6 +12,7 @@
 import { categoryFor } from './lib/categories.js';
 import { EngineClient } from './lib/engine.js';
 import { basename } from './lib/filename.js';
+import { rememberRequest, takeHeaders } from './lib/headers.js';
 import { isKnownVariant, masterVariants } from './lib/hls.js';
 import { directFilename, httpJob, isStreamUrl, videoJob } from './lib/jobs.js';
 import { detectMedia } from './lib/media.js';
@@ -72,6 +73,19 @@ async function readPlaylist(url) {
     return null;
   }
 }
+
+// La requête exacte de Chrome, que le moteur rejouera s'il prend le
+// téléchargement qui la suit (voir lib/headers.js). « extraHeaders » : sans
+// lui, Chrome cache Cookie et Referer aux extensions. tabId -1 : requêtes hors
+// onglet (les nôtres, celles d'« Avec Chrome »), qu'on ne reprend pas.
+const recentRequests = new Map();
+chrome.webRequest.onSendHeaders.addListener(
+  (details) => {
+    if (details.tabId >= 0) rememberRequest(recentRequests, details);
+  },
+  { urls: ['<all_urls>'], types: ['main_frame', 'sub_frame', 'other'] },
+  ['requestHeaders', 'extraHeaders'],
+);
 
 // Nouvelle page dans l'onglet : on oublie les médias de l'ancienne.
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, timeStamp }) => {
@@ -166,6 +180,8 @@ async function handOverToEngine(item, requested) {
     referer: item.referrer || undefined,
     source: 'intercept',
     mime: item.mime,
+    // Rejouée par le moteur ; s'il ne l'a pas vue, cookies reconstitués comme avant.
+    headers: takeHeaders(recentRequests, [item.finalUrl, item.url]),
   });
   try {
     await client.request({ type: 'add', probe: true, job }, PROBE_TIMEOUT);

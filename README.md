@@ -250,7 +250,10 @@ Engine settings are stored in `~/.local/share/pdm/config.json`.
 ## FAQ
 
 **How does it compare to IDM?**
-Same core idea — segmented, resumable downloads driven from the browser — with the same limits: no external
+Same core idea — segmented, resumable downloads driven from the browser. Like IDM, PDM replays the request the
+browser sent for a download it takes over (its cookies, `Accept-Language`, `sec-fetch-*`…), which some anti-bot
+checks require; `Range`, compression and conditional headers are left out, and cookies and `Authorization` never
+follow a redirect to another site. Same limits too: no external
 program can reuse the connection the browser already opened, so one-time links and anti-bot checks based on the
 browser's TLS fingerprint can't be taken over. When the engine's probe is refused, PDM leaves the download to
 Chrome automatically; if a server refuses the engine later on, **Avec Chrome** retries it in the browser.
@@ -335,7 +338,6 @@ Design choices worth knowing:
 
 ## Roadmap
 
-- Replay every header the browser sent (not just cookies and referrer), IDM-style.
 - Adapt to servers that limit the number of connections instead of failing.
 - Automatic hand-back to Chrome with a per-site exception list.
 - English interface.

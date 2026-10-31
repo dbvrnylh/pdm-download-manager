@@ -81,12 +81,14 @@ class ResourceChanged(DownloadError):
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     # urllib recopie tous les en-têtes lors d'une redirection, Cookie compris.
-    # Un navigateur, lui, n'envoie les cookies qu'à leur propre domaine : on
-    # les retire si la redirection change d'hôte (sinon : fuite de session).
+    # Un navigateur, lui, n'envoie les cookies (ni un Authorization) qu'à leur
+    # propre site : on les retire si la redirection change d'hôte (sinon : fuite
+    # de session).
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is not None and urlparse(newurl).hostname != urlparse(req.full_url).hostname:
             new.remove_header("Cookie")
+            new.remove_header("Authorization")
         return new
 
 
@@ -113,17 +115,55 @@ def _reason(error):
     return str(reason).strip() or error.__class__.__name__
 
 
+# En-têtes rejoués du navigateur que le moteur ne reprend jamais : gérés par
+# lui ou par la connexion. Range et Accept-Encoding casseraient les plages
+# d'octets ; If-None-Match et If-Modified-Since vaudraient un « 304 Not
+# Modified » au lieu du fichier. (L'extension les filtre aussi.)
+ENGINE_HEADERS = {
+    "host", "connection", "content-length", "transfer-encoding", "keep-alive", "te", "upgrade",
+    "proxy-connection", "range", "if-range", "accept-encoding",
+    "if-none-match", "if-modified-since", "if-match", "if-unmodified-since",
+}
+HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+MAX_HEADERS = 40
+
+
+def clean_headers(raw):
+    """En-têtes envoyés par le navigateur → [[nom, valeur]] à rejouer, ou None.
+
+    Le moteur ne fait pas confiance à ce qu'il reçoit : un retour à la ligne
+    dans une valeur injecterait de faux en-têtes dans la requête.
+    """
+    if not raw:
+        return None
+    if not isinstance(raw, list) or len(raw) > MAX_HEADERS:
+        raise ValueError(f"en-têtes du navigateur refusés (une liste de {MAX_HEADERS} au plus)")
+    clean = []
+    for item in raw:
+        if not (isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)):
+            raise ValueError("en-têtes du navigateur refusés (paires nom, valeur attendues)")
+        name, value = item
+        if not HEADER_NAME.match(name) or len(value) > 8192 or any(c in value for c in "\r\n\0"):
+            raise ValueError(f"en-tête du navigateur refusé : {name[:40]!r}")
+        if name.lower() not in ENGINE_HEADERS:
+            clean.append([name, value])
+    return clean or None
+
+
 def build_request(job, url, start=None, end=None, validator=None):
-    headers = {
-        "User-Agent": job.userAgent or DEFAULT_UA,
-        "Accept": "*/*",
-        # Pas de compression : les plages d'octets doivent porter sur le fichier lui-même.
-        "Accept-Encoding": "identity",
-    }
-    if job.referer:
-        headers["Referer"] = job.referer
-    if job.cookies:
-        headers["Cookie"] = job.cookies
+    if job.headers:
+        # La requête exacte du navigateur (prise de contrôle), façon IDM : son
+        # Cookie d'origine, Accept-Language, sec-fetch-*… Certains anti-robots
+        # refusent une requête qui n'a que les cookies et le User-Agent.
+        headers = dict(job.headers)
+    else:
+        headers = {"User-Agent": job.userAgent or DEFAULT_UA, "Accept": "*/*"}
+        if job.referer:
+            headers["Referer"] = job.referer
+        if job.cookies:
+            headers["Cookie"] = job.cookies
+    # Pas de compression : les plages d'octets doivent porter sur le fichier lui-même.
+    headers["Accept-Encoding"] = "identity"
     if start is not None:
         headers["Range"] = f"bytes={start}-" + ("" if end is None else str(end))
         if validator:

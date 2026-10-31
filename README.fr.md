@@ -251,7 +251,10 @@ Les réglages du moteur sont enregistrés dans `~/.local/share/pdm/config.json`.
 ## Questions fréquentes
 
 **Comment se compare-t-il à IDM ?**
-Même principe — téléchargements segmentés et reprenables pilotés depuis le navigateur — et mêmes limites : aucun
+Même principe — téléchargements segmentés et reprenables pilotés depuis le navigateur. Comme IDM, PDM rejoue la
+requête que le navigateur a envoyée pour un téléchargement qu'il reprend (ses cookies, `Accept-Language`,
+`sec-fetch-*`…), ce que certains anti-robots exigent ; `Range`, la compression et les en-têtes conditionnels sont
+écartés, et les cookies et `Authorization` ne suivent jamais une redirection vers un autre site. Et mêmes limites : aucun
 programme externe ne peut réutiliser la connexion que le navigateur a déjà ouverte. Les liens à usage unique et
 les protections anti-robots fondées sur l'empreinte TLS du navigateur ne peuvent donc pas être repris. Quand la
 requête d'essai du moteur est refusée, PDM laisse automatiquement le téléchargement à Chrome ; si un serveur
@@ -339,7 +342,6 @@ Choix de conception :
 
 ## Feuille de route
 
-- Rejouer tous les en-têtes envoyés par le navigateur (pas seulement cookies et Referer), comme IDM.
 - S'adapter aux serveurs qui limitent le nombre de connexions au lieu d'échouer.
 - Retour automatique vers Chrome, avec une liste de sites exclus.
 - Interface en anglais.

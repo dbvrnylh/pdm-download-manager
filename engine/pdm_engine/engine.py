@@ -20,7 +20,7 @@ from urllib.parse import quote
 from . import httpdl, paths
 from .config import QUALITIES
 from .config import MIN_SPEED
-from .httpdl import PART_SUFFIX, DownloadError, HttpDownload
+from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
 from .limiter import Limiter
 from .util import filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
 from .ytdlp import YtdlpDownload, cleanup_files
@@ -32,9 +32,9 @@ PERSISTED = {
     "userAgent": None, "source": "manual", "filename": None, "title": None, "path": None, "workDir": None,
     "category": "other", "mime": None, "preset": None, "status": "queued", "error": None,
     "size": None, "downloaded": 0, "resumable": False, "validator": None, "segments": [],
-    "createdAt": 0, "completedAt": None, "scheduled": False,
+    "createdAt": 0, "completedAt": None, "scheduled": False, "headers": None,
 }
-SECRET = {"cookies", "userAgent", "validator"}
+SECRET = {"cookies", "headers", "userAgent", "validator"}  # jamais envoyés à l'interface
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
 
 
@@ -144,6 +144,7 @@ class Engine:
         job = Job(
             id=spec.get("id"), kind=kind, url=url, referer=spec.get("referer"),
             cookies=spec.get("cookies") or None, userAgent=spec.get("userAgent"),
+            headers=clean_headers(spec.get("headers")) if kind == "http" else None,
             source=spec.get("source") or "manual", mime=spec.get("mime"),
             filename=sanitize_filename(spec["filename"]) if spec.get("filename") else None,
             title=spec.get("title"), preset=preset, size=spec.get("size"),

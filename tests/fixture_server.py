@@ -10,6 +10,8 @@ Routes :
   /login-required   page HTML envoyée en pièce jointe « rapport.pdf »
   /redirect/CHEMIN  302 vers le même hôte ;  /cross/CHEMIN : 302 vers l'autre hôte (localhost)
   /cookies          renvoie en JSON les cookies reçus par cette requête
+  /headers          renvoie en JSON tous les en-têtes reçus par cette requête
+  /strict/NOM       comme /range, mais 403 sans les en-têtes d'un navigateur (anti-robot)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 """
@@ -89,6 +91,16 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send(302, {"Location": f"http://127.0.0.1:{self.server.server_port}/{rest}"})
         if route == "cross":
             return self._send(302, {"Location": f"http://localhost:{self.server.server_port}/{rest}"})
+        if route == "headers":
+            body = json.dumps(dict(self.headers.items())).encode()
+            return self._send(200, {"Content-Type": "application/json"}, body)
+        if route == "strict":
+            # Comme un anti-robot : sans les en-têtes et le cookie du navigateur, refusé.
+            cookie = self.headers.get("Cookie") or ""
+            if (self.headers.get("Accept-Language") != "fr-FR,fr;q=0.9"
+                    or "Sec-Fetch-Mode" not in self.headers or "_abck=ok" not in cookie):
+                return self._send(403, {"Content-Type": "text/html"}, b"<html>Access Denied</html>")
+            return self._file(rest, ranges=True)
         if route == "cookies":
             body = json.dumps({"cookie": self.headers.get("Cookie")}).encode()
             return self._send(200, {"Content-Type": "application/json"}, body)

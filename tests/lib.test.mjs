@@ -4,11 +4,12 @@ import { detectMedia, totalSize } from '../extension/lib/media.js';
 import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
-import { PRESETS, isStreamUrl, directFilename, videoJob } from '../extension/lib/jobs.js';
+import { PRESETS, isStreamUrl, directFilename, httpJob, videoJob } from '../extension/lib/jobs.js';
 import { MAX_LINKS, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
 import { addMedia, getMedia } from '../extension/lib/store.js';
 import { inWindow } from '../extension/lib/schedule.js';
+import { KEEP_MAX, KEEP_MS, rememberRequest, takeHeaders } from '../extension/lib/headers.js';
 
 const h = (obj) => Object.entries(obj).map(([name, value]) => ({ name, value }));
 const resp = (url, headers, statusCode = 200) => ({ url, statusCode, responseHeaders: h(headers) });
@@ -249,4 +250,38 @@ test('schedule: plage horaire, y compris quand elle passe minuit', () => {
   assert.equal(inWindow(at(14, 0), '23:00', '06:00'), false);
   assert.equal(inWindow(at(13, 0), '12:00', '14:00'), true);
   assert.equal(inWindow(at(11, 59), '12:00', '14:00'), false);
+});
+
+test('headers: la requête de Chrome, filtrée, gardée peu de temps et utilisée une fois', () => {
+  const recent = new Map();
+  const sent = [
+    { name: 'Accept-Language', value: 'fr-FR,fr;q=0.9' },
+    { name: 'Cookie', value: '_abck=ok' },
+    { name: 'sec-fetch-mode', value: 'navigate' },
+    { name: 'Range', value: 'bytes=5-' }, // le moteur pose les siens
+    { name: 'Accept-Encoding', value: 'gzip, br' }, // casserait les plages d'octets
+    { name: 'If-None-Match', value: '"v1"' }, // vaudrait un 304 au lieu du fichier
+    { name: 'X-Binaire', binaryValue: [1, 2] },
+  ];
+  rememberRequest(recent, { url: 'https://site.fr/a.pdf', requestHeaders: sent }, 1000);
+  assert.equal(takeHeaders(recent, [undefined, 'https://autre.fr/b.pdf'], 2000), null);
+  assert.deepEqual(takeHeaders(recent, ['https://site.fr/a.pdf'], 2000), [
+    ['Accept-Language', 'fr-FR,fr;q=0.9'],
+    ['Cookie', '_abck=ok'],
+    ['sec-fetch-mode', 'navigate'],
+  ]);
+  assert.equal(takeHeaders(recent, ['https://site.fr/a.pdf'], 2000), null, 'une seule fois');
+  rememberRequest(recent, { url: 'https://site.fr/c.pdf', requestHeaders: sent }, 1000);
+  assert.equal(takeHeaders(recent, ['https://site.fr/c.pdf'], 1000 + KEEP_MS + 1), null, 'trop vieux');
+  for (let i = 0; i < KEEP_MAX + 10; i++) rememberRequest(recent, { url: `https://site.fr/${i}`, requestHeaders: sent }, 5000);
+  assert.equal(recent.size, KEEP_MAX);
+  assert.equal(recent.has('https://site.fr/0'), false, 'les plus anciennes partent');
+});
+
+test('jobs: avec les en-têtes de Chrome, pas de cookies reconstitués', async () => {
+  globalThis.chrome = { cookies: { getAll: async () => [{ name: 's', value: '1' }] } };
+  const replayed = await httpJob('https://site.fr/a.pdf', { headers: [['Cookie', '_abck=ok']] });
+  assert.deepEqual([replayed.headers, replayed.cookies], [[['Cookie', '_abck=ok']], undefined]);
+  assert.equal((await httpJob('https://site.fr/a.pdf')).cookies, 's=1');
+  delete globalThis.chrome;
 });

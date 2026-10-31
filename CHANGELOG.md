@@ -57,6 +57,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   midnight); everything else starts right away. When the window closes, an unfinished one goes back to
   the queue and resumes from what it received at the next window. "Maintenant" undoes it.
 
+- Taken-over downloads replay the browser's own request, as IDM does: the extension notes the headers
+  Chrome sends (webRequest with extraHeaders, in memory only, 60 s, used once) and the engine replays
+  them, so it carries the original cookies, Accept-Language, sec-ch-ua, sec-fetch-*… that some anti-bot
+  checks require. Range, compression and conditional headers are left out (they would break byte
+  ranges or get a 304); cookies and Authorization never follow a redirect to another site; headers
+  are validated (no line breaks, 40 at most) and never sent to the interface. Sites that also check
+  the TLS fingerprint still refuse the engine, and Chrome keeps those downloads.
+
 ### Changed
 - The catch-all category "Autres" is now called "Générique" (folder `Generique/`). Files already in
   `Autres/` stay there.
