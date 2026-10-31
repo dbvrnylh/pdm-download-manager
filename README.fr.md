@@ -187,7 +187,7 @@ obtient une erreur ou une page HTML, Chrome continue.
 
 1. La requête d'essai demande `Range: bytes=0-`. Une réponse `206 Partial Content` prouve que le serveur accepte
    les plages d'octets, et `Content-Range` donne la taille totale.
-2. Le fichier est préalloué puis découpé en segments. Chaque connexion demande sa plage et écrit à sa position
+2. La place du fichier est réservée sur le disque (`fallocate`), puis il est découpé en segments. Chaque connexion demande sa plage et écrit à sa position
    avec `os.pwrite` ; la connexion de la requête d'essai sert de première connexion.
 3. Quand le serveur fournit un `ETag` ou un `Last-Modified`, chaque requête porte `If-Range` : un fichier modifié
    sur le serveur est détecté au lieu d'être corrompu en silence. Un serveur incohérent d'une requête à l'autre

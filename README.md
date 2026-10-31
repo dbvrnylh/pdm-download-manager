@@ -188,7 +188,7 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
 
 1. The probe asks for `Range: bytes=0-`. A `206 Partial Content` answer proves the server supports ranges,
    and `Content-Range` gives the total size.
-2. The file is preallocated, then split into segments. Each connection requests its range and writes at its
+2. The file's space is reserved on the disk (`fallocate`), then it is split into segments. Each connection requests its range and writes at its
    offset with `os.pwrite`; the probe's connection is reused as the first one.
 3. When the server provides an `ETag` or `Last-Modified`, every range request carries `If-Range`, so a file that
    changes on the server is detected instead of silently corrupted. Servers that answer inconsistently get a

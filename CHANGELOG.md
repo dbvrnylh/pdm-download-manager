@@ -80,6 +80,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   the TLS fingerprint still refuse the engine, and Chrome keeps those downloads.
 
 ### Changed
+- The space of a file is reserved on the disk before it downloads (`fallocate`), instead of a sparse
+  file that grew as the connections wrote: no more "disque plein" halfway through because another
+  program took the space meanwhile, and a file in one piece rather than fragments laid in the order of 8
+  connections. Instant on ext4, XFS, btrfs and tmpfs (0.5 ms for 512 MB). A file system that can't
+  reserve gets the sparse file as before, never zeros written block by block (what `posix_fallocate`
+  would do there).
 - The catch-all category "Autres" is now called "Générique" (folder `Generique/`). Files already in
   `Autres/` stay there.
 - A download folder chosen in "Réglages" that has disappeared (external disk unplugged) is no longer

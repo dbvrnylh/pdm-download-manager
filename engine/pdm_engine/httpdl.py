@@ -12,6 +12,7 @@ Principe (celui d'IDM) :
    redémarrage, chaque segment repart de là où il s'était arrêté.
 """
 
+import ctypes
 import errno
 import http.client
 import logging
@@ -283,6 +284,53 @@ class _DiskError(DownloadError):
     pass
 
 
+def _load_fallocate():
+    """fallocate(2) de Linux, par la libc.
+
+    Python n'offre que posix_fallocate, que la glibc émule en écrivant des zéros
+    bloc par bloc quand le système de fichiers ne sait pas réserver : des minutes
+    pour quelques Go. fallocate, lui, répond simplement « je ne sais pas ».
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        func = getattr(libc, "fallocate64", None) or libc.fallocate
+    except (OSError, AttributeError):
+        return None
+    func.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+    func.restype = ctypes.c_int
+
+    def fallocate(fd, size):
+        if func(fd, 0, 0, size) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+
+    return fallocate
+
+
+_fallocate = _load_fallocate()
+
+
+def preallocate(fd, size):
+    """Réserve vraiment la place du fichier sur le disque, sans rien y écrire.
+
+    Pas de « disque plein » au milieu d'un téléchargement parce qu'un autre
+    programme a pris la place entre-temps, et un fichier d'un seul tenant au lieu
+    de morceaux posés dans le désordre de 8 connexions. False : le système de
+    fichiers ne sait pas réserver, le fichier restera creux.
+    """
+    if _fallocate is None:
+        return False
+    try:
+        _fallocate(fd, size)
+    except OSError as e:
+        if e.errno in (errno.EOPNOTSUPP, errno.ENOSYS):
+            return False
+        if e.errno == errno.ENOSPC:
+            raise _DiskError(f"espace disque insuffisant ({human_size(size)} nécessaires)") from e
+        raise _DiskError(f"écriture impossible : {e.strerror}") from e
+    return True
+
+
 class HttpDownload:
     """Exécute un téléchargement HTTP. Une instance par démarrage (ou reprise)."""
 
@@ -465,8 +513,8 @@ class HttpDownload:
             raise DownloadError(f"espace disque insuffisant ({human_size(self.size)} nécessaires)")
         job.path = str(self.reserve(directory, sanitize_filename(job.filename)))
         self.fd = os.open(job.path + PART_SUFFIX, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
-        if self.size:
-            os.ftruncate(self.fd, self.size)  # préallocation (fichier creux)
+        if self.size and not preallocate(self.fd, self.size):
+            os.ftruncate(self.fd, self.size)  # le système ne sait pas réserver : fichier creux
         with self.lock:
             self.downloaded = 0
             if job.resumable and self.size is not None:

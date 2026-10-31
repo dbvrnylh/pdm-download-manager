@@ -3,6 +3,7 @@
 Lancer : python3 -m unittest discover -s tests -v   (depuis la racine du projet)
 """
 
+import errno
 import hashlib
 import http.client
 import json
@@ -224,6 +225,38 @@ class EngineTest(unittest.TestCase):
         self.assertIn("le disque n'a pas confirmé", job.error)
         self.assertTrue(Path(job.path + ".pdm").exists(), "le fichier n'est pas présenté comme fini")
         self.assertFalse(Path(job.path).exists())
+
+    @unittest.skipIf(httpdl._fallocate is None, "pas de fallocate dans la libc")
+    def test_space_is_reserved_before_downloading(self):
+        job = self.add("/range/big.bin")
+        time.sleep(0.3)
+        self.engine.pause(job.id)
+        job = self.wait(job.id, {"paused"})
+        self.assertLess(job.downloaded, 24 * 1024 * 1024)
+        # Toute la place est prise, pas seulement ce qui est reçu (fichier creux).
+        self.assertGreaterEqual(os.stat(job.path + ".pdm").st_blocks * 512, 24 * 1024 * 1024)
+        self.engine.resume(job.id)
+        self.assertEqual(sha(self.wait(job.id, {"completed"}).path), self.hashes["big.bin"])
+
+    def test_a_disk_that_cannot_reserve_gets_a_sparse_file(self):
+        def unsupported(fd, size):
+            raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+        with unittest.mock.patch.object(httpdl, "_fallocate", unsupported):
+            job = self.wait(self.add("/range/mid.bin").id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+
+    def test_a_full_disk_fails_before_downloading(self):
+        def full(fd, size):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        fx.LOG.clear()
+        with unittest.mock.patch.object(httpdl, "_fallocate", full):
+            job = self.wait(self.add("/range/big.bin").id, {"completed", "failed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("espace disque insuffisant", job.error)
+        self.assertEqual(len([p for p, r, _ in fx.LOG if p == "/range/big.bin"]), 1, "rien de plus que la sonde")
 
     def test_short_disk_writes_are_completed(self):
         real = os.pwrite
