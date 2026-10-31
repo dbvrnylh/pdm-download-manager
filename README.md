@@ -32,6 +32,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   (login page, one-time link…), Chrome simply carries on. A download is never lost.
 - **Pause, resume, survive.** Progress is persisted per segment: downloads resume after a network drop,
   a browser restart or a reboot. The engine keeps downloading when the browser is closed.
+- **Verified files.** Every file's SHA-256 is computed while it downloads and compared with the checksum shown next
+  to the link (GitHub, Linux distributions…) or announced by the server: a damaged file is never delivered.
+  **Vérifier…** checks a finished file against a checksum you paste.
 - **Videos in one click.** A "download this video" button appears on players; the popup lists detected media;
   YouTube and hundreds of sites are supported through [yt-dlp](https://github.com/yt-dlp/yt-dlp), with quality
   presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
@@ -88,7 +91,8 @@ Keep the repository where it is: the browser loads the extension from it.
 | Add a URL by hand | Manager → paste the address → **Fichier** or **Vidéo de la page** → **Ajouter**. |
 | Download a list of links | Manager → **Importer une liste…**, or `pdm-host add --file links.txt`. See [below](#downloading-a-list-of-links). |
 | Download later (at night) | Manager → **Plus tard** on a download, or the **Plus tard** box when importing a list, or `pdm-host add --later URL`. It only progresses during the time window of **Réglages**; the rest starts right away. |
-| Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality). |
+| Verify a file | Nothing to do when the page shows its checksum next to the link: PDM picks it up on click and checks the file. Otherwise, Manager → **Vérifier…** on a finished download → paste the site's checksum (SHA-256, SHA-512, SHA-1 or MD5). |
+| Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 
 If a heavily protected site refuses the engine, **Avec Chrome** retries the download in the browser,
 with the browser's own session.
@@ -165,7 +169,7 @@ flowchart LR
   subgraph Browser["Chrome / Chromium / Brave"]
     SW["Extension<br/>(MV3 service worker)"]
     UI["Popup · Manager · Options"]
-    CS["Content script<br/>(video button)"]
+    CS["Content scripts<br/>(video button, link checksums)"]
   end
   SW -- "Native Messaging<br/>length-prefixed JSON" --> H["pdm-host<br/>(bridge)"]
   UI -- "Native Messaging" --> H
@@ -208,6 +212,12 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    seconds, is closed and reopened (it often lands elsewhere), without waiting for the 30-second network timeout.
    Near the end, a free connection takes half of what is left to the one that would finish last, even a small
    remainder when that one lags.
+7. The file's SHA-256 is computed while it downloads, by reading back in order what was just written (still in
+   memory), then compared with the expected checksums. They come from the page (on a click on a link, the
+   extension picks up the checksum shown on its row — next to each file on GitHub — or in a `SHA256SUMS` list that
+   names it; when in doubt, none), from the server (`Repr-Digest`, `Digest`, Google Cloud Storage's `x-goog-hash`,
+   Hugging Face's redirect) or from the user. A file that does not match is never delivered: it stays as `.pdm`,
+   the download fails with both checksums, and **Réessayer** starts over from zero.
 
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official
@@ -313,6 +323,8 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
 - **Hostile input is treated as such:** file names are sanitized, page content is never injected with `innerHTML`,
   and yt-dlp is called with an argument list (no shell) after `--`.
 - **Private browsing** downloads are never taken over.
+- **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
+  lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.
 
 ## Development
 
@@ -320,12 +332,14 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
 extension/                 Chrome extension (Manifest V3, ES modules, no build step)
   background.js            service worker: media detection, takeover, context menus
   content/grab.js          video button (closed Shadow DOM)
+  content/links.js         checksums shown next to links, picked up on click
   lib/                     engine client, media detection, file names, settings…
   popup/ manager/ options/ user interface
 engine/
   pdm-host                 entry point (bridge, daemon, CLI)
   pdm_engine/              httpdl.py (segmented HTTP) · ytdlp.py · engine.py (queue, persistence)
                            hosts.py (connections per site) · limiter.py (speed limit)
+                           checksum.py (expected and computed checksums)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
 tests/                     Python integration tests against a local HTTP server, Node unit tests
 install.sh · uninstall.sh
@@ -340,8 +354,8 @@ npx eslint extension                       # lint
 ```
 
 The Python suite spins up a real HTTP server that simulates range support, per-connection throttling,
-dropped connections, servers limiting connections per IP, files changing mid-download, unstable ETags and
-cross-host redirects, then checks the
+dropped connections, servers limiting connections per IP, files changing mid-download, unstable ETags,
+cross-host redirects and announced checksums (right or wrong), then checks the
 SHA-256 of every downloaded file. The yt-dlp tests generate their own HLS stream with ffmpeg; they are skipped
 when yt-dlp or ffmpeg is missing. CI runs everything on every push.
 

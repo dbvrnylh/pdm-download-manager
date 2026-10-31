@@ -96,9 +96,32 @@
           </label>
         </div>
         <div id="import-preview" class="import-preview" role="status"></div>
-        <div class="import-actions">
+        <div class="dialog-actions">
           <button type="button" id="import-close">Fermer</button>
           <button type="submit" id="import-submit" class="primary" disabled>Ajouter</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="verify-dialog" aria-labelledby="verify-title">
+      <form id="verify-form">
+        <h2 id="verify-title">Vérifier un fichier</h2>
+        <p id="verify-name" class="verify-name"></p>
+        <p class="verify-label">SHA-256 du fichier</p>
+        <div class="verify-sum">
+          <code id="verify-sha256"></code>
+          <button type="button" id="verify-copy">Copier</button>
+        </div>
+        <label class="verify-label" for="verify-input">
+          Somme attendue : copie celle du site d’où vient le fichier (SHA-256, SHA-512, SHA-1 ou MD5).
+          PDM relit le fichier tel qu’il est sur le disque.
+        </label>
+        <input id="verify-input" type="text" spellcheck="false" autocomplete="off" required
+               placeholder="2cf10babba65…  ou  sha-256=…" />
+        <p id="verify-result" class="verify-result" role="status"></p>
+        <div class="dialog-actions">
+          <button type="button" id="verify-close">Fermer</button>
+          <button type="submit" id="verify-submit" class="primary">Vérifier</button>
         </div>
       </form>
     </dialog>

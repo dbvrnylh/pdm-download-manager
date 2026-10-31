@@ -10,6 +10,7 @@ import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hl
 import { addMedia, getMedia } from '../extension/lib/store.js';
 import { inWindow } from '../extension/lib/schedule.js';
 import { KEEP_MAX, KEEP_MS, rememberRequest, takeHeaders } from '../extension/lib/headers.js';
+import { MAX_LINE, findChecksums, rememberChecksums, takeChecksums } from '../extension/lib/checksums.js';
 
 const h = (obj) => Object.entries(obj).map(([name, value]) => ({ name, value }));
 const resp = (url, headers, statusCode = 200) => ({ url, statusCode, responseHeaders: h(headers) });
@@ -283,5 +284,58 @@ test('jobs: avec les en-têtes de Chrome, pas de cookies reconstitués', async (
   const replayed = await httpJob('https://site.fr/a.pdf', { headers: [['Cookie', '_abck=ok']] });
   assert.deepEqual([replayed.headers, replayed.cookies], [[['Cookie', '_abck=ok']], undefined]);
   assert.equal((await httpJob('https://site.fr/a.pdf')).cookies, 's=1');
+  delete globalThis.chrome;
+});
+
+const SHA256 = '2cf10babba653310606f8b49876cfb679928669e7ddaa1fb41fb00ce73e64f66';
+const OTHER256 = 'ab6cfc060688c18052f65efc58bd98328d4845be60a69096f78d8ae52fa09dfa';
+const MD5 = 'fa3ee5ac3f1b3f4368bd74ab530d3f0f';
+const SHA1 = 'aaed3309d4eac95100f626a184d2b9bbec278c61';
+
+test('checksums: la somme affichée à côté du lien (GitHub, SHA256SUMS, BSD, PyPI)', () => {
+  // Ligne d'un fichier d'une version sur GitHub (texte de son <li>).
+  assert.deepEqual(findChecksums({ row: `uv-x86_64-unknown-linux-gnu.tar.gz sha256:${SHA256} 19.2 MB Oct 21` }),
+    [{ algo: 'sha-256', hex: SHA256 }]);
+  // Lignes d'une liste SHA256SUMS dans la page, majuscules comprises.
+  assert.deepEqual(findChecksums({ lines: [`${SHA256.toUpperCase()} *debian-13.iso`] }), [{ algo: 'sha-256', hex: SHA256 }]);
+  assert.deepEqual(findChecksums({ lines: [`SHA512 (a.iso) = ${SHA256}${OTHER256}`] }),
+    [{ algo: 'sha-512', hex: SHA256 + OTHER256 }]);
+  // PyPI : SHA256, MD5 et BLAKE2b-256 (64 chiffres aussi) sur la même ligne.
+  assert.deepEqual(findChecksums({ row: `SHA256 ${SHA256} MD5 ${MD5} BLAKE2b-256 ${OTHER256}` }),
+    [{ algo: 'sha-256', hex: SHA256 }, { algo: 'md5', hex: MD5 }]);
+  assert.deepEqual(findChecksums({ row: `SHA-1: ${SHA1}` }), [{ algo: 'sha-1', hex: SHA1 }]);
+});
+
+test('checksums: dans le doute, aucune', () => {
+  const none = (input) => assert.deepEqual(findChecksums(input), [], String(JSON.stringify(input)).slice(0, 80));
+  none({ row: `Commit ${SHA1} · ${MD5}` }); // 40 et 32 chiffres sans leur nom : commit git, identifiant
+  none({ row: `sha256:${SHA256} sha256:${OTHER256}` }); // deux fichiers dans la même ligne
+  none({ row: `sha256:${SHA256}`, lines: [`${OTHER256}  a.iso`] }); // la page se contredit
+  none({ row: `SHA3-256: ${SHA256}` }); // une somme qu'on ne calcule pas
+  none({ row: `SHA-256: ${SHA1}` }); // le nom ne correspond pas à la longueur
+  none({ row: `tx 0x${SHA256}` }); // une transaction Ethereum
+  none({ row: `id-${SHA256}x` }); // collée à autre chose
+  none({ lines: [`${'x'.repeat(MAX_LINE)} ${SHA256} a.iso`] }); // un paragraphe, pas une ligne de somme
+  none({ row: 42, lines: 'pas une liste' });
+  none();
+});
+
+test('checksums: gardées le temps que le téléchargement arrive, puis utilisées une fois', () => {
+  const recent = new Map();
+  rememberChecksums(recent, 'https://x.org/a.iso', [], 1000);
+  assert.equal(recent.size, 0, 'rien trouvé : rien gardé');
+  rememberChecksums(recent, 'https://x.org/a.iso', [{ algo: 'sha-256', hex: SHA256 }], 1000);
+  assert.deepEqual(takeChecksums(recent, [undefined, 'https://x.org/a.iso'], 2000),
+    [{ algo: 'sha-256', hex: SHA256, source: 'page' }]);
+  assert.equal(takeChecksums(recent, ['https://x.org/a.iso'], 2000), undefined, 'une seule fois');
+  rememberChecksums(recent, 'https://x.org/b.iso', [{ algo: 'sha-256', hex: SHA256 }], 1000);
+  assert.equal(takeChecksums(recent, ['https://x.org/b.iso'], 1000 + KEEP_MS + 1), undefined, 'trop vieilles');
+});
+
+test('jobs: les sommes de la page partent avec le téléchargement', async () => {
+  globalThis.chrome = { cookies: { getAll: async () => [] } };
+  const sums = [{ algo: 'sha-256', hex: SHA256, source: 'page' }];
+  assert.deepEqual((await httpJob('https://x.org/a.iso', { checksums: sums })).checksums, sums);
+  assert.equal('checksums' in (await httpJob('https://x.org/a.iso', { checksums: undefined })), false);
   delete globalThis.chrome;
 });

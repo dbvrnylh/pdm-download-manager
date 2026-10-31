@@ -249,8 +249,8 @@ button:disabled {
   cursor: default;
 }
 
-/* Import d'une liste de liens. */
-#import-dialog {
+/* Fenêtres : import d'une liste de liens, vérification d'un fichier. */
+dialog {
   width: min(640px, calc(100vw - 32px));
   padding: 20px;
   border: 1px solid var(--border);
@@ -259,11 +259,11 @@ button:disabled {
   color: var(--text);
 }
 
-#import-dialog::backdrop {
+dialog::backdrop {
   background: rgb(0 0 0 / 0.45);
 }
 
-#import-dialog h2 {
+dialog h2 {
   margin: 0 0 10px;
   font-size: 15px;
 }
@@ -357,11 +357,69 @@ code {
   overflow-wrap: anywhere;
 }
 
-.import-actions {
+.dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+}
+
+.verify-name {
+  margin: 0 0 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.verify-label {
+  display: block;
+  margin: 12px 0 6px;
+  color: var(--muted);
+}
+
+.verify-sum {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.verify-sum code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+#verify-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+#verify-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.verify-result {
+  min-height: 20px;
+  margin: 12px 0 0;
+}
+
+.verify-result[data-state='ok'] {
+  color: var(--success);
+}
+
+.verify-result[data-state='bad'] {
+  color: var(--danger);
+}
+
+.download[data-integrity='bad'] .meta {
+  color: var(--danger);
 }
 
 @media (max-width: 560px) {

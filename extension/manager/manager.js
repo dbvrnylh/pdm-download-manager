@@ -24,6 +24,11 @@ const HISTORY_LIMIT = 200;
 const RECONNECT_MS = 5000;
 const MAX_LIST_BYTES = 1024 * 1024; // une liste de liens, pas un fichier quelconque
 const MAX_SHOWN_PROBLEMS = 5;
+const VERIFY_TIMEOUT = 3_600_000; // relire un très gros fichier sur un disque lent prend du temps
+
+// Sommes de contrôle (voir engine/pdm_engine/checksum.py) : nom et provenance, en clair.
+const SUM_LABELS = { 'sha-512': 'SHA-512', 'sha-256': 'SHA-256', 'sha-1': 'SHA-1', md5: 'MD5' };
+const SUM_SOURCES = { server: 'du serveur', page: 'de la page', user: 'donné' };
 
 // Codes d'erreur de chrome.downloads, en clair.
 const CHROME_ERRORS = {
@@ -94,6 +99,11 @@ const importPreview = document.getElementById('import-preview');
 const importSubmit = document.getElementById('import-submit');
 const importClose = document.getElementById('import-close');
 let importing = false;
+const verifyDialog = document.getElementById('verify-dialog');
+const verifyInput = document.getElementById('verify-input');
+const verifyResult = document.getElementById('verify-result');
+const verifySubmit = document.getElementById('verify-submit');
+let verifiedId = null; // téléchargement affiché dans la fenêtre « Vérifier »
 
 // ─── Modèle : de chaque source vers une « entrée » commune ─────────────────
 
@@ -118,6 +128,8 @@ function fromEngine(job) {
     resumable: job.resumable,
     scheduled: job.scheduled,
     error: job.error,
+    checksums: job.checksums ?? [],
+    verified: job.verified,
     startedAt: job.createdAt * 1000,
   };
 }
@@ -251,12 +263,14 @@ function createRow() {
 function updateRow(row, entry) {
   row.li.dataset.status = entry.status;
   row.li.dataset.source = entry.source;
+  row.li.dataset.integrity = entry.verified === false ? 'bad' : '';
   row.tag.dataset.category = entry.category.id;
   row.tag.textContent = entry.category.label;
   row.name.textContent = entry.filename;
   row.name.title = entry.url;
   updateBar(row, entry);
   row.meta.textContent = describe(entry);
+  row.meta.title = row.meta.textContent; // en entier, quand la ligne est coupée (message d'erreur)
 
   // Les boutons ne dépendent que de l'état : on ne les recrée que s'il change.
   const key = `${entry.status}:${entry.canResume}:${entry.scheduled}`;
@@ -321,8 +335,11 @@ function describe(entry) {
       return 'Chrome signale ce fichier comme potentiellement dangereux';
     case 'blocked':
       return 'Bloqué : Chrome l’a identifié comme malveillant';
-    case 'complete':
-      return `Terminé · ${formatBytes(entry.total ?? entry.done)} · ${hostOf(entry.host ?? entry.url)}`;
+    case 'complete': {
+      const parts = ['Terminé', formatBytes(entry.total ?? entry.done), hostOf(entry.host ?? entry.url)];
+      const check = entry.stage ?? integrity(entry); // « Vérification… 42 % », puis son résultat
+      return [...parts, ...(check ? [check] : [])].join(' · ');
+    }
     case 'missing':
       return 'Fichier supprimé ou déplacé';
     case 'canceled':
@@ -330,6 +347,17 @@ function describe(entry) {
     default:
       return `Échec : ${entry.error ?? 'erreur inconnue'}`;
   }
+}
+
+// Résultat de la dernière comparaison du fichier aux sommes attendues, ou ''.
+function integrity({ verified, checksums }) {
+  if (verified == null) return '';
+  return verified ? `✓ vérifié (${sumsText(checksums)})` : `✗ ne correspond pas (${sumsText(checksums)})`;
+}
+
+// « SHA-256 de la page, MD5 du serveur »
+function sumsText(checksums) {
+  return checksums.map(({ algo, source }) => `${SUM_LABELS[algo]} ${SUM_SOURCES[source]}`).join(', ');
 }
 
 function hostOf(url) {
@@ -364,7 +392,12 @@ function engineActions(entry) {
     case 'paused':
       return [button('Reprendre', send('resume'), 'primary'), ...later, cancel];
     case 'complete':
-      return [button('Ouvrir', send('open'), 'primary'), button('Dossier', send('show')), remove];
+      return [
+        button('Ouvrir', send('open'), 'primary'),
+        button('Dossier', send('show')),
+        button('Vérifier…', () => openVerify(id)),
+        remove,
+      ];
     case 'canceled':
       return [button('Recommencer', send('resume'), 'primary'), remove];
     default: {
@@ -519,6 +552,7 @@ engine.on((event) => {
     setEngineState('missing', event.error);
     setTimeout(connectEngine, RECONNECT_MS);
   }
+  if (verifyDialog.open) renderVerify();
   scheduleRender();
 });
 
@@ -755,6 +789,67 @@ importClose.addEventListener('click', () => importDialog.close());
 importDialog.addEventListener('cancel', (event) => {
   if (importing) event.preventDefault();
 });
+
+// ─── Vérification d'un fichier terminé ─────────────────────────────────────
+
+function openVerify(id) {
+  verifiedId = id;
+  verifyInput.value = '';
+  verifySubmit.disabled = false;
+  renderVerify();
+  verifyDialog.showModal();
+}
+
+// La fenêtre suit le téléchargement : SHA-256 relu, progression, résultat.
+function renderVerify() {
+  const job = engineJobs.get(verifiedId);
+  if (!job) {
+    verifyDialog.close(); // retiré entre-temps
+    return;
+  }
+  document.getElementById('verify-name').textContent = job.filename || job.url;
+  // Un fichier téléchargé avant que PDM calcule les sommes n'en a pas encore.
+  document.getElementById('verify-sha256').textContent = job.sha256 ?? 'calculé à la première vérification';
+  document.getElementById('verify-copy').hidden = !job.sha256;
+  const sums = sumsText(job.checksums ?? []);
+  const verdict = {
+    true: `✓ Le fichier correspond (${sums}).`,
+    false: `✗ Le fichier ne correspond pas (${sums}) : abîmé, modifié, ou pas la version de cette somme.`,
+  };
+  verifyResult.textContent = job.stage ?? verdict[job.verified] ?? '';
+  verifyResult.dataset.state = job.stage || job.verified == null ? '' : job.verified ? 'ok' : 'bad';
+}
+
+document.getElementById('verify-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  verifySubmit.disabled = true;
+  verifyResult.textContent = 'Vérification…';
+  verifyResult.dataset.state = '';
+  try {
+    // Le résultat arrive aussi par les événements du moteur : la fenêtre peut être fermée entre-temps.
+    await engine.request({ type: 'verify', id: verifiedId, checksum: verifyInput.value }, VERIFY_TIMEOUT);
+    renderVerify();
+  } catch (err) {
+    verifyResult.textContent = err.message;
+    verifyResult.dataset.state = 'bad';
+  } finally {
+    verifySubmit.disabled = false;
+  }
+});
+
+document.getElementById('verify-copy').addEventListener('click', async () => {
+  const sha256 = engineJobs.get(verifiedId)?.sha256;
+  if (!sha256) return;
+  try {
+    await navigator.clipboard.writeText(sha256);
+    verifyResult.textContent = 'SHA-256 copié.';
+    verifyResult.dataset.state = '';
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
+document.getElementById('verify-close').addEventListener('click', () => verifyDialog.close());
 
 createChips();
 refreshChrome();

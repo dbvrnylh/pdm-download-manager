@@ -32,6 +32,9 @@ dans l'esprit d'Internet Download Manager — pour Chrome, Chromium, Brave, Edge
   connexion, lien à usage unique…), Chrome continue normalement. Aucun téléchargement n'est perdu.
 - **Pause, reprise, résistance.** La progression est sauvegardée segment par segment : reprise après une coupure
   réseau, un redémarrage du navigateur ou du PC. Le moteur continue navigateur fermé.
+- **Fichiers vérifiés.** Le SHA-256 de chaque fichier est calculé pendant le téléchargement et comparé à la somme
+  affichée à côté du lien (GitHub, distributions Linux…) ou annoncée par le serveur : un fichier abîmé n'est jamais
+  livré. **Vérifier…** compare un fichier terminé à la somme que tu colles.
 - **Vidéos en un clic.** Un bouton « Télécharger cette vidéo » apparaît sur les lecteurs ; la popup liste les
   médias détectés ; YouTube et des centaines de sites passent par [yt-dlp](https://github.com/yt-dlp/yt-dlp),
   avec choix de la qualité (meilleure, 1080p, 720p, 480p, MP3). Les flux HLS/DASH sont assemblés en un seul MP4.
@@ -86,7 +89,8 @@ Laisse le dépôt à sa place : le navigateur charge l'extension depuis ce dossi
 | Ajouter une adresse à la main | Gestionnaire → coller l'adresse → **Fichier** ou **Vidéo de la page** → **Ajouter**. |
 | Télécharger une liste de liens | Gestionnaire → **Importer une liste…**, ou `pdm-host add --file liens.txt`. Voir [ci-dessous](#télécharger-une-liste-de-liens). |
 | Télécharger plus tard (la nuit) | Gestionnaire → **Plus tard** sur un téléchargement, ou la case **Plus tard** à l'import d'une liste, ou `pdm-host add --later URL`. Il n'avance que pendant la plage horaire des **Réglages** ; le reste part tout de suite. |
-| Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp, `--quality 720` pour la qualité). |
+| Vérifier un fichier | Rien à faire quand la page affiche sa somme à côté du lien : PDM la relève au clic et vérifie le fichier. Sinon, gestionnaire → **Vérifier…** sur un téléchargement terminé → colle la somme du site (SHA-256, SHA-512, SHA-1 ou MD5). |
+| Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp, `--quality 720` pour la qualité, `--checksum sha-256=…` pour une somme attendue, comme aria2). |
 
 Si un site très protégé refuse le moteur, **Avec Chrome** relance le téléchargement dans le navigateur,
 avec sa propre session.
@@ -163,7 +167,7 @@ flowchart LR
   subgraph Navigateur["Chrome / Chromium / Brave"]
     SW["Extension<br/>(service worker MV3)"]
     UI["Popup · Gestionnaire · Réglages"]
-    CS["Script de contenu<br/>(bouton vidéo)"]
+    CS["Scripts de contenu<br/>(bouton vidéo, sommes des liens)"]
   end
   SW -- "Native Messaging<br/>JSON préfixé par sa longueur" --> H["pdm-host<br/>(pont)"]
   UI -- "Native Messaging" --> H
@@ -207,6 +211,13 @@ obtient une erreur ou une page HTML, Chrome continue.
    qui ne reçoit plus rien depuis cinq secondes, est coupée et rouverte (elle repart souvent ailleurs), sans
    attendre les 30 secondes du délai réseau. En fin de fichier, une connexion libre reprend la moitié de ce qui
    reste à celle qui finira la dernière, même pour un petit reste quand celle-ci traîne.
+7. Le SHA-256 du fichier est calculé pendant le téléchargement, en relisant dans l'ordre ce qui vient d'être écrit
+   (encore en mémoire), puis comparé aux sommes attendues. Elles viennent de la page (au clic sur un lien,
+   l'extension relève la somme affichée sur sa ligne — chez GitHub, à côté de chaque fichier — ou dans une liste
+   `SHA256SUMS` qui le nomme ; dans le doute, aucune), du serveur (`Repr-Digest`, `Digest`, le `x-goog-hash` de
+   Google Cloud Storage, la redirection de Hugging Face) ou de l'utilisateur. Un fichier qui ne correspond pas
+   n'est jamais livré : il reste en `.pdm`, le téléchargement échoue avec les deux sommes, et **Réessayer** repart
+   de zéro.
 
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de
@@ -314,6 +325,9 @@ Oui. Le démon est indépendant du navigateur ; rouvre le gestionnaire pour voir
 - **Tout ce qui vient du web est considéré comme hostile :** noms de fichiers nettoyés, aucun contenu injecté avec
   `innerHTML`, yt-dlp appelé avec une liste d'arguments (sans shell) après `--`.
 - Les téléchargements en **navigation privée** ne sont jamais repris par le moteur.
+- **Les sommes des liens restent dans l'extension :** au clic sur le lien d'un fichier, seul le texte de sa ligne
+  et les lignes de la page qui le nomment sont relevés, gardés une minute en mémoire, et jamais envoyés ailleurs
+  qu'au moteur.
 
 ## Développement
 
@@ -321,12 +335,14 @@ Oui. Le démon est indépendant du navigateur ; rouvre le gestionnaire pour voir
 extension/                 extension Chrome (Manifest V3, modules ES, sans compilation)
   background.js            service worker : détection des médias, prise de contrôle, menus
   content/grab.js          bouton vidéo (Shadow DOM fermé)
+  content/links.js         sommes de contrôle affichées à côté des liens, relevées au clic
   lib/                     client du moteur, détection des médias, noms de fichiers, réglages…
   popup/ manager/ options/ interface
 engine/
   pdm-host                 point d'entrée (pont, démon, ligne de commande)
   pdm_engine/              httpdl.py (HTTP segmenté) · ytdlp.py · engine.py (file d'attente, persistance)
                            hosts.py (connexions par site) · limiter.py (vitesse maximale)
+                           checksum.py (sommes attendues et calculées)
                            daemon.py (socket Unix) · host.py (pont Native Messaging)
 tests/                     tests d'intégration Python contre un serveur HTTP local, tests unitaires Node
 install.sh · uninstall.sh
@@ -341,8 +357,8 @@ npx eslint extension                       # analyse du code
 ```
 
 La suite Python démarre un vrai serveur HTTP qui simule les plages d'octets, un débit limité par connexion, des
-coupures, des serveurs qui limitent les connexions par IP, des fichiers modifiés en cours de route, des ETag instables et des redirections vers un autre hôte, puis
-vérifie le SHA-256 de chaque fichier téléchargé. Les tests yt-dlp génèrent leur propre flux HLS avec ffmpeg ; ils
+coupures, des serveurs qui limitent les connexions par IP, des fichiers modifiés en cours de route, des ETag instables, des redirections vers un autre hôte et des sommes annoncées
+(justes ou fausses), puis vérifie le SHA-256 de chaque fichier téléchargé. Les tests yt-dlp génèrent leur propre flux HLS avec ffmpeg ; ils
 sont ignorés si yt-dlp ou ffmpeg manquent. La CI lance tout à chaque envoi.
 
 Choix de conception :

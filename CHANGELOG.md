@@ -6,6 +6,24 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Downloaded files are verified. The engine computes each file's SHA-256 while it downloads (reading back in
+  order what was just written, still in memory, so a finished file is not read again from the start) and
+  compares it with the expected checksums: a file that does not match is never delivered — it stays as `.pdm`,
+  the download fails with both checksums ("vérification échouée : SHA-256 différent de celui affiché sur la
+  page…"), and "Réessayer" starts over from zero. Expected checksums come from:
+  - the page: on a click (left, middle or right) on a file's link, the extension picks up the checksum shown on
+    its row (GitHub shows one next to each file of a release) or in a `SHA256SUMS` list of the page that names the
+    file. SHA-256 and SHA-512 are recognized alone, MD5 and SHA-1 only when named (40 digits is also a git
+    commit); a row leading to other files, or two different values, give none;
+  - the server: `Repr-Digest` and `Content-Digest` (RFC 9530), `Digest` (RFC 3230), the MD5 of `x-goog-hash`
+    (Google Cloud Storage, and sites served by it such as Mozilla), `Content-MD5`, and the SHA-256 that Hugging
+    Face gives on its redirect for large files. The probe asks for them (`Want-Repr-Digest`), except when it
+    replays the browser's request;
+  - the user: `pdm-host add URL --checksum sha-256=…` (aria2's syntax; `SHA256: …`, a `SHA256SUMS` line or the
+    value alone also work).
+- "Vérifier…" on a finished download: shows its SHA-256 (with a copy button) and compares the file, read again as
+  it is on the disk, with a pasted SHA-256, SHA-512, SHA-1 or MD5. The manager shows the result on the row
+  ("✓ vérifié (SHA-256 de la page)", "✗ ne correspond pas…").
 - Import a list of links (one per line) from the manager — **Importer une liste…**, from a `.txt` file or
   pasted — or from the terminal with `pdm-host add --file links.txt`. A preview shows the links kept,
   duplicates, links already in the manager with the same type and every rejected line with its reason;

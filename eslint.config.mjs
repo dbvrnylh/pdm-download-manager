@@ -18,6 +18,7 @@ export default [
         setInterval: 'readonly',
         requestAnimationFrame: 'readonly',
         HTMLVideoElement: 'readonly',
+        NodeFilter: 'readonly',
         Intl: 'readonly',
         URL: 'readonly',
         fetch: 'readonly',

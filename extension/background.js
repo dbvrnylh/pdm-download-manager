@@ -10,6 +10,7 @@
 // tard (après un await, par exemple) le manquerait.
 
 import { categoryFor } from './lib/categories.js';
+import { findChecksums, rememberChecksums, takeChecksums } from './lib/checksums.js';
 import { EngineClient } from './lib/engine.js';
 import { basename } from './lib/filename.js';
 import { rememberRequest, takeHeaders } from './lib/headers.js';
@@ -86,6 +87,10 @@ chrome.webRequest.onSendHeaders.addListener(
   { urls: ['<all_urls>'], types: ['main_frame', 'sub_frame', 'other'] },
   ['requestHeaders', 'extraHeaders'],
 );
+
+// Les sommes de contrôle affichées à côté d'un lien cliqué (content/links.js),
+// gardées le temps que son téléchargement arrive : le moteur y comparera le fichier.
+const recentChecksums = new Map();
 
 // Nouvelle page dans l'onglet : on oublie les médias de l'ancienne.
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, timeStamp }) => {
@@ -182,6 +187,7 @@ async function handOverToEngine(item, requested) {
     mime: item.mime,
     // Rejouée par le moteur ; s'il ne l'a pas vue, cookies reconstitués comme avant.
     headers: takeHeaders(recentRequests, [item.finalUrl, item.url]),
+    checksums: takeChecksums(recentChecksums, [item.url, item.finalUrl]),
   });
   try {
     await client.request({ type: 'add', probe: true, job }, PROBE_TIMEOUT);
@@ -280,6 +286,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'downloads-started') {
     openManagerIfWanted().catch(console.error);
   }
+  if (message?.type === 'link-checksums' && /^https?:/i.test(message.url ?? '')) {
+    rememberChecksums(recentChecksums, message.url, findChecksums(message));
+  }
   return false;
 });
 
@@ -299,7 +308,8 @@ async function onMenuClicked(info, tab) {
   const url = isMedia ? info.srcUrl : (info.linkUrl ?? info.srcUrl);
   const client = await getEngine();
   if (client) {
-    await client.request({ type: 'add', job: await httpJob(url, { referer: info.pageUrl, source: 'menu' }) });
+    const checksums = takeChecksums(recentChecksums, [url]); // relevées au clic droit sur le lien
+    await client.request({ type: 'add', job: await httpJob(url, { referer: info.pageUrl, source: 'menu', checksums }) });
     await openManagerIfWanted();
   } else {
     await chrome.downloads.download({ url });
@@ -329,15 +339,15 @@ chrome.runtime.onInstalled.addListener(async () => {
   await injectIntoOpenTabs();
 });
 
-// Les onglets ouverts avant l'installation (ou la mise à jour) n'ont pas le
-// script du bouton vidéo, ou une copie orpheline : on l'y injecte, pour ne
-// pas obliger à recharger chaque page.
+// Les onglets ouverts avant l'installation (ou la mise à jour) n'ont pas les
+// scripts de contenu (bouton vidéo, sommes des liens), ou une copie orpheline :
+// on les y injecte, pour ne pas obliger à recharger chaque page.
 async function injectIntoOpenTabs() {
   const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
   await Promise.all(
     tabs.map((tab) =>
       chrome.scripting
-        .executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['content/grab.js'] })
+        .executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['content/grab.js', 'content/links.js'] })
         .catch(() => {}), // onglet en veille, page interdite (Web Store)… : sans importance
     ),
   );

@@ -32,7 +32,8 @@ export async function cookieHeader(url) {
 
 // `headers` : les en-têtes que Chrome a envoyés (lib/headers.js), rejoués par
 // le moteur. Leur Cookie est celui d'origine : inutile de le reconstituer.
-export async function httpJob(url, { filename, referer, source, size, mime, headers, id = newJobId() } = {}) {
+// `checksums` : les sommes affichées à côté du lien (lib/checksums.js).
+export async function httpJob(url, { filename, referer, source, size, mime, headers, checksums, id = newJobId() } = {}) {
   return {
     id,
     kind: 'http',
@@ -42,6 +43,7 @@ export async function httpJob(url, { filename, referer, source, size, mime, head
     source,
     size,
     mime,
+    ...(checksums?.length ? { checksums } : {}),
     ...(headers ? { headers } : { cookies: await cookieHeader(url) }),
     userAgent: navigator.userAgent,
   };
