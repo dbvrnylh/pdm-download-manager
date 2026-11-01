@@ -178,24 +178,61 @@ def from_headers(headers, full, redirects=(), size=None):
 
 
 class Digester:
-    """Les sommes d'un fichier, calculées dans l'ordre de ses octets, au fur et à mesure."""
+    """Les sommes d'un fichier, calculées dans l'ordre de ses octets, au fur et à mesure.
 
-    def __init__(self, algos=("sha-256",)):
+    Avec les sommes de ses morceaux (`pieces`, d'un document Metalink), chaque
+    morceau est vérifié au passage : les faux sont notés (`bad`), et l'état des
+    sommes au début du premier d'entre eux est gardé, pour y revenir (`rewind`)
+    une fois ces morceaux retéléchargés, sans tout relire.
+    """
+
+    def __init__(self, algos=("sha-256",), pieces=None, size=None):
         self.hashes = {algo: hashlib.new(ALGORITHMS[algo][0]) for algo in algos}
         self.offset = 0  # octets déjà comptés
+        self.pieces = pieces if size else None  # {"length", "algo", "hashes"} ou None
+        self.size = size
+        self.piece = hashlib.new(ALGORITHMS[pieces["algo"]][0]) if self.pieces else None
+        self.bad = []  # numéros des morceaux faux
+        self.sound = (0, self._copy())  # état des sommes au début du premier morceau faux
 
     def feed(self, fd, end, stop=None):
         """Compte les octets du fichier jusqu'à `end` (exclu). False : arrêté avant (`stop`)."""
+        length = self.pieces["length"] if self.pieces else None
         while self.offset < end:
             if stop is not None and stop():
                 return False
-            data = os.pread(fd, min(BLOCK, end - self.offset), self.offset)
+            count = min(BLOCK, end - self.offset)
+            if length:  # jamais à cheval sur deux morceaux
+                count = min(count, length - self.offset % length)
+            data = os.pread(fd, count, self.offset)
             if not data:
                 raise OSError(errno.EIO, "fichier plus court que prévu")
             for digest in self.hashes.values():
                 digest.update(data)  # hashlib rend la main aux autres threads pendant le calcul
             self.offset += len(data)
+            if length:
+                self.piece.update(data)
+                if self.offset % length == 0 or self.offset == self.size:
+                    self._close_piece()
         return True
+
+    def _close_piece(self):
+        index = (self.offset - 1) // self.pieces["length"]
+        if self.piece.hexdigest() != self.pieces["hashes"][index]:
+            self.bad.append(index)
+        elif not self.bad:
+            self.sound = (self.offset, self._copy())
+        self.piece = hashlib.new(ALGORITHMS[self.pieces["algo"]][0])
+
+    def _copy(self):
+        return {algo: digest.copy() for algo, digest in self.hashes.items()}
+
+    def rewind(self):
+        """Revient au début du premier morceau faux, pour recompter à partir de là."""
+        self.offset, hashes = self.sound
+        self.hashes = {algo: digest.copy() for algo, digest in hashes.items()}
+        self.piece = hashlib.new(ALGORITHMS[self.pieces["algo"]][0])
+        self.bad = []
 
     def hexdigest(self, algo):
         return self.hashes[algo].hexdigest()

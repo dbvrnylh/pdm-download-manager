@@ -21,7 +21,10 @@ Routes :
                     (Digest, une par en-tête) et un miroir /mirror/SORTE/NOM sur l'autre hôte (Link:
                     rel=duplicate). Sortes : celles de /mirror/ ; bare, les sommes sans miroir (une
                     redirection quelconque : à ignorer) ; nodigest, le miroir sans les sommes.
-                    ?limited : vers /limited/1/NOM, un serveur d'origine qui n'accepte qu'une connexion
+                    ?limited : vers /limited/1/NOM, un serveur d'origine qui n'accepte qu'une connexion ;
+                    ?meta4 : annonce aussi /meta4/SORTE/NOM (Link: rel=describedby, adresse relative)
+  /meta4/SORTE/NOM  document Metalink 4 : taille, sommes, sommes SHA-1 des morceaux de 256 Ko, le miroir
+                    /mirror/SORTE/NOM. Sorte lying : le miroir est bon, mais le document ment sur un morceau
   /mirror/SORTE/NOM un miroir : good (le fichier), stale (une autre version, plus longue), corrupt (même
                     taille, un octet faux tous les 4 Ko), down (404)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
@@ -39,6 +42,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 RATE = 2 * 1024 * 1024  # octets/s par connexion
+PIECE = 256 * 1024  # morceaux des documents Metalink, comme chez LibreOffice
 SLOW_RATE = 64 * 1024  # route /slow/
 FILES = {}  # nom → bytes
 VERSION = {}  # nom → numéro de version (change l'ETag)
@@ -106,12 +110,15 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "mirrorbrain":
             kind, _, name = rest.partition("/")
             data = FILES.get(name, b"")
-            target = f"limited/1/{name}" if self.path.endswith("?limited") else f"range/{name}"
+            flags = set(self.path.partition("?")[2].split("&"))
+            target = f"limited/1/{name}" if "limited" in flags else f"range/{name}"
             headers = [("Location", f"http://127.0.0.1:{self.server.server_port}/{target}")]
             if kind != "bare":
-                mirror = "good" if kind == "nodigest" else kind
+                mirror = "good" if kind in ("nodigest", "lying") else kind
                 headers.append(("Link", f"<http://localhost:{self.server.server_port}/mirror/{mirror}/{name}>; "
                                         "rel=duplicate; pri=1; geo=fr"))
+            if "meta4" in flags:
+                headers.append(("Link", f'</meta4/{kind}/{name}>; rel=describedby; type="application/metalink4+xml"'))
             if kind != "nodigest":
                 for algo, label in (("md5", "MD5"), ("sha1", "SHA"), ("sha256", "SHA-256")):
                     headers.append(("Digest", f"{label}={_b64(algo, data)}"))
@@ -120,6 +127,12 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_header(key, value)
             self.send_header("Content-Length", "0")
             return self.end_headers()
+        if route == "meta4":
+            kind, _, name = rest.partition("/")
+            data = FILES.get(name, b"")
+            mirror = f"http://localhost:{self.server.server_port}/mirror/{'good' if kind == 'lying' else kind}/{name}"
+            return self._send(200, {"Content-Type": "application/metalink4+xml"},
+                              _meta4(name, data, mirror, lying=kind == "lying"))
         if route == "mirror":
             kind, _, name = rest.partition("/")
             if kind == "down":
@@ -256,6 +269,24 @@ class Handler(SimpleHTTPRequestHandler):
 
 def _b64(algo, data):
     return base64.b64encode(hashlib.new(algo, data).digest()).decode()
+
+
+def _meta4(name, data, mirror, lying=False):
+    """Un document Metalink 4, comme celui de MirrorBrain. `lying` : la somme du 4e morceau est fausse."""
+    pieces = [hashlib.sha1(data[i:i + PIECE]).hexdigest() for i in range(0, len(data), PIECE)]
+    if lying:
+        pieces[3] = "0" * 40
+    hashes = "".join(f"<hash>{h}</hash>" for h in pieces)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="{name}">
+    <size>{len(data)}</size>
+    <hash type="md5">{hashlib.md5(data).hexdigest()}</hash>
+    <hash type="sha-256">{hashlib.sha256(data).hexdigest()}</hash>
+    <pieces length="{PIECE}" type="sha-1">{hashes}</pieces>
+    <url location="fr" priority="1">{mirror}</url>
+  </file>
+</metalink>""".encode()
 
 
 def _digest_headers(kind, data):

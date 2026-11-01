@@ -17,6 +17,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   the same size is caught by the checksum, and the next try does without mirrors. Mirrors never get the site's
   cookies, never get `If-Range` (their ETags differ), and an `http://` mirror listed over `https://` is ignored.
   The manager shows "N serveurs" while several send the file.
+- Wrong pieces are downloaded again, alone. When the mirror server also announces a Metalink document (`.meta4`,
+  RFC 5854: LibreOffice's gives a SHA-1 for each 256 KB piece), the engine checks every piece while it computes
+  the file's checksum, in the same pass. A wrong piece is carved out and downloaded again, without the mirrors that
+  had sent any byte of it, then the checksums start again from the first wrong piece: up to 3 rounds, instead of
+  failing and starting over from zero. The document also gives the file's checksum when the server did not, and
+  more mirrors. It is read again at each start rather than saved (thousands of piece checksums would bloat the
+  download list), only over `https://` for an `https://` download (LibreOffice announces it as `http://`), at most
+  8 MB, and refused if it declares XML entities, which can multiply until memory runs out.
 - Downloaded files are verified. The engine computes each file's SHA-256 while it downloads (reading back in
   order what was just written, still in memory, so a finished file is not read again from the start) and
   compares it with the expected checksums: a file that does not match is never delivered — it stays as `.pdm`,

@@ -474,6 +474,31 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(sha(job.path), self.hashes["mid.bin"])
         self.assertEqual(self.mirror_requests("corrupt", "mid.bin"), [])
 
+    def test_a_wrong_piece_is_downloaded_again_without_the_mirror_that_sent_it(self):
+        # Le document Metalink donne la somme de chaque morceau : seuls les faux sont repris.
+        job = self.wait(self.add("/mirrorbrain/corrupt/mid.bin?limited&meta4").id, {"completed", "failed"}, timeout=60)
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+        self.assertTrue(job.verified)
+        self.assertIsNotNone(job.mirrors, "réparé : pas besoin de se passer des miroirs la prochaine fois")
+        mirror = len(self.mirror_requests("corrupt", "mid.bin"))
+        self.assertGreaterEqual(mirror, 2, "le miroir a envoyé des morceaux, tous faux")
+
+    def test_the_metalink_document_alone_gives_the_checksum(self):
+        job = self.wait(self.add("/mirrorbrain/nodigest/mid.bin?meta4").id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(job.checksums, [{"algo": "sha-256", "hex": self.hashes["mid.bin"], "source": "server"}])
+        self.assertTrue(job.verified)
+
+    def test_pieces_that_stay_wrong_fail_the_download(self):
+        # Le document ment sur un morceau : réparé trois fois, toujours « faux », refusé.
+        fx.LOG.clear()
+        job = self.wait(self.add("/mirrorbrain/lying/mid.bin?meta4").id, {"completed", "failed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("vérification échouée : 1 morceau(x) faux, même après réparation", job.error)
+        piece = f"bytes={3 * fx.PIECE}-{4 * fx.PIECE - 1}"
+        self.assertEqual(sum(1 for _, r, _ in fx.LOG if r == piece), httpdl.MAX_REPAIRS)
+
     def test_a_mirror_never_gets_the_session_of_the_site(self):
         job = SimpleNamespace(headers=[["Cookie", "a=1"], ["Authorization", "Basic x"], ["Accept-Language", "fr"]],
                               userAgent=None, referer=None, cookies=None)
@@ -1091,6 +1116,26 @@ class ChecksumTest(unittest.TestCase):
             os.close(fd)
             os.unlink(name)
 
+    def test_the_digester_checks_each_piece_and_comes_back_to_the_first_wrong_one(self):
+        data = bytes(range(256)) * 40  # 10 240 octets, 3 morceaux de 4 096 (le dernier plus court)
+        pieces = {"length": 4096, "algo": "sha-1",
+                  "hashes": [hashlib.sha1(data[i:i + 4096]).hexdigest() for i in range(0, len(data), 4096)]}
+        fd, name = tempfile.mkstemp(dir=TMP)
+        try:
+            os.pwrite(fd, data[:5000] + b"!" + data[5001:], 0)  # le 2e morceau est faux
+            digester = checksum.Digester(["sha-256"], pieces, len(data))
+            self.assertTrue(digester.feed(fd, len(data)))
+            self.assertEqual(digester.bad, [1])
+            os.pwrite(fd, data[5000:5001], 5000)  # retéléchargé
+            digester.rewind()
+            self.assertEqual(digester.offset, 4096)
+            self.assertTrue(digester.feed(fd, len(data)))
+            self.assertEqual(digester.bad, [])
+            self.assertEqual(digester.hexdigest("sha-256"), hashlib.sha256(data).hexdigest())
+        finally:
+            os.close(fd)
+            os.unlink(name)
+
     def test_the_terminal_takes_a_checksum_for_one_file(self):
         from pdm_engine import cli
 
@@ -1134,6 +1179,36 @@ class MetalinkTest(unittest.TestCase):
         self.assertEqual(metalink.mirrors([("http://example.org/f.iso", plain)]), ["http://m.example/f.iso"])
         many = self.headers(*(f"<https://m{i}.example/f.iso>; rel=duplicate; pri={i}" for i in range(10)))
         self.assertEqual(len(metalink.mirrors([(origin, many)])), metalink.MAX_MIRRORS)
+
+    def test_the_metalink_document_is_never_fetched_in_clear(self):
+        meta4 = '<http://d.example/f.iso.meta4>; rel=describedby; type="application/metalink4+xml"'
+        self.assertEqual(metalink.describedby([("https://d.example/f.iso", self.headers(meta4))]),
+                         "https://d.example/f.iso.meta4")
+        self.assertEqual(metalink.describedby([("http://d.example/f.iso", self.headers(meta4))]),
+                         "http://d.example/f.iso.meta4")
+        signature = '<f.iso.asc>; rel=describedby; type="application/pgp-signature"'
+        self.assertIsNone(metalink.describedby([("https://d.example/f.iso", self.headers(signature))]))
+        self.assertEqual(metalink.merge(["https://a.example/f"], ["http://b.example/f", "https://a.example/f",
+                                                                  "https://c.example/f"], "https://d.example/f"),
+                         ["https://a.example/f", "https://c.example/f"])
+
+    def test_a_metalink_document_describes_its_file(self):
+        data = b"PDM" * 1000
+        document = fx._meta4("f.bin", data, "https://m.example/f.bin")
+        described = metalink.parse(document, len(data))
+        self.assertEqual(described["hashes"][0], {"algo": "sha-256", "hex": hashlib.sha256(data).hexdigest()})
+        self.assertEqual(described["hashes"][1]["algo"], "md5")
+        self.assertEqual(described["pieces"]["hashes"], [hashlib.sha1(data).hexdigest()])
+        self.assertEqual(described["urls"], ["https://m.example/f.bin"])
+        with self.assertRaisesRegex(ValueError, "absent"):
+            metalink.parse(document, len(data) + 1)  # une autre version
+        bomb = b'<?xml version="1.0"?><!DOCTYPE m [<!ENTITY a "aaaa">]><metalink>&a;</metalink>'
+        with self.assertRaisesRegex(ValueError, "DOCTYPE"):
+            metalink.parse(bomb, 3)
+        with self.assertRaises(ValueError):
+            metalink.parse(b"<html>pas ici</html>", 3)
+        short = document.replace(f"<hash>{hashlib.sha1(data).hexdigest()}</hash>".encode(), b"")
+        self.assertIsNone(metalink.parse(short, len(data))["pieces"], "des morceaux sans somme : pas de morceaux")
 
 
 class UtilTest(unittest.TestCase):

@@ -40,9 +40,10 @@ PERSISTED = {
     # Autres adresses du fichier annoncées par son serveur (metalink.py) ; None :
     # écartées, après un fichier qui ne correspondait pas.
     "mirrors": [],
+    "metalink": None,  # adresse de son document Metalink (.meta4) : les sommes de ses morceaux
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
-HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors"}
+HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "metalink"}
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
 
 

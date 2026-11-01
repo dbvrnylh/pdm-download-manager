@@ -38,7 +38,7 @@ dans l'esprit d'Internet Download Manager — pour Chrome, Chromium, Brave, Edge
 - **Plusieurs serveurs à la fois.** Quand le site annonce ses miroirs (Metalink/HTTP, comme LibreOffice), chaque
   connexion va au serveur le plus rapide du moment : quand l'origine limite ou ralentit, les miroirs prennent le
   relais, et un miroir en panne, lent ou qui sert un autre fichier est écarté. Seulement quand une somme permet de
-  tout vérifier.
+  tout vérifier. Avec les sommes de chaque morceau (`.meta4`), un morceau faux est retéléchargé seul.
 - **Vidéos en un clic.** Un bouton « Télécharger cette vidéo » apparaît sur les lecteurs ; la popup liste les
   médias détectés ; YouTube et des centaines de sites passent par [yt-dlp](https://github.com/yt-dlp/yt-dlp),
   avec choix de la qualité (meilleure, 1080p, 720p, 480p, MP3). Les flux HLS/DASH sont assemblés en un seul MP4.
@@ -229,6 +229,12 @@ obtient une erreur ou une page HTML, Chrome continue.
    de dix secondes ou si des connexions attendent une place : sur une ligne que le miroir le plus proche sature
    déjà, les autres ne prennent rien. Un miroir qui ne sert pas un fichier de la même taille, qui échoue ou qui
    traîne est écarté ; si le fichier final ne correspond pas, le prochain essai se passe des miroirs.
+9. Le même serveur annonce souvent un document Metalink (`.meta4`) avec la somme de chaque morceau du fichier
+   (256 Ko chez LibreOffice). PDM vérifie alors chaque morceau pendant le calcul du SHA-256, dans la même lecture :
+   un morceau faux est retéléchargé seul, sans les miroirs qui en avaient envoyé un octet, et le calcul reprend au
+   premier morceau faux. Jusqu'à trois tours, au lieu de tout recommencer. Le document est relu à chaque
+   démarrage, uniquement en `https://` pour un téléchargement en `https://`, et refusé s'il déclare des entités
+   XML (qui peuvent se multiplier jusqu'à remplir la mémoire).
 
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de

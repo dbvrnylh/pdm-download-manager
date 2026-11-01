@@ -38,6 +38,7 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
 - **Several servers at once.** When the site lists its mirrors (Metalink/HTTP, like LibreOffice), each connection
   goes to the fastest server of the moment: when the origin limits or slows down, the mirrors take over, and a
   mirror that is down, slow or serves another file is dropped. Only when a checksum can verify the whole file.
+  With the checksum of each piece (`.meta4`), a wrong piece is downloaded again alone.
 - **Videos in one click.** A "download this video" button appears on players; the popup lists detected media;
   YouTube and hundreds of sites are supported through [yt-dlp](https://github.com/yt-dlp/yt-dlp), with quality
   presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
@@ -229,6 +230,12 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    seconds or connections are waiting for a place: on a line the nearest mirror already fills, the others get
    nothing. A mirror that does not serve a file of the same size, fails or lags is dropped; if the final file does
    not match, the next try does without mirrors.
+9. The same server often announces a Metalink document (`.meta4`) with the checksum of each piece of the file
+   (256 KB at LibreOffice). PDM then checks every piece while it computes the SHA-256, in the same read: a wrong
+   piece is downloaded again alone, without the mirrors that had sent any byte of it, and the checksums start
+   again from the first wrong piece. Up to three rounds, instead of starting over. The document is read again at
+   each start, only over `https://` for an `https://` download, and refused if it declares XML entities (which
+   can multiply until memory runs out).
 
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official

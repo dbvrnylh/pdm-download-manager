@@ -16,6 +16,8 @@ Principe (celui d'IDM) :
    permettra de vérifier le tout, chaque connexion choisit, à chaque segment, le
    serveur le plus rapide mesuré (comme le « feedback » d'aria2). Un miroir
    inconnu n'est essayé que quand ça vaut le coup (voir _candidates).
+7. Avec les sommes de chaque morceau (document Metalink), un morceau faux est
+   retéléchargé seul, et le miroir qui l'avait envoyé est écarté.
 """
 
 import ctypes
@@ -70,6 +72,8 @@ VERIFYING = "Vérification…"
 SYNC_EVERY = 5.0  # s entre deux points de reprise sûrs (fdatasync) : au pire, autant à refaire
 HASH_EVERY = 0.2  # s entre deux coups d'œil du calcul des sommes, quand il a rattrapé le téléchargement
 MIRROR_AFTER = 10.0  # s restantes : en dessous, essayer un miroir inconnu coûterait plus qu'il ne rapporte
+MAX_REPAIRS = 3  # tours de réparation de morceaux faux : au-delà, le fichier entier est refusé
+REPAIRING = "Réparation…"
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) PDM/2.0"
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 LIMIT_HTTP = {429, 503}  # « trop de connexions » (nginx limit_conn, mod_limitipconn…)
@@ -239,7 +243,8 @@ def build_request(job, url, start=None, end=None, validator=None, foreign=False)
 
 
 class ProbeResult:
-    def __init__(self, resp, size, resumable, filename, final_url, validator, mime, digest=None, mirrors=()):
+    def __init__(self, resp, size, resumable, filename, final_url, validator, mime, digest=None, mirrors=(),
+                 described=None):
         self.resp = resp
         self.size = size
         self.resumable = resumable
@@ -249,6 +254,7 @@ class ProbeResult:
         self.mime = mime
         self.digest = digest  # somme du fichier annoncée par le serveur, ou None
         self.mirrors = list(mirrors)  # autres adresses du même fichier, annoncées par le serveur
+        self.described = described  # adresse de son document Metalink (.meta4), ou None
 
     def close(self):
         if self.resp is not None:
@@ -306,8 +312,10 @@ def probe(job, timeout=TIMEOUT):
     filename = sanitize_filename(ensure_extension(name, mime))
     redirects = list(getattr(resp, "redirects", ()))
     digest = checksum.from_headers(headers, full, redirects, size)
-    mirrors = metalink.mirrors(redirects + [(resp.geturl(), headers)], exclude=(job.url, resp.geturl()))
-    return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime, digest, mirrors)
+    responses = redirects + [(resp.geturl(), headers)]
+    mirrors = metalink.mirrors(responses, exclude=(job.url, resp.geturl()))
+    described = metalink.describedby(responses)
+    return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime, digest, mirrors, described)
 
 
 def hang_up(resp):
@@ -460,6 +468,9 @@ class HttpDownload:
         self.single = False  # repli : une connexion, sans requêtes partielles
         self.digester = None  # sommes du fichier, calculées au fil du téléchargement (voir _hash)
         self.verifying = False
+        self.pieces = None  # sommes de ses morceaux, lues dans son document Metalink
+        self.spans = []  # (début, fin exclue, adresse) : qui a envoyé quels octets (voir _repair)
+        self.repairs = 0  # tours de réparation déjà faits
 
     # ─── Pilotage par le moteur ────────────────────────────────────────────
 
@@ -476,6 +487,8 @@ class HttpDownload:
         with self.lock:
             connections = sum(1 for s in self.segments if s.active)
             stage = WAITING if self.waiting and not connections else None
+            if self.repairs and connections:
+                stage = REPAIRING
             if self.verifying and self.size:
                 stage = f"{VERIFYING} {self.digester.offset * 100 // self.size} %"
             return {
@@ -564,12 +577,14 @@ class HttpDownload:
                     if first is None:
                         return self.stop_reason or "paused"  # arrêté en attendant le serveur
                 self._apply_probe(first)
+                self._read_metalink(fresh=True)
                 self._use_mirrors()
                 self._create_file()
             if resuming:
+                self._read_metalink(fresh=False)
                 self._use_mirrors()
             # Une reprise recompte depuis le début, en relisant ce qui est déjà sur le disque.
-            self.digester = checksum.Digester(checksum.algorithms(job.checksums))
+            self.digester = checksum.Digester(checksum.algorithms(job.checksums), self.pieces, self.size)
             self._download(first)
         finally:
             if first is not None:
@@ -616,6 +631,33 @@ class HttpDownload:
         job.checksums = [c for c in job.checksums if c["source"] != "server"] + ([result.digest] if result.digest else [])
         if job.mirrors is not None:  # None : écartés après un fichier faux (voir _verify)
             job.mirrors = result.mirrors
+        job.metalink = result.described
+
+    def _read_metalink(self, fresh):
+        """Lit le document Metalink du fichier : les sommes de ses morceaux (voir _repair).
+
+        Relu à chaque démarrage plutôt que sauvegardé : quelques Ko, contre des
+        milliers de sommes dans la liste des téléchargements. Au premier essai
+        (`fresh`), il donne aussi la somme du fichier si le serveur ne l'a pas
+        donnée, et des miroirs de plus. Illisible ou d'un autre fichier : ignoré.
+        """
+        job = self.job
+        if not job.metalink or not job.resumable or not self.size:
+            return
+        foreign = urlparse(job.metalink).hostname != self.site
+        try:
+            with _opener.open(build_request(job, job.metalink, foreign=foreign), timeout=TIMEOUT) as resp:
+                described = metalink.parse(resp.read(metalink.MAX_DOCUMENT + 1), self.size)
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
+            log.info("%s : document Metalink ignoré (%s)", job.filename, _reason(e))
+            return
+        self.pieces = described["pieces"]
+        if not fresh:
+            return
+        if described["hashes"] and not any(c["source"] == "server" for c in job.checksums):
+            job.checksums.append(dict(described["hashes"][0], source="server"))  # la plus sûre
+        if job.mirrors is not None:
+            job.mirrors = metalink.merge(job.mirrors, described["urls"], job.url, exclude=(job.url, job.finalUrl))
 
     def _use_mirrors(self):
         """Ajoute les miroirs du fichier aux adresses où le prendre, quand c'est sûr.
@@ -1036,6 +1078,8 @@ class HttpDownload:
             got, age = seg.pos - seg.origin, now - seg.since
             if age >= 0.2 and got >= MIN_STEAL:
                 self.best_rate = max(self.best_rate, got / age)
+            if got:
+                self.spans.append((seg.origin, seg.pos, seg.source))
             seg.resp = None
 
     def _stream(self, seg, resp):
@@ -1151,7 +1195,9 @@ class HttpDownload:
         # après ne doit pas laisser un fichier terminé plein de zéros.
         if not self.checkpoint():
             raise DownloadError("écriture impossible : le disque n'a pas confirmé les données")
-        self._verify()
+        if self._verify():  # des morceaux faux, remis à télécharger : on les reprend, puis on revérifie
+            self._download(None)
+            return self._finish()
         self._close_fd()
         final = Path(self.job.path)
         if final.exists():
@@ -1164,7 +1210,8 @@ class HttpDownload:
     def _verify(self):
         """Termine les sommes du fichier et les compare à celles attendues.
 
-        Un fichier qui ne correspond pas n'est jamais livré : il reste en .pdm, et
+        True : des morceaux faux (voir _repair) sont remis à télécharger. Sinon,
+        un fichier qui ne correspond pas n'est jamais livré : il reste en .pdm, et
         le téléchargement échoue. Rien à reprendre (on ne sait pas quels octets
         sont faux) : « Réessayer » repart de zéro.
         """
@@ -1179,11 +1226,17 @@ class HttpDownload:
         finally:
             with self.lock:
                 self.verifying = False
+        if self.digester.bad and self.repairs < MAX_REPAIRS:
+            self._repair()
+            return True
         wrong = checksum.mismatch(self.digester, job.checksums)
-        if wrong:
+        if wrong or self.digester.bad:
             with self.lock:
                 self.segments, self.saved, self.downloaded = [], [], 0
-            message = checksum.failure(wrong, self.digester.hexdigest(wrong["algo"]))
+            if wrong:
+                message = checksum.failure(wrong, self.digester.hexdigest(wrong["algo"]))
+            else:  # sans somme du fichier entier : seules celles des morceaux le disent
+                message = f"vérification échouée : {len(self.digester.bad)} morceau(x) faux, même après réparation"
             if len(self.sources) > 1:
                 # Un miroir a peut-être un autre fichier, mais lequel ? Le prochain
                 # essai se passera d'eux : il dira si l'adresse d'origine, elle, est bonne.
@@ -1191,9 +1244,50 @@ class HttpDownload:
                 message += " ; le prochain essai se passera des miroirs"
             raise DownloadError(message)
         job.sha256 = self.digester.hexdigest("sha-256")
-        job.verified = True if job.checksums else None
-        if job.checksums:
-            log.info("%s : vérifié (%s)", job.filename, ", ".join(c["algo"] + " " + c["source"] for c in job.checksums))
+        job.verified = True if job.checksums or self.pieces else None
+        if job.checksums or self.pieces:
+            sums = [c["algo"] + " " + c["source"] for c in job.checksums]
+            if self.pieces:
+                sums.append(f"{len(self.pieces['hashes'])} morceaux")
+            log.info("%s : vérifié (%s)", job.filename, ", ".join(sums))
+
+    def _repair(self):
+        """Remet à télécharger les morceaux faux, sans les miroirs qui les ont envoyés.
+
+        Les sommes de chaque morceau (document Metalink) disent lesquels sont
+        faux ; les octets reçus de chaque connexion (`spans`), d'où ils viennent.
+        Un miroir qui a envoyé un octet d'un morceau faux est écarté ; l'adresse
+        du téléchargement, jamais : elle réessaie, et si c'est elle qui se trompe,
+        les tours s'épuisent et le fichier est refusé comme sans morceaux.
+        """
+        length, bad = self.pieces["length"], self.digester.bad
+        ranges = [(index * length, min((index + 1) * length, self.size) - 1) for index in bad]
+        with self.lock:
+            for start, end in ranges:
+                self._carve(start, end)
+            guilty = {source for a, b, source in self.spans for start, end in ranges if a <= end and b > start}
+            self.saved = [s.to_list() for s in self.segments]
+        for source in guilty:
+            if source is not None and source is not self.origin:
+                self._drop(source, "morceau faux")
+        self.repairs += 1
+        self.digester.rewind()
+        log.info("%s : %d morceau(x) faux, retéléchargé(s) (tour %d)", self.job.filename, len(bad), self.repairs)
+
+    def _carve(self, start, end):
+        """Fait de [start, end] un segment à retélécharger, découpé dans ceux qui le couvraient (sous verrou)."""
+        kept = []
+        for seg in self.segments:
+            if seg.end is None or seg.end < start or seg.start > end:
+                kept.append(seg)
+                continue
+            if seg.start < start:
+                kept.append(Segment(seg.start, start - 1, min(seg.pos, start)))
+            if seg.end > end:
+                kept.append(Segment(end + 1, seg.end, max(seg.pos, end + 1)))
+            self.downloaded -= max(0, min(seg.pos, end + 1) - max(seg.start, start))
+        kept.append(Segment(start, end, start))
+        self.segments = sorted(kept, key=lambda s: s.start)
 
     def _close_fd(self):
         if self.fd is not None:
