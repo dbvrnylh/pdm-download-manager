@@ -25,9 +25,12 @@ DEFAULTS = {
     "speedLimit": 0,  # octets/s pour tout PDM ; 0 : illimitée
     "windowStart": "23:00",  # plage horaire des téléchargements programmés (peut passer minuit)
     "windowEnd": "06:00",
+    "rpc": False,  # API JSON-RPC compatible aria2 (voir rpc.py) : désactivée tant qu'on ne la demande pas
+    "rpcPort": 6800,  # son port, sur 127.0.0.1 seulement : celui d'aria2, que les outils essaient d'abord
+    "rpcOrigins": [],  # pages web autorisées à l'appeler (AriaNg…) : aucune par défaut
 }
 
-LIMITS = {"connections": (1, 32), "maxParallel": (1, 10)}
+LIMITS = {"connections": (1, 32), "maxParallel": (1, 10), "rpcPort": (1024, 65535)}
 # Mêmes clés que ytdlp.PRESETS : hauteur maximale de l'image, ou l'audio seul.
 QUALITIES = ("best", "1080", "720", "480", "audio")
 LANG_CODE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")  # fr, es-419, pt-br…
@@ -39,6 +42,9 @@ EXTENSION = re.compile(r"^[a-z0-9]{1,10}$")
 MIN_SPEED = 16 * 1024  # en dessous, les connexions expireraient plutôt que de ralentir
 MAX_SPEED = 10 * 1024 ** 3
 CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Origine d'une page web ou d'une extension : un schéma et un hôte, sans chemin.
+ORIGIN = re.compile(r"^(https?|chrome-extension|moz-extension)://[a-z0-9.-]+(:\d{1,5})?$")
+MAX_ORIGINS = 10
 
 
 class Config:
@@ -113,6 +119,8 @@ class Config:
                 value = _languages(value)
             elif key == "categories":
                 value = _categories(value)
+            elif key == "rpcOrigins":
+                value = _origins(value)
             elif key == "speedLimit":
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
                         value == 0 or MIN_SPEED <= value <= MAX_SPEED):
@@ -137,6 +145,19 @@ class Config:
             self.data.update(clean)
             write_json_atomic(self.path, self.data, mode=0o644)
         return self.snapshot()
+
+
+def _origins(value):
+    """Origines autorisées à appeler l'API JSON-RPC : « https://hôte[:port] », sans chemin ni « / » final."""
+    if not isinstance(value, list) or len(value) > MAX_ORIGINS:
+        raise ValueError(f"origines : une liste de {MAX_ORIGINS} au plus")
+    clean = []
+    for origin in value:
+        text = origin.strip().rstrip("/").lower() if isinstance(origin, str) else ""
+        if not ORIGIN.match(text):
+            raise ValueError(f"origine refusée : {str(origin)[:80]!r} (forme attendue : https://exemple.org)")
+        clean.append(text)
+    return list(dict.fromkeys(clean))
 
 
 def _languages(value):

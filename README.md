@@ -45,6 +45,8 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
 - **Organized.** Files are sorted into `Videos/`, `Musique/`, `Documents/`, `Archives/`, `Programmes/`,
   `Images/` and `Generique/` for the rest, by extension; each category's extensions and folder name can be edited. Download queue, desktop notifications, right-click "Télécharger avec PDM".
+- **Speaks aria2.** AriaNg, aria2 scripts and the extensions that send their links to aria2 can drive PDM through
+  the same JSON-RPC API: local only, with a secret, and off until you turn it on.
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
 
 > The user interface is currently in French.
@@ -98,6 +100,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Download later (at night) | Manager → **Plus tard** on a download, or the **Plus tard** box when importing a list, or `pdm-host add --later URL`. It only progresses during the time window of **Réglages**; the rest starts right away. |
 | Verify a file | Nothing to do when the page shows its checksum next to the link: PDM picks it up on click and checks the file. Otherwise, Manager → **Vérifier…** on a finished download → paste the site's checksum (SHA-256, SHA-512, SHA-1 or MD5). Not the one PDM shows: compared with itself, a file always matches, and PDM refuses it. |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
+| Drive PDM from other tools | `pdm-host rpc on` turns on the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
 If a heavily protected site refuses the engine, **Avec Chrome** retries the download in the browser,
 with the browser's own session.
@@ -166,6 +169,40 @@ Good to know:
 - At most 200 links per import and 1 MB for the file: split a longer list. The manager only shows the last 300
   downloads; beyond that, the start of the list would scroll out of view.
 - The engine must be installed: without it there is no queue, and Chrome would start everything at once.
+
+### The aria2-compatible API
+
+Tools written for [aria2](https://aria2.github.io/) can drive PDM: [AriaNg](https://github.com/mayswind/AriaNg),
+scripts, extensions that send it their links. PDM speaks the core of aria2's JSON-RPC API, over HTTP. It is off
+until you ask:
+
+```bash
+~/.local/share/pdm/app/pdm-host rpc on
+```
+
+It prints the address (`http://127.0.0.1:6800/jsonrpc`, aria2's own port, so tools find it as is) and the secret,
+to give the tool as aria2's `--rpc-secret`. Then, for example:
+
+```bash
+curl -s http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":1,"method":"aria2.addUri",
+  "params":["token:SECRET",["https://example.org/file.iso"],{"checksum":"sha-256=…"}]}'
+```
+
+- `pdm-host rpc` shows the address and the secret, `pdm-host rpc off` turns it off, `pdm-host rpc new-secret`
+  replaces the secret (the old one stops working at once), `pdm-host rpc on --port 6801` moves it when aria2
+  already uses 6800.
+- A web page can only call it if you allow its origin: `pdm-host rpc on --allow https://ariang.example`
+  (several `--allow` for several, `--allow none` for none again).
+- While it is on, the engine stays running even with nothing to do, like aria2: the tools expect to find it.
+- What works: adding (`addUri`, with `out`, `header`, `referer`, `user-agent`, `checksum`, `pause`; several
+  addresses are mirrors of the same file, used when a checksum can verify it), following (`tellStatus`,
+  `tellActive`, `tellWaiting`, `tellStopped`, `getGlobalStat`, `getFiles`, `getUris`), pausing, resuming and
+  removing, one by one or all at once, the global settings (`changeGlobalOption`: simultaneous downloads,
+  connections, speed limit, folder), `system.multicall` and batches.
+- Not yet: live notifications over WebSocket (tools poll instead), the queue order (`changePosition`) and
+  per-download options (`changeOption`). Files always go to PDM's folder, sorted by category: `dir` is only
+  accepted when it names that folder. Options about how to download (`split`, `max-connection-per-server`…) are
+  accepted and left to PDM.
 
 ## How it works
 
@@ -345,6 +382,12 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
   and the daemon's Unix socket is private to your user.
 - **Hostile input is treated as such:** file names are sanitized, page content is never injected with `innerHTML`,
   and yt-dlp is called with an argument list (no shell) after `--`.
+- **The JSON-RPC API is off until you turn it on.** Then it listens on `127.0.0.1` only, never the network. Every
+  call needs its 256-bit secret, kept in a file readable by your user only (`rpc.json`, `0600`). Unlike the
+  daemon's socket, a local port can be reached by every account and program on the machine. The `Host` header
+  must name `127.0.0.1` or `localhost`, against DNS rebinding (a page pointing its own domain at your machine).
+  Web pages are refused unless you allow their origin. POST only: aria2's JSONP over GET, which any site can
+  read, is not offered.
 - **Private browsing** downloads are never taken over.
 - **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
   lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.
@@ -364,6 +407,7 @@ engine/
                            hosts.py (connections per site) · limiter.py (speed limit)
                            checksum.py (expected and computed checksums) · metalink.py (mirrors)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
+                           rpc.py (aria2-compatible JSON-RPC API)
 tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh
 ```

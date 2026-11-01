@@ -19,6 +19,7 @@ import time
 import unittest
 import unittest.mock
 import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,9 +32,9 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import checksum, daemon, httpdl, metalink, paths, util  # noqa: E402
+from pdm_engine import checksum, daemon, httpdl, metalink, paths, rpc, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
-from pdm_engine.engine import Engine, in_window  # noqa: E402
+from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
 from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
 from pdm_engine.limiter import Limiter  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
@@ -897,7 +898,266 @@ for _name in dir(EngineTest):
         setattr(EngineTlsTest, _name, None)  # unittest ne lance que ce qui s'appelle
 
 
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class RpcTest(unittest.TestCase):
+    """L'API JSON-RPC compatible aria2 (rpc.py), appelée comme le ferait AriaNg, contre un vrai moteur."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = fx.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        cls.hash = fx.make_file("rpc.bin", 2 * 1024 * 1024)
+        cls.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # jamais par un proxy
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(root / "data")
+        (root / "data").mkdir()
+        self.downloads = root / "dl"
+        self.config = Config(root / "data" / "config.json")
+        self.config.update({"downloadDir": str(self.downloads), "notify": False, "rpc": True, "rpcPort": free_port()})
+        tools = Tools(self.config)
+        tools.ready.set()
+        self.engine = Engine(self.config, tools, lambda event: None)
+        self.engine.start()
+        self.rpc = rpc.RpcServer(self.engine, self.config)
+        self.rpc.apply()
+        self.addCleanup(self.rpc.stop)
+        self.token = "token:" + rpc.read_secret()
+
+    def post(self, body, headers=None, path="/jsonrpc", method="POST"):
+        """(code HTTP, réponse décodée ou None, en-têtes de la réponse)"""
+        data = body if isinstance(body, bytes) or body is None else json.dumps(body).encode()
+        request = urllib.request.Request(self.rpc.url().replace("/jsonrpc", path), data=data, method=method,
+                                         headers=headers or {})
+        try:
+            with self.http.open(request, timeout=10) as resp:
+                raw, code, answer = resp.read(), resp.status, resp.headers
+        except urllib.error.HTTPError as e:
+            raw, code, answer = e.read(), e.code, e.headers
+            e.close()
+        return code, json.loads(raw) if raw else None, answer
+
+    def call(self, method, *params, token=True):
+        code, reply, _ = self.post({"jsonrpc": "2.0", "id": "t", "method": method,
+                                    "params": ([self.token] if token else []) + list(params)})
+        self.assertEqual(code, 200)
+        if "error" in reply:
+            raise rpc.RpcError(reply["error"]["message"], reply["error"]["code"])
+        return reply["result"]
+
+    def until(self, g, states, timeout=30):
+        """Attend l'un de ces états ; un état final, avec le thread du téléchargement fini."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = self.call("aria2.tellStatus", g)
+            running = any(rpc.gid(job_id) == g for job_id in list(self.engine.runners))
+            if status["status"] in states and not (status["status"] in rpc.STOPPED and running):
+                return status
+            time.sleep(0.05)
+        self.fail(f"{g} : toujours {self.call('aria2.tellStatus', g)['status']}")
+
+    # ─── Activation et secret ──────────────────────────────────────────────
+
+    def test_nothing_listens_until_asked_and_never_beyond_this_machine(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        self.assertFalse(config["rpc"])
+        quiet = rpc.RpcServer(self.engine, config)
+        quiet.apply()
+        self.assertFalse(quiet.running)
+        self.assertEqual(self.rpc.server.server_address[0], "127.0.0.1")
+        # Port déjà pris (par aria2 ?) : dit pourquoi, sans faire tomber le moteur.
+        taken = rpc.RpcServer(self.engine, self.config)
+        taken.apply()
+        self.assertFalse(taken.running)
+        self.assertIn("déjà pris", taken.error)
+
+    def test_every_call_needs_the_secret_which_stays_private(self):
+        for token in (None, "token:" + "x" * 43, self.token[len("token:"):]):
+            with self.subTest(token=token), self.assertRaises(rpc.RpcError) as caught:
+                self.call("aria2.getVersion", *([token] if token else []), token=False)
+            self.assertEqual((caught.exception.code, str(caught.exception)), (1, "Unauthorized"))
+        self.assertEqual(self.call("aria2.getVersion")["version"], rpc.API_VERSION)
+        self.assertIn("aria2.addUri", self.call("system.listMethods", token=False))  # sans secret, comme aria2
+        secret = self.token[len("token:"):]
+        self.assertEqual(len(secret), 43, "256 bits")
+        self.assertEqual(os.stat(rpc.secret_path()).st_mode & 0o777, 0o600)
+        self.assertNotIn(secret, self.config.path.read_text(), "config.json est lisible par tous")
+        old = self.token
+        self.rpc.renew()
+        with self.assertRaises(rpc.RpcError):
+            self.call("aria2.getVersion", old, token=False)  # l'ancien ne vaut plus rien, aussitôt
+        self.token = "token:" + rpc.read_secret()
+        self.assertEqual(self.call("aria2.getSessionInfo").keys(), {"sessionId"})
+
+    # ─── Téléchargements ───────────────────────────────────────────────────
+
+    def test_a_download_is_added_and_followed_like_with_aria2(self):
+        g = self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {"out": "copie.bin", "split": "16"})
+        self.assertRegex(g, r"^[0-9a-f]{16}$")
+        status = self.until(g, ("complete", "error"))
+        self.assertEqual(status["status"], "complete", status.get("errorMessage"))
+        size = str(2 * 1024 * 1024)
+        self.assertEqual((status["totalLength"], status["completedLength"]), (size, size))  # des chaînes, comme aria2
+        path = Path(status["files"][0]["path"])
+        self.assertEqual((path.name, status["dir"]), ("copie.bin", str(path.parent)))
+        self.assertEqual(sha(path), self.hash)
+        self.assertEqual(self.call("aria2.tellStopped", 0, 10, ["gid", "status"]), [{"gid": g, "status": "complete"}])
+        self.assertEqual(self.call("aria2.getGlobalStat")["numStopped"], "1")
+        self.assertEqual(self.call("aria2.getUris", g), [{"uri": self.base + "/range/rpc.bin", "status": "used"}])
+        self.assertEqual(self.call("aria2.removeDownloadResult", g), "OK")
+        self.assertEqual(self.call("aria2.tellStopped", 0, 10), [])
+        self.assertTrue(path.exists(), "le résultat est oublié, pas le fichier")
+
+    def test_pause_resume_and_remove(self):
+        g = self.call("aria2.addUri", [self.base + "/crawl/rpc.bin"])  # 64 Ko/s par connexion : plusieurs secondes
+        self.until(g, ("active",))
+        self.assertEqual(self.call("aria2.tellActive", ["gid"]), [{"gid": g}])
+        self.assertEqual(self.call("aria2.pause", g), g)
+        self.until(g, ("paused",))
+        self.assertEqual([s["gid"] for s in self.call("aria2.tellWaiting", 0, 10)], [g])  # en pause : « waiting »
+        with self.assertRaises(rpc.RpcError):
+            self.call("aria2.removeDownloadResult", g)  # pas fini : remove d'abord
+        self.call("aria2.unpause", g)
+        self.until(g, ("active",))
+        self.call("aria2.remove", g)
+        self.until(g, ("removed",))
+        self.assertEqual(self.call("aria2.purgeDownloadResult"), "OK")
+        with self.assertRaises(rpc.RpcError) as caught:
+            self.call("aria2.tellStatus", g)
+        self.assertIn("introuvable", str(caught.exception))
+
+    def test_lists_are_paged_like_aria2(self):
+        gids = [self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {"pause": "true", "out": f"{i}.bin"})
+                for i in range(3)]
+        self.assertEqual([self.call("aria2.tellStatus", g, ["status"]) for g in gids], [{"status": "paused"}] * 3)
+        page = lambda offset, num: [s["gid"] for s in self.call("aria2.tellWaiting", offset, num, ["gid"])]  # noqa: E731
+        self.assertEqual(page(0, 2), gids[:2])
+        self.assertEqual(page(2, 5), gids[2:])
+        self.assertEqual(page(-1, 2), [gids[2], gids[1]], "depuis la fin, à rebours")
+        self.assertEqual(page(-4, 2), [])
+        self.assertEqual(self.call("aria2.unpauseAll"), "OK")
+        for g in gids:
+            self.assertEqual(self.until(g, ("complete", "error"))["status"], "complete")
+
+    def test_several_addresses_are_mirrors_and_a_wrong_checksum_is_an_error(self):
+        uris = [self.base + "/range/rpc.bin", self.base.replace("127.0.0.1", "localhost") + "/mirror/good/rpc.bin"]
+        g = self.call("aria2.addUri", uris, {"checksum": "sha-256=" + self.hash})
+        status = self.until(g, ("complete", "error"))
+        self.assertEqual(status["status"], "complete", status.get("errorMessage"))
+        self.assertEqual([u["uri"] for u in status["files"][0]["uris"]], uris)
+        g = self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {"checksum": "sha-256=" + "0" * 64})
+        status = self.until(g, ("complete", "error"))
+        self.assertEqual((status["status"], status["errorCode"]), ("error", "1"))
+        self.assertIn("vérification", status["errorMessage"])
+        with self.assertRaises(ValueError):
+            _mirrors(["http://miroir.example/rpc.bin"], "https://example.org/rpc.bin")  # jamais en clair
+
+    def test_what_a_caller_asks_is_checked_before_anything_starts(self):
+        url = self.base + "/range/rpc.bin"
+        for uris, options, message in (
+            ([url], {"out": "../.bashrc"}, "un nom de fichier"),
+            ([url], {"dir": "/tmp"}, "PDM range les fichiers"),
+            ([url], {"header": "X-A: b\r\nX-Injecté: 1"}, "en-tête"),
+            ([url], {"max-download-limit": "1M"}, "option non prise en charge"),
+            ([url], {"checksum": "sha-256=zz"}, "illisible"),
+            ([url], {"out": 42}, "options"),
+            (["file:///etc/passwd"], {}, "http ou https"),
+            (["ftp://example.org/a"], {}, "http ou https"),
+            ([], {}, "uris"),
+            ([url, "javascript:alert(1)"], {}, "miroir refusé"),
+        ):
+            with self.subTest(uris=uris, options=options), self.assertRaises(rpc.RpcError) as caught:
+                self.call("aria2.addUri", uris, options)
+            self.assertIn(message, str(caught.exception))
+        self.assertEqual(self.engine.jobs, {}, "aucun appel refusé n'a laissé de téléchargement")
+        g = self.call("aria2.addUri", [url], {"dir": str(self.downloads), "pause": "true"})  # le dossier de PDM : oui
+        self.assertEqual(self.call("aria2.tellStatus", g, ["status"]), {"status": "paused"})
+
+    def test_global_options_are_the_settings(self):
+        self.assertEqual(self.call("aria2.changeGlobalOption", {"max-concurrent-downloads": "2", "split": "4",
+                                                                 "max-overall-download-limit": "1M"}), "OK")
+        self.assertEqual((self.config["maxParallel"], self.config["connections"], self.config["speedLimit"]),
+                         (2, 4, 1024 ** 2))
+        options = self.call("aria2.getGlobalOption")
+        self.assertEqual((options["max-concurrent-downloads"], options["split"]), ("2", "4"))
+        for bad in ({"split": "99"}, {"split": "beaucoup"}, {"rpc-secret": "x"}):
+            with self.subTest(bad=bad), self.assertRaises(rpc.RpcError):
+                self.call("aria2.changeGlobalOption", bad)
+
+    # ─── Requêtes ──────────────────────────────────────────────────────────
+
+    def test_multicall_and_batches(self):
+        g = self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {"pause": "true"})
+        results = self.call("system.multicall", [
+            {"methodName": "aria2.tellStatus", "params": [self.token, g, ["status"]]},
+            {"methodName": "aria2.getVersion", "params": []},  # chaque appel porte son secret
+            {"methodName": "aria2.inconnue", "params": [self.token]},
+            {"methodName": "system.multicall", "params": [[]]},
+        ], token=False)
+        self.assertEqual(results[0], [{"status": "paused"}], "un résultat : dans une liste")
+        self.assertEqual(results[1], {"code": 1, "message": "Unauthorized"}, "une erreur : telle quelle")
+        self.assertEqual((results[2]["code"], results[3]["code"]), (-32601, -32600))
+        call = {"jsonrpc": "2.0", "method": "aria2.getVersion", "params": [self.token]}
+        code, replies, _ = self.post([dict(call, id=1), call, dict(call, id=3, params=[])])
+        self.assertEqual([r["id"] for r in replies], [1, 3], "sans id : une notification, sans réponse")
+        self.assertEqual((replies[0]["result"]["version"], replies[1]["error"]["message"]),
+                         (rpc.API_VERSION, "Unauthorized"))
+        self.assertEqual(self.post(b"{pas du json")[1]["error"]["code"], -32700)
+        self.assertEqual(self.post([call] * (rpc.MAX_CALLS + 1))[1]["error"]["code"], -32600)
+        with self.assertRaises(rpc.RpcError) as caught:
+            self.call("aria2.tellStatus")
+        self.assertEqual(caught.exception.code, -32602)
+
+    def test_web_pages_and_dns_rebinding_are_refused(self):
+        call = {"jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion", "params": [self.token]}
+        port = self.rpc.server.server_port
+        code, _, _ = self.post(call, {"Host": f"pdm.attaquant.example:{port}"})  # son domaine pointé sur 127.0.0.1
+        self.assertEqual(code, 403)
+        code, _, headers = self.post(call, {"Origin": "https://attaquant.example"})
+        self.assertEqual(code, 403)
+        self.assertIsNone(headers.get("Access-Control-Allow-Origin"))
+        self.config.update({"rpcOrigins": ["https://AriaNg.example/"]})
+        code, reply, headers = self.post(call, {"Origin": "https://ariang.example"})
+        self.assertEqual((code, headers["Access-Control-Allow-Origin"]), (200, "https://ariang.example"))
+        self.assertEqual(reply["result"]["version"], rpc.API_VERSION)
+        code, _, headers = self.post(None, {"Origin": "https://ariang.example"}, method="OPTIONS")
+        self.assertEqual((code, headers["Access-Control-Allow-Methods"]), (204, "POST"))
+        self.assertEqual(self.post(None, {"Origin": "https://attaquant.example"}, method="OPTIONS")[0], 403)
+        self.assertEqual(self.post(None, method="GET")[0], 405, "pas de GET : aria2 y fait du JSONP")
+        self.assertEqual(self.post(call, path="/rpc")[0], 404)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        connection.putrequest("POST", "/jsonrpc")
+        connection.putheader("Content-Length", str(rpc.MAX_BODY + 1))
+        connection.endheaders()
+        self.assertEqual(connection.getresponse().status, 413, "refusée sans lire le corps")
+        connection.close()
+
+    def test_job_ids_become_gids(self):
+        self.assertEqual(rpc.gid("2089b05ecca3"), "00002089b05ecca3")
+        self.assertRegex(rpc.gid("pas-hexadécimal"), r"^[0-9a-f]{16}$")
+
+
 class ConfigTest(unittest.TestCase):
+    def test_rpc_settings_are_checked(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        self.assertEqual((config["rpc"], config["rpcPort"], config["rpcOrigins"]), (False, 6800, []))
+        origins = [" https://AriaNg.example/ ", "chrome-extension://abcdefgh", "https://ariang.example"]
+        self.assertEqual(config.update({"rpcOrigins": origins})["rpcOrigins"],
+                         ["https://ariang.example", "chrome-extension://abcdefgh"])
+        for bad in ("https://a.example", ["*"], ["null"], ["https://a.example/chemin"], ["file:///x"],
+                    ["https://a.example"] * 11, [42]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.update({"rpcOrigins": bad})
+        for bad in (80, 70000, "6800"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.update({"rpcPort": bad})
+
     def test_languages_are_normalized_and_checked(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
         self.assertEqual((config["languages"], config["subtitles"], config["audioTracks"]), ("fr,es,en", True, True))
@@ -1106,6 +1366,7 @@ class DaemonIdleTest(unittest.TestCase):
         state = {"now": 0.0, "work": True}
         watcher.clock = lambda: state["now"]
         watcher.engine = SimpleNamespace(has_work=lambda: state["work"])
+        watcher.rpc = SimpleNamespace(running=False)
         watcher.idle_since = None
 
         def check(at):
@@ -1125,6 +1386,10 @@ class DaemonIdleTest(unittest.TestCase):
         watcher.clients.clear()
         self.assertFalse(check(12.04))
         self.assertTrue(check(15.05))
+        # L'API JSON-RPC attend ses clients : le démon ne s'arrête pas sous elle.
+        watcher.rpc.running = True
+        self.assertFalse(check(30.0))
+        self.assertFalse(check(60.0))
 
 
 class ChecksumTest(unittest.TestCase):

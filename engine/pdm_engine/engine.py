@@ -17,7 +17,7 @@ import time
 import uuid
 from urllib.parse import quote
 
-from . import checksum, httpdl, paths
+from . import checksum, httpdl, metalink, paths
 from .config import QUALITIES
 from .config import MIN_SPEED
 from .hosts import Hosts
@@ -40,12 +40,13 @@ PERSISTED = {
     # Autres adresses du fichier annoncées par son serveur (metalink.py) ; None :
     # écartées, après un fichier qui ne correspondait pas.
     "mirrors": [],
+    "givenMirrors": [],  # ceux donnés avec le lien (addUri d'aria2) : gardés quand le serveur en annonce d'autres
     "metalink": None,  # adresse de son document Metalink (.meta4) : les sommes de ses morceaux
     # Adresse d'où le navigateur est parti, avant les redirections qui ont mené à `url`.
     "startUrl": None,
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
-HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "metalink", "startUrl"}
+HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl"}
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
 
 
@@ -164,16 +165,19 @@ class Engine:
         start = spec.get("startUrl")
         # Un indice, pas une demande : mal formée, elle est ignorée plutôt que refusée.
         start = start if isinstance(start, str) and len(start) <= 8192 and re.match(r"^https?://", start, re.I) else None
+        given = _mirrors(spec.get("mirrors"), url) if kind == "http" else []
         job = Job(
             id=spec.get("id"), kind=kind, url=url, referer=spec.get("referer"),
             startUrl=start if kind == "http" and start != url else None,
             cookies=spec.get("cookies") or None, userAgent=spec.get("userAgent"),
             headers=clean_headers(spec.get("headers")) if kind == "http" else None,
             checksums=checksum.clean(spec.get("checksums")) if kind == "http" else [],
+            mirrors=given, givenMirrors=given,
             source=spec.get("source") or "manual", mime=spec.get("mime"),
             filename=sanitize_filename(spec["filename"]) if spec.get("filename") else None,
             title=spec.get("title"), preset=preset, size=spec.get("size"),
-            createdAt=time.time(), status="queued", scheduled=bool(spec.get("scheduled")),
+            createdAt=time.time(), scheduled=bool(spec.get("scheduled")),
+            status="paused" if spec.get("paused") else "queued",  # en pause dès l'ajout : rien ne démarre
         )
         with self.lock:
             if job.id in self.jobs:
@@ -580,6 +584,29 @@ class Engine:
         else:
             title, body = "Échec du téléchargement", f"{name}\n{job.error}"
         _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
+
+
+def _mirrors(raw, url):
+    """Autres adresses du même fichier, données avec le lien (les adresses en plus d'un addUri d'aria2).
+
+    Traitées comme celles qu'annonce un serveur de miroirs : utilisées seulement
+    avec une somme attendue (voir httpdl._use_mirrors), et jamais en clair pour un
+    fichier demandé en https://.
+    """
+    if not raw:
+        return []
+    if not isinstance(raw, list) or len(raw) > metalink.MAX_MIRRORS:
+        raise ValueError(f"miroirs refusés (une liste de {metalink.MAX_MIRRORS} au plus)")
+    secure = url.lower().startswith("https://")
+    mirrors = []
+    for mirror in raw:
+        if not isinstance(mirror, str) or len(mirror) > 8192 or not re.match(r"^https?://", mirror, re.I):
+            raise ValueError("miroir refusé (http ou https uniquement)")
+        if secure and not mirror.lower().startswith("https://"):
+            raise ValueError(f"miroir en clair refusé pour un fichier en https : {mirror[:80]}")
+        if mirror != url and mirror not in mirrors:
+            mirrors.append(mirror)
+    return mirrors
 
 
 def in_window(now, start, end):

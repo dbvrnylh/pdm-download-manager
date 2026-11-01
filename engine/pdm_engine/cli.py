@@ -128,6 +128,55 @@ def _add_list(source, kind, quality, later):
         sys.exit(1)
 
 
+RPC_USAGE = "Usage : pdm-host rpc [on [--port N] [--allow ORIGINE|none]... | off | new-secret]"
+
+
+def _rpc(args):
+    """Active, désactive ou montre l'API JSON-RPC compatible aria2 (voir rpc.py).
+
+    --allow : les pages web autorisées à l'appeler (AriaNg…), à la place des
+    précédentes ; « none » : aucune.
+    """
+    from .rpc import read_secret
+
+    action = args[0] if args else "status"
+    changes = {}
+    if action == "on":
+        changes["rpc"] = True
+        rest, origins = list(args[1:]), None
+        while rest:
+            arg = rest.pop(0)
+            if arg not in ("--port", "--allow") or not rest:
+                sys.exit(RPC_USAGE)
+            value = rest.pop(0)
+            if arg == "--port":
+                if not value.isdigit():
+                    sys.exit(RPC_USAGE)
+                changes["rpcPort"] = int(value)
+            else:
+                origins = (origins or []) + ([] if value == "none" else [value])
+        if origins is not None:
+            changes["rpcOrigins"] = origins
+    elif action == "off" and len(args) == 1:
+        changes["rpc"] = False
+    elif action not in ("status", "new-secret") or len(args) > 1:
+        sys.exit(RPC_USAGE)
+    connection = _Connection()
+    if changes:
+        reply = connection.request({"type": "config", "set": changes})
+        if not reply["ok"]:
+            sys.exit(f"Erreur : {reply['error']}")
+    info = connection.request({"type": "rpc", "renew": action == "new-secret"})["rpc"]
+    if not info["enabled"]:
+        print("API JSON-RPC (compatible aria2) : désactivée. Pour l'activer : pdm-host rpc on")
+    elif info["error"]:
+        sys.exit(f"API JSON-RPC : {info['error']} (pdm-host rpc on --port N)")
+    else:
+        print(f"API JSON-RPC (compatible aria2) : {info['url']}")
+        print(f"  Secret : {read_secret()}")
+        print(f"  Pages web autorisées : {', '.join(info['origins']) or 'aucune'}")
+
+
 def main(args):
     # Chrome lance le pont avec l'origine de l'extension en argument
     # (« chrome-extension://…/ ») : tout ce qui n'est pas une sous-commande
@@ -157,6 +206,8 @@ def main(args):
         reply = _request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "cli",
                                                  "scheduled": later, "checksums": expected}})
         print("Ajouté." if reply["ok"] else f"Erreur : {reply['error']}")
+    elif command == "rpc":
+        _rpc(args[1:])
     elif command == "stop":
         from .host import connect
 

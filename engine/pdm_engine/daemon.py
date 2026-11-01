@@ -20,6 +20,7 @@ from . import VERSION, paths
 from .config import Config
 from .engine import Engine
 from .httpdl import DownloadError
+from .rpc import RpcServer
 from .tools import Tools
 
 log = logging.getLogger("pdm")
@@ -63,6 +64,8 @@ class Daemon:
         self.config = Config()
         self.tools = Tools(self.config)
         self.engine = Engine(self.config, self.tools, self.broadcast)
+        # aria2.shutdown : l'arrêt habituel, sauvegarde comprise (voir run).
+        self.rpc = RpcServer(self.engine, self.config, shutdown=lambda: os.kill(os.getpid(), signal.SIGTERM))
         self.clients = set()
         self.clients_lock = threading.Lock()
         self.clock = time.monotonic  # remplacée dans les tests
@@ -103,6 +106,7 @@ class Daemon:
         signal.signal(signal.SIGTERM, _terminate)
         self.tools.refresh_async()
         self.engine.start()
+        self.rpc.apply()
         log.info("démon PDM %s démarré (pid %d)", VERSION, os.getpid())
         try:
             while True:
@@ -115,6 +119,7 @@ class Daemon:
                     continue
                 threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
         finally:
+            self.rpc.stop()
             self.engine.save()
             server.close()
             try:
@@ -125,7 +130,8 @@ class Daemon:
     def _idle_too_long(self):
         with self.clients_lock:
             busy = bool(self.clients)
-        if busy or self.engine.has_work():
+        # L'API JSON-RPC attend ses clients comme aria2 : un démon arrêté fermerait son port.
+        if busy or self.rpc.running or self.engine.has_work():
             self.idle_since = None
             return False
         # L'inactivité compte depuis la première vérification qui la constate, pas
@@ -203,11 +209,19 @@ class Daemon:
                 config = self.config.update(changes) if changes else self.config.snapshot()
                 if "ytdlpPath" in changes:
                     self.tools.refresh()
+                if {"rpc", "rpcPort"} & set(changes):
+                    self.rpc.apply()
                 reply(config=config, tools=self.tools.info())
                 if changes:
                     self.broadcast({"type": "config", "config": config, "tools": self.tools.info()})
             elif kind == "list":
                 reply(jobs=self.engine.public_jobs())
+            elif kind == "rpc":
+                # État de l'API JSON-RPC ; « renew » : un nouveau secret. Le secret lui-même
+                # n'est jamais envoyé : il est dans un fichier réservé à l'utilisateur.
+                if message.get("renew"):
+                    self.rpc.renew()
+                reply(rpc=self.rpc.info())
             elif kind == "shutdown":
                 reply()
                 # Arrêt propre par le chemin habituel : sauvegarde dans run().

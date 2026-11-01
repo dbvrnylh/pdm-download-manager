@@ -6,6 +6,7 @@
   pdm-host status          état du moteur, pour le dépannage
   pdm-host stop            arrête le moteur (les téléchargements reprendront au prochain lancement)
   pdm-host add URL         ajoute un téléchargement depuis le terminal (--video : via yt-dlp)
+  pdm-host rpc on|off      API JSON-RPC compatible aria2, pour AriaNg et les scripts (sans argument : son état)
 """
 
 import os

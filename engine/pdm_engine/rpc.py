@@ -1,0 +1,610 @@
+"""API JSON-RPC compatible aria2 : piloter PDM depuis d'autres outils.
+
+AriaNg, les scripts écrits pour aria2, les extensions qui lui envoient leurs
+liens : ils parlent tous la même API (« RPC interface » du manuel d'aria2).
+PDM en parle le cœur, en HTTP : POST /jsonrpc.
+
+Désactivée par défaut. Une fois activée (pdm-host rpc on) :
+- elle n'écoute que 127.0.0.1, jamais le réseau ;
+- chaque appel porte le secret (« token:… », comme --rpc-secret d'aria2). Le
+  socket du démon n'est ouvert qu'à l'utilisateur ; un port local, lui, est
+  joignable par tous les comptes et tous les programmes de la machine ;
+- l'en-tête Host doit nommer 127.0.0.1 ou localhost : une page qui fait
+  pointer son propre domaine sur 127.0.0.1 (« DNS rebinding ») est refusée ;
+- une requête venue d'une page web (en-tête Origin) n'est acceptée que des
+  origines autorisées dans les réglages (rpcOrigins), aucune par défaut ;
+- POST seulement : aria2 accepte aussi GET avec JSONP, qu'une page de
+  n'importe quel site peut lire.
+"""
+
+import errno
+import hashlib
+import hmac
+import http.server
+import inspect
+import json
+import logging
+import os
+import re
+import secrets
+import threading
+import uuid
+
+from . import checksum, paths
+from .httpdl import DownloadError
+from .util import sanitize_filename, write_json_atomic
+
+log = logging.getLogger("pdm")
+
+API_VERSION = "1.37.0"  # la version d'aria2 dont PDM parle l'API : les clients s'y fient
+MAX_BODY = 1 << 20  # octets par requête
+MAX_CALLS = 100  # appels d'un lot JSON-RPC, ou d'un system.multicall
+MAX_CLIENTS = 16  # connexions servies à la fois : au-delà, refusées
+TIMEOUT = 10  # s pour envoyer sa requête
+MAX_LIST = 1000  # téléchargements par réponse de tellWaiting et tellStopped
+
+# États de PDM → ceux d'aria2.
+STATUS = {"queued": "waiting", "downloading": "active", "paused": "paused", "completed": "complete",
+          "failed": "error", "canceled": "removed"}
+STOPPED = ("complete", "error", "removed")
+# Options d'aria2 qui règlent la façon de télécharger, que PDM décide seul (connexions,
+# reprise, renommage, vérification) : acceptées et ignorées, plutôt que de refuser le lien.
+IGNORED = {"split", "max-connection-per-server", "min-split-size", "continue", "max-tries", "retry-wait",
+           "timeout", "connect-timeout", "lowest-speed-limit", "allow-overwrite", "auto-file-renaming",
+           "remote-time", "check-integrity", "follow-metalink", "metalink-preferred-protocol"}
+# Les méthodes d'aria2 que PDM connaît (les autres : « méthode inconnue »).
+METHODS = ("addUri", "remove", "forceRemove", "pause", "forcePause", "pauseAll", "forcePauseAll", "unpause",
+           "unpauseAll", "tellStatus", "getUris", "getFiles", "getPeers", "tellActive", "tellWaiting",
+           "tellStopped", "getOption", "getGlobalOption", "changeGlobalOption", "getGlobalStat",
+           "removeDownloadResult", "purgeDownloadResult", "getVersion", "getSessionInfo", "saveSession",
+           "shutdown", "forceShutdown")
+
+
+class RpcError(Exception):
+    """Une erreur rendue au client. Code 1 : celui de toutes les erreurs d'aria2."""
+
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+# ─── Secret ────────────────────────────────────────────────────────────────
+
+
+def secret_path():
+    return paths.data_dir() / "rpc.json"
+
+
+def read_secret():
+    try:
+        with open(secret_path(), encoding="utf-8") as f:
+            value = json.load(f).get("secret")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def new_secret():
+    """Un nouveau secret (256 bits), lisible par le seul utilisateur : pas dans config.json, lisible par tous."""
+    value = secrets.token_urlsafe(32)
+    paths.ensure_dirs()
+    write_json_atomic(secret_path(), {"secret": value})  # 0600
+    return value
+
+
+# ─── Traduction PDM ↔ aria2 ────────────────────────────────────────────────
+
+
+def gid(job_id):
+    """Le GID d'aria2 (16 chiffres hexadécimaux) d'un téléchargement de PDM (12, d'ordinaire)."""
+    if re.fullmatch(r"[0-9a-f]{1,16}", job_id):
+        return job_id.rjust(16, "0")
+    return hashlib.sha1(job_id.encode()).hexdigest()[:16]
+
+
+def _page(items, offset, num):
+    """La page de tellWaiting et tellStopped : offset négatif, depuis la fin et à rebours (comme aria2)."""
+    if not all(isinstance(n, int) and not isinstance(n, bool) for n in (offset, num)) or num < 0:
+        raise RpcError("offset et num : des entiers, num positif", -32602)
+    num = min(num, MAX_LIST)
+    if offset >= 0:
+        return items[offset:offset + num]
+    end = len(items) + offset  # -1 : le dernier
+    if end < 0:
+        return []
+    return items[max(end - num + 1, 0):end + 1][::-1]
+
+
+def _speed(value):
+    """« 0 », « 512K », « 2M » (comme aria2) → octets/s."""
+    match = re.fullmatch(r"(\d+)([KkMm]?)", str(value).strip())
+    if not match:
+        raise RpcError(f"vitesse illisible : {value!r} (par exemple 0, 512K ou 2M)")
+    return int(match.group(1)) * {"": 1, "k": 1024, "m": 1024 ** 2}[match.group(2).lower()]
+
+
+class Api:
+    """Les méthodes d'aria2, traduites en commandes du moteur.
+
+    Elles gardent les noms d'aria2 (addUri, tellStatus…) : c'est l'API. Comme chez
+    lui, les nombres sont rendus en chaînes de caractères.
+    """
+
+    def __init__(self, engine, config, shutdown=None):
+        self.engine = engine
+        self.config = config
+        self.on_shutdown = shutdown
+        self.secret = None  # posé par RpcServer
+        self.session = uuid.uuid4().hex
+
+    # ─── Requêtes ──────────────────────────────────────────────────────────
+
+    def handle(self, request):
+        """Une requête décodée (un appel, ou un lot) → la réponse, ou None : rien que des notifications."""
+        if isinstance(request, list):
+            if not request or len(request) > MAX_CALLS:
+                return _error(None, -32600, f"lot vide ou de plus de {MAX_CALLS} appels")
+            replies = [reply for reply in map(self._one, request) if reply is not None]
+            return replies or None
+        return self._one(request)
+
+    def _one(self, call):
+        if not isinstance(call, dict) or not isinstance(call.get("method"), str):
+            return _error(call.get("id") if isinstance(call, dict) else None, -32600, "Invalid Request")
+        try:
+            result = self.dispatch(call["method"], call.get("params", []))
+            reply = {"jsonrpc": "2.0", "id": call.get("id"), "result": result}
+        except RpcError as e:
+            reply = _error(call.get("id"), e.code, str(e))
+        except Exception:
+            log.exception("API JSON-RPC : %s", call["method"])
+            reply = _error(call.get("id"), -32603, "erreur interne (voir le journal du moteur)")
+        return reply if "id" in call else None  # sans id : une notification, sans réponse
+
+    def dispatch(self, method, params):
+        """Un appel → son résultat ; lève RpcError."""
+        if not isinstance(params, list):
+            raise RpcError("params : une liste", -32602)
+        if method == "system.listMethods":
+            return [f"aria2.{name}" for name in METHODS] + ["system.listMethods", "system.listNotifications",
+                                                            "system.multicall"]
+        if method == "system.listNotifications":
+            return []  # pas encore de WebSocket
+        if method == "system.multicall":
+            return self._multicall(params)
+        name = method[len("aria2."):] if method.startswith("aria2.") else None
+        if name not in METHODS:
+            raise RpcError(f"méthode inconnue : {method}", -32601)
+        token = params[0] if params else None
+        expected = f"token:{self.secret}".encode()
+        if not isinstance(token, str) or not hmac.compare_digest(token.encode(), expected):
+            raise RpcError("Unauthorized")
+        function = getattr(self, name)
+        try:
+            inspect.signature(function).bind(*params[1:])
+        except TypeError:
+            raise RpcError(f"{method} : paramètres invalides", -32602) from None
+        try:
+            return function(*params[1:])
+        except (ValueError, DownloadError) as e:  # refus du moteur (« ce téléchargement est déjà terminé »…)
+            raise RpcError(str(e)) from None
+
+    def _multicall(self, params):
+        """Chaque appel porte son secret ; chaque résultat est rendu dans une liste, une erreur telle quelle."""
+        if len(params) != 1 or not isinstance(params[0], list) or len(params[0]) > MAX_CALLS:
+            raise RpcError(f"system.multicall : une liste de {MAX_CALLS} appels au plus", -32602)
+        results = []
+        for call in params[0]:
+            try:
+                if not isinstance(call, dict) or call.get("methodName") == "system.multicall":
+                    raise RpcError("appel invalide", -32600)
+                results.append([self.dispatch(call.get("methodName") or "", call.get("params", []))])
+            except RpcError as e:
+                results.append({"code": e.code, "message": str(e)})
+        return results
+
+    # ─── Ajout ─────────────────────────────────────────────────────────────
+
+    def addUri(self, uris, options=None, position=None):
+        """Ajoute un fichier. Plusieurs adresses : les miroirs du même fichier.
+
+        `position` (place dans la file) est ignoré : la file de PDM n'a pas encore d'ordre.
+        """
+        if not isinstance(uris, list) or not uris or not all(isinstance(uri, str) for uri in uris):
+            raise RpcError("uris : une liste d'adresses", -32602)
+        spec = {"url": uris[0], "mirrors": uris[1:], "source": "rpc"}
+        for key, value in _options(options).items():
+            if key == "out":
+                spec["filename"] = self._out(value)
+            elif key == "dir":
+                self._dir(value)
+            elif key == "referer":
+                spec["referer"] = value
+            elif key == "user-agent":
+                spec["userAgent"] = value
+            elif key == "header":
+                spec["headers"] = [_header(line) for line in (value if isinstance(value, list) else [value])]
+            elif key == "checksum":
+                spec["checksums"] = [dict(checksum.parse(value), source="user")]
+            elif key == "pause":
+                spec["paused"] = value == "true"  # en pause dès l'ajout
+            elif key not in IGNORED:
+                raise RpcError(f"option non prise en charge : {key}")
+        return gid(self.engine.add(spec).id)
+
+    @staticmethod
+    def _out(name):
+        """Un nom de fichier, pas un chemin : « ../.bashrc » ne sort pas du dossier de téléchargement."""
+        if "/" in name or "\\" in name or name.strip() in ("", ".", ".."):
+            raise RpcError(f"option out : un nom de fichier, sans dossier ({name!r})")
+        return sanitize_filename(name)
+
+    def _dir(self, value):
+        """PDM range les fichiers dans son dossier (par catégorie) : `dir` n'est accepté que s'il le désigne."""
+        mine = os.path.realpath(self.config.download_dir())
+        if os.path.realpath(os.path.expanduser(value)) != mine:
+            raise RpcError(f"option dir : PDM range les fichiers dans {mine} (à changer dans ses réglages)")
+
+    # ─── Commandes ─────────────────────────────────────────────────────────
+
+    def remove(self, g):
+        self.engine.cancel(self._job(g).id)
+        return g
+
+    forceRemove = remove
+
+    def pause(self, g):
+        self.engine.pause(self._job(g).id)
+        return g
+
+    forcePause = pause
+
+    def pauseAll(self):
+        for job in self._jobs(("waiting", "active")):
+            try:
+                self.engine.pause(job.id)
+            except ValueError:
+                pass  # fini entre-temps
+        return "OK"
+
+    forcePauseAll = pauseAll
+
+    def unpause(self, g):
+        job = self._job(g)
+        if STATUS.get(job.status) != "paused":
+            raise RpcError(f"{g} n'est pas en pause")
+        self.engine.resume(job.id)
+        return g
+
+    def unpauseAll(self):
+        for job in self._jobs(("paused",)):
+            self.engine.resume(job.id)
+        return "OK"
+
+    def removeDownloadResult(self, g):
+        job = self._job(g)
+        if STATUS.get(job.status) not in STOPPED:
+            raise RpcError(f"{g} n'est pas terminé : remove d'abord")
+        self.engine.remove(job.id)  # le fichier, lui, reste
+        return "OK"
+
+    def purgeDownloadResult(self):
+        for job in self._jobs(STOPPED):
+            self.engine.remove(job.id)
+        return "OK"
+
+    def saveSession(self):
+        self.engine.save()
+        return "OK"
+
+    def shutdown(self):
+        if self.on_shutdown is None:
+            raise RpcError("arrêt impossible d'ici")
+        threading.Timer(0.2, self.on_shutdown).start()  # après la réponse
+        return "OK"
+
+    forceShutdown = shutdown
+
+    def changeGlobalOption(self, options):
+        names = {"max-concurrent-downloads": "maxParallel", "max-connection-per-server": "connections",
+                 "split": "connections", "max-overall-download-limit": "speedLimit", "dir": "downloadDir"}
+        changes = {}
+        for key, value in _options(options).items():
+            if key not in names:
+                raise RpcError(f"option non prise en charge : {key}")
+            if key == "dir":
+                changes["downloadDir"] = value
+            elif key == "max-overall-download-limit":
+                changes["speedLimit"] = _speed(value)
+            elif not str(value).isdigit():
+                raise RpcError(f"{key} : un nombre entier")
+            else:
+                changes[names[key]] = int(value)
+        self.config.update(changes)  # ValueError (hors limites) → RpcError
+        return "OK"
+
+    # ─── État ──────────────────────────────────────────────────────────────
+
+    def tellStatus(self, g, keys=None):
+        return self._status(self._job(g), keys)
+
+    def getUris(self, g):
+        return self._uris(self._job(g))
+
+    def getFiles(self, g):
+        return self._status(self._job(g), ["files"])["files"]
+
+    def getPeers(self, g):
+        self._job(g)
+        return []  # pas de BitTorrent
+
+    def tellActive(self, keys=None):
+        return [self._status(job, keys) for job in self._jobs(("active",))]
+
+    def tellWaiting(self, offset, num, keys=None):
+        return [self._status(job, keys) for job in _page(self._jobs(("waiting", "paused")), offset, num)]
+
+    def tellStopped(self, offset, num, keys=None):
+        return [self._status(job, keys) for job in _page(self._jobs(STOPPED), offset, num)]
+
+    def getGlobalStat(self):
+        with self.engine.lock:
+            jobs = list(self.engine.jobs.values())
+            states = [STATUS.get(job.status) for job in jobs]
+            speed = sum(job.speed or 0 for job in jobs)
+        stopped = sum(state in STOPPED for state in states)
+        return {"downloadSpeed": str(int(speed)), "uploadSpeed": "0", "numActive": str(states.count("active")),
+                "numWaiting": str(states.count("waiting") + states.count("paused")), "numStopped": str(stopped),
+                "numStoppedTotal": str(stopped)}
+
+    def getGlobalOption(self):
+        connections = str(self.config["connections"])
+        return {"dir": str(self.config.download_dir()), "max-concurrent-downloads": str(self.config["maxParallel"]),
+                "split": connections, "max-connection-per-server": connections,
+                "max-overall-download-limit": str(self.config["speedLimit"])}
+
+    def getOption(self, g):
+        job = self._job(g)
+        options = self.getGlobalOption()
+        options["dir"] = os.path.dirname(job.path) if job.path else options["dir"]
+        if job.filename:
+            options["out"] = job.filename
+        return options
+
+    def getVersion(self):
+        return {"version": API_VERSION, "enabledFeatures": ["HTTPS", "Message Digest", "Metalink"]}
+
+    def getSessionInfo(self):
+        return {"sessionId": self.session}
+
+    # ─── Outils ────────────────────────────────────────────────────────────
+
+    def _job(self, g):
+        if not isinstance(g, str):
+            raise RpcError("GID : une chaîne de 16 chiffres hexadécimaux", -32602)
+        with self.engine.lock:
+            for job in self.engine.jobs.values():
+                if gid(job.id) == g:
+                    return job
+        raise RpcError(f"GID {g} introuvable")
+
+    def _jobs(self, states):
+        with self.engine.lock:
+            return [job for job in self.engine.jobs.values() if STATUS.get(job.status) in states]
+
+    @staticmethod
+    def _uris(job):
+        return [{"uri": job.url, "status": "used"}] + [{"uri": url, "status": "waiting"} for url in job.mirrors or []]
+
+    def _status(self, job, keys=None):
+        if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)):
+            raise RpcError("keys : une liste de noms", -32602)
+        with self.engine.lock:
+            state = STATUS.get(job.status, "waiting")
+            total = str(job.size or 0)
+            done = total if state == "complete" and job.size else str(job.downloaded or 0)
+            status = {
+                "gid": gid(job.id), "status": state, "totalLength": total, "completedLength": done,
+                "uploadLength": "0", "downloadSpeed": str(int(job.speed or 0)), "uploadSpeed": "0",
+                "connections": str(job.connections or 0),
+                "dir": os.path.dirname(job.path) if job.path else str(self.config.download_dir()),
+                "files": [{"index": "1", "path": job.path or "", "length": total, "completedLength": done,
+                           "selected": "true", "uris": self._uris(job)}],
+            }
+            if state == "error":
+                status.update(errorCode="1", errorMessage=job.error or "")
+        return {key: value for key, value in status.items() if keys is None or key in keys}
+
+
+def _options(options):
+    """Les options d'un appel : des chaînes, et une liste pour « header »."""
+    if options is None:
+        return {}
+    if not isinstance(options, dict) or not all(
+            isinstance(v, str) or (k == "header" and isinstance(v, list) and all(isinstance(x, str) for x in v))
+            for k, v in options.items()):
+        raise RpcError("options : des chaînes de caractères", -32602)
+    return options
+
+
+def _header(line):
+    name, sep, value = line.partition(":")
+    if not sep:
+        raise RpcError(f"en-tête illisible : {line[:40]!r} (forme « Nom: valeur »)")
+    return [name.strip(), value.strip()]  # vérifiés ensuite comme ceux du navigateur (httpdl.clean_headers)
+
+
+def _error(call_id, code, message):
+    return {"jsonrpc": "2.0", "id": call_id, "error": {"code": code, "message": message}}
+
+
+# ─── HTTP ──────────────────────────────────────────────────────────────────
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "PDM"
+    sys_version = ""
+    timeout = TIMEOUT
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        if not self._allowed():
+            return
+        if self.path.split("?")[0] != "/jsonrpc":
+            return self._refuse(404, "adresse inconnue : c'est /jsonrpc")
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._refuse(411, "Content-Length manquant")
+        if not 0 <= length <= MAX_BODY:
+            return self._refuse(413, f"requête de plus de {MAX_BODY} octets")
+        try:
+            request = json.loads(self.rfile.read(length))
+        except ValueError:
+            return self._send(200, _error(None, -32700, "Parse error"))
+        reply = self.server.api.handle(request)
+        if reply is None:
+            return self._send(204)
+        self._send(200, reply)
+
+    def do_OPTIONS(self):
+        # Requête préalable d'un navigateur (CORS) : seulement pour une origine autorisée.
+        if not self._allowed():
+            return
+        if self.headers.get("Origin") is None:
+            return self._refuse(400, "requête préalable sans origine")
+        self._send(204, extra={"Access-Control-Allow-Methods": "POST", "Access-Control-Max-Age": "600",
+                               "Access-Control-Allow-Headers": "Content-Type"})
+
+    def do_GET(self):
+        self._refuse(405, "POST seulement")
+
+    do_PUT = do_DELETE = do_PATCH = do_HEAD = do_GET
+
+    def _allowed(self):
+        """Host et Origin acceptables ? Sinon le refus est déjà envoyé."""
+        port = self.server.server_port
+        if (self.headers.get("Host") or "").lower() not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            self._refuse(403, "hôte refusé : 127.0.0.1 ou localhost seulement")
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.rstrip("/").lower() not in self.server.origins():
+            log.warning("API JSON-RPC : origine refusée (%s)", origin[:100])
+            self._refuse(403, "origine refusée : à autoriser dans les réglages de PDM")
+            return False
+        return True
+
+    def _refuse(self, code, message):
+        self.close_connection = True
+        self._send(code, {"error": message}, cors=False)
+
+    def _send(self, code, payload=None, extra=None, cors=True):
+        body = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else b""
+        self.send_response(code)
+        if body:
+            self.send_header("Content-Type", "application/json-rpc")
+            self.send_header("Content-Length", str(len(body)))
+        origin = self.headers.get("Origin")
+        if cors and origin is not None:  # déjà vérifiée par _allowed
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
+        if code == 405:
+            self.send_header("Allow", "POST, OPTIONS")
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+
+class _Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, api, origins):
+        super().__init__(address, _Handler)
+        self.api = api
+        self.origins = origins
+        self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)  # trop de clients à la fois
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
+class RpcServer:
+    """L'API, démarrée, arrêtée ou déplacée selon les réglages (rpc, rpcPort, rpcOrigins)."""
+
+    def __init__(self, engine, config, shutdown=None):
+        self.config = config
+        self.api = Api(engine, config, shutdown)
+        self.server = None
+        self.error = None  # pourquoi elle n'écoute pas, alors qu'elle est activée
+        self.lock = threading.Lock()
+
+    @property
+    def running(self):
+        return self.server is not None
+
+    def apply(self):
+        with self.lock:
+            wanted, port = self.config["rpc"], self.config["rpcPort"]
+            if self.server is not None and (not wanted or self.server.server_port != port):
+                self._stop()
+            if wanted and self.server is None:
+                self._start(port)
+            elif not wanted:
+                self.error = None
+
+    def stop(self):
+        with self.lock:
+            if self.server is not None:
+                self._stop()
+
+    def renew(self):
+        """Un nouveau secret : l'ancien ne vaut plus rien, aussitôt."""
+        self.api.secret = new_secret()
+
+    def url(self):
+        return f"http://127.0.0.1:{self.server.server_port}/jsonrpc" if self.server else None
+
+    def info(self):
+        return {"enabled": self.config["rpc"], "listening": self.running, "url": self.url(), "error": self.error,
+                "origins": self.config["rpcOrigins"]}
+
+    def _start(self, port):
+        self.api.secret = read_secret() or new_secret()
+        try:
+            server = _Server(("127.0.0.1", port), self.api, self._origins)
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                self.error = f"le port {port} est déjà pris (par aria2 ?) : choisis-en un autre"
+            else:
+                self.error = f"port {port} impossible à ouvrir ({e.strerror})"
+            log.warning("API JSON-RPC : %s", self.error)
+            return
+        self.server, self.error = server, None
+        threading.Thread(target=server.serve_forever, daemon=True, name="rpc").start()
+        log.info("API JSON-RPC sur %s", self.url())
+
+    def _stop(self):
+        server, self.server = self.server, None
+        server.shutdown()
+        server.server_close()
+        log.info("API JSON-RPC arrêtée")
+
+    def _origins(self):
+        return set(self.config["rpcOrigins"])

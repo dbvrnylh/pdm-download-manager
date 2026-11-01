@@ -654,7 +654,8 @@ class HttpDownload:
         # Celle d'une sonde précédente ne vaut plus : le fichier a pu changer depuis.
         job.checksums = [c for c in job.checksums if c["source"] != "server"] + ([result.digest] if result.digest else [])
         if job.mirrors is not None:  # None : écartés après un fichier faux (voir _verify)
-            job.mirrors = result.mirrors
+            # Ceux donnés avec le lien, puis ceux que le serveur annonce cette fois-ci.
+            job.mirrors = metalink.merge(job.givenMirrors, result.mirrors, job.url, exclude=(job.url, job.finalUrl))
         job.metalink = result.described
 
     def _ask_start(self):

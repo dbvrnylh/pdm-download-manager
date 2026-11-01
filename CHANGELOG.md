@@ -6,6 +6,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- An aria2-compatible JSON-RPC API, so tools written for aria2 (AriaNg, scripts, extensions that send their links
+  to aria2) can drive PDM. `pdm-host rpc on` turns it on at `http://127.0.0.1:6800/jsonrpc` (aria2's port;
+  `--port` to move it) and prints its secret. It covers adding (`addUri`, several addresses being mirrors of the
+  same file), following (`tellStatus`, `tellActive`, `tellWaiting`, `tellStopped`, `getGlobalStat`…), pausing,
+  resuming and removing, the global settings, `system.multicall` and batches. It is off by default, and once on it
+  listens on 127.0.0.1 only. Every call needs a 256-bit secret kept in a file readable by the user only (`rpc.json`,
+  not the world-readable `config.json`), because unlike the daemon's socket a local port is open to every account
+  of the machine. The `Host` header must name 127.0.0.1 or localhost (against DNS rebinding), web pages are refused
+  unless their origin is allowed (`--allow`), and aria2's JSONP over GET is not offered. While the API is on, the
+  engine does not quit when idle. Not yet: WebSocket notifications, queue order and per-download options.
 - Downloads from several mirrors at once. A mirror server (Metalink/HTTP, RFC 6249: MirrorBrain, which serves
   LibreOffice and Kiwix) lists the file's other mirrors on its redirect; when an expected checksum will verify the
   whole file, the engine takes pieces from up to 4 of them besides the origin. A download taken over from the
