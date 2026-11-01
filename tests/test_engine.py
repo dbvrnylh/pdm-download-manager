@@ -923,9 +923,9 @@ class RpcTest(unittest.TestCase):
         self.config.update({"downloadDir": str(self.downloads), "notify": False, "rpc": True, "rpcPort": free_port()})
         tools = Tools(self.config)
         tools.ready.set()
-        self.engine = Engine(self.config, tools, lambda event: None)
-        self.engine.start()
+        self.engine = Engine(self.config, tools, lambda event: self.rpc.observe(event))  # comme le démon
         self.rpc = rpc.RpcServer(self.engine, self.config)
+        self.engine.start()
         self.rpc.apply()
         self.addCleanup(self.rpc.stop)
         self.token = "token:" + rpc.read_secret()
@@ -1141,6 +1141,142 @@ class RpcTest(unittest.TestCase):
     def test_job_ids_become_gids(self):
         self.assertEqual(rpc.gid("2089b05ecca3"), "00002089b05ecca3")
         self.assertRegex(rpc.gid("pas-hexadécimal"), r"^[0-9a-f]{16}$")
+
+    # ─── WebSocket ─────────────────────────────────────────────────────────
+
+    def socket(self, **kwargs):
+        client = fx.WsClient(self.rpc.server.server_port, **kwargs)
+        self.addCleanup(client.close)
+        return client
+
+    def no_socket_left(self):
+        """Attend que le serveur ait fini avec les connexions fermées (leur thread se termine juste après)."""
+        deadline = time.time() + 5
+        while self.rpc.server.sockets and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.rpc.server.sockets, set())
+
+    def test_websocket_answers_calls_and_announces_each_change(self):
+        ws, listener = self.socket(), self.socket()  # l'un appelle, l'autre ne fait qu'écouter (aria2p…)
+        self.assertEqual((ws.status, listener.status), (101, 101))
+        self.assertEqual(ws.call("aria2.getVersion", self.token)["result"]["version"], rpc.API_VERSION)
+        self.assertEqual(ws.call("aria2.getVersion", "token:faux")["error"]["message"], "Unauthorized")
+        self.assertIn("aria2.onDownloadComplete", ws.call("system.listNotifications")["result"])
+        g = ws.call("aria2.addUri", self.token, [self.base + "/range/rpc.bin"])["result"]
+        for client in (ws, listener):
+            self.assertEqual([client.notification() for _ in range(2)],
+                             [("aria2.onDownloadStart", g), ("aria2.onDownloadComplete", g)])
+        slow = ws.call("aria2.addUri", self.token, [self.base + "/crawl/rpc.bin"])["result"]
+        self.assertEqual(ws.notification(), ("aria2.onDownloadStart", slow))
+        ws.call("aria2.pause", self.token, slow)
+        self.assertEqual(ws.notification(), ("aria2.onDownloadPause", slow))
+        ws.call("aria2.unpause", self.token, slow)
+        self.assertEqual(ws.notification(), ("aria2.onDownloadStart", slow))
+        ws.call("aria2.remove", self.token, slow)
+        self.assertEqual(ws.notification(), ("aria2.onDownloadStop", slow))
+        bad = ws.call("aria2.addUri", self.token, [self.base + "/range/rpc.bin"],
+                      {"checksum": "sha-256=" + "0" * 64})["result"]
+        self.assertEqual([ws.notification() for _ in range(2)],
+                         [("aria2.onDownloadStart", bad), ("aria2.onDownloadError", bad)])
+
+    def test_notifications_follow_changes_of_state_not_progress(self):
+        sent = []
+        watcher = rpc.RpcServer(self.engine, self.config)
+        watcher.server = SimpleNamespace(broadcast=lambda frame: sent.append(json.loads(frame[2:])))
+        for job_id, status in (("a", "queued"), ("a", "downloading"), ("a", "downloading"),  # des progrès
+                               ("a", "queued"), ("a", "downloading"),  # fin de la plage horaire, puis reprise
+                               ("a", "completed"), ("b", "paused"), ("b", "queued"), ("b", "downloading"),
+                               ("b", "paused"), ("c", "failed"), ("d", "queued")):
+            watcher.observe({"type": "job", "job": {"id": job_id, "status": status}})
+        for job_id in ("a", "b", "d"):
+            watcher.observe({"type": "removed", "id": job_id})
+        watcher.observe({"type": "config"})
+        self.assertEqual([(m["method"].removeprefix("aria2.on"), m["params"][0]["gid"]) for m in sent], [
+            ("DownloadStart", rpc.gid("a")), ("DownloadStart", rpc.gid("a")), ("DownloadComplete", rpc.gid("a")),
+            ("DownloadStart", rpc.gid("b")), ("DownloadPause", rpc.gid("b")), ("DownloadError", rpc.gid("c")),
+            ("DownloadStop", rpc.gid("b")), ("DownloadStop", rpc.gid("d")),  # retirés avant la fin : arrêtés
+        ])
+
+    def test_websocket_refuses_web_pages_and_bad_handshakes(self):
+        port = self.rpc.server.server_port
+        for kwargs, code in (
+            ({"origin": "https://attaquant.example"}, 403),  # pas de CORS pour un WebSocket : la seule barrière
+            ({"host": f"pdm.attaquant.example:{port}"}, 403),
+            ({"headers": {"Sec-WebSocket-Version": "8"}}, 400),
+            ({"headers": {"Sec-WebSocket-Key": "Y291cnQ="}}, 400),
+            ({"headers": {"Connection": "keep-alive"}}, 400),
+        ):
+            with self.subTest(**kwargs):
+                self.assertEqual(self.socket(**kwargs).status, code)
+        self.config.update({"rpcOrigins": ["https://ariang.example"]})
+        page = self.socket(origin="https://AriaNg.example")
+        self.assertEqual(page.status, 101)
+        self.assertEqual(page.call("aria2.getVersion", self.token)["result"]["version"], rpc.API_VERSION)
+        script = self.socket()
+        self.config.update({"rpcOrigins": []})
+        self.rpc.apply()  # ce que fait le démon quand ces réglages changent
+        self.assertEqual(page.closed_with(), 1008, "une page retirée des réglages perd sa connexion")
+        self.assertEqual(script.call("aria2.getVersion", self.token)["result"]["version"], rpc.API_VERSION)
+        script.close()
+        self.no_socket_left()
+        with unittest.mock.patch.object(rpc, "MAX_SOCKETS", 2):
+            self.assertEqual([self.socket().status for _ in range(3)], [101, 101, 503])
+
+    def test_websocket_frames_are_checked(self):
+        ws = self.socket()
+        # Un message en deux morceaux, un ping au milieu : réassemblé, et le ping a sa réponse.
+        call = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "aria2.getVersion", "params": [self.token]})
+        ws.send(call[:10], fin=False)
+        ws.send(b"bonjour", opcode=0x9)
+        self.assertEqual(ws.receive(pong=False), (0xA, b"bonjour"))
+        ws.send(call[10:], opcode=0x0)
+        self.assertEqual(ws.message()["result"]["version"], rpc.API_VERSION)
+        ws.send("{pas du json")
+        self.assertEqual(ws.message()["error"]["code"], -32700)
+        ws.send(b"\x03\xe8", opcode=0x8)
+        self.assertEqual(ws.closed_with(), 1000, "sa fermeture est renvoyée, puis la connexion coupée")
+        for frame, code in (
+            ({"payload": "{}", "mask": False}, 1002),  # un client masque toujours
+            ({"payload": b"\x00", "opcode": 0x2}, 1003),
+            ({"payload": b"\xff\xfe"}, 1007),
+            ({"payload": b"", "length": rpc.MAX_BODY + 1}, 1009),  # refusé sur l'annonce, sans rien lire
+            ({"payload": b"", "opcode": 0x0}, 1002),  # une suite sans début
+            ({"payload": b"x", "opcode": 0x9, "fin": False}, 1002),  # contrôle en morceaux
+            ({"payload": b"x", "opcode": 0x3}, 1002),
+        ):
+            with self.subTest(code=code, **{k: v for k, v in frame.items() if k != "payload"}):
+                ws = self.socket()
+                ws.send(**frame)
+                self.assertEqual(ws.closed_with(), code)
+
+    def test_a_silent_client_is_cut_and_stopping_closes_every_socket(self):
+        with unittest.mock.patch.object(rpc, "PING", 0.2):
+            silent, alive = self.socket(), self.socket()
+            deadline = time.time() + 1.5  # plus de trois pings
+            while time.time() < deadline:
+                self.assertIn("result", alive.call("aria2.getVersion", self.token))  # lit, donc répond aux pings
+                time.sleep(0.05)
+            frames, deadline = [], time.time() + 5
+            while time.time() < deadline and (frame := silent.receive(pong=False)) is not None:
+                frames.append(frame[0])
+            self.assertIsNone(frame, "toujours ouverte")
+            self.assertEqual(set(frames), {0x9})  # des pings sans réponse, puis coupé
+            self.assertIn("result", alive.call("aria2.getVersion", self.token))
+        self.rpc.stop()
+        self.assertEqual(alive.closed_with(), 1001)
+
+    def test_a_client_that_stops_reading_is_cut_rather_than_waited_for(self):
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        with unittest.mock.patch.object(rpc, "OUTBOX", 2):
+            ws = rpc._WebSocket(ours, None)  # thread d'écriture pas démarré : rien ne part
+        started = time.monotonic()
+        for _ in range(3):
+            ws.push(b"notification")
+        self.assertLess(time.monotonic() - started, 1, "le moteur n'attend jamais")
+        theirs.settimeout(5)
+        self.assertEqual(theirs.recv(10), b"", "la file a débordé : coupé")
 
 
 class ConfigTest(unittest.TestCase):

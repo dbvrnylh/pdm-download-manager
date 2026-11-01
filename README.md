@@ -173,15 +173,16 @@ Good to know:
 ### The aria2-compatible API
 
 Tools written for [aria2](https://aria2.github.io/) can drive PDM: [AriaNg](https://github.com/mayswind/AriaNg),
-scripts, extensions that send it their links. PDM speaks the core of aria2's JSON-RPC API, over HTTP. It is off
-until you ask:
+scripts, extensions that send it their links. PDM speaks the core of aria2's JSON-RPC API, over HTTP and
+WebSocket. It is off until you ask:
 
 ```bash
 ~/.local/share/pdm/app/pdm-host rpc on
 ```
 
 It prints the address (`http://127.0.0.1:6800/jsonrpc`, aria2's own port, so tools find it as is) and the secret,
-to give the tool as aria2's `--rpc-secret`. Then, for example:
+to give the tool as aria2's `--rpc-secret`. In AriaNg: host `127.0.0.1`, port `6800`, protocol WebSocket, path
+`/jsonrpc`, and the secret. From a script, for example:
 
 ```bash
 curl -s http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":1,"method":"aria2.addUri",
@@ -194,13 +195,15 @@ curl -s http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":1,"method":"aria
 - A web page can only call it if you allow its origin: `pdm-host rpc on --allow https://ariang.example`
   (several `--allow` for several, `--allow none` for none again).
 - While it is on, the engine stays running even with nothing to do, like aria2: the tools expect to find it.
+- Over WebSocket (`ws://127.0.0.1:6800/jsonrpc`), the same calls, plus aria2's notifications: `onDownloadStart`,
+  `onDownloadPause`, `onDownloadStop`, `onDownloadComplete` and `onDownloadError`, sent the moment a download
+  changes state, so a tool no longer asks for the state of every download each second.
 - What works: adding (`addUri`, with `out`, `header`, `referer`, `user-agent`, `checksum`, `pause`; several
   addresses are mirrors of the same file, used when a checksum can verify it), following (`tellStatus`,
   `tellActive`, `tellWaiting`, `tellStopped`, `getGlobalStat`, `getFiles`, `getUris`), pausing, resuming and
   removing, one by one or all at once, the global settings (`changeGlobalOption`: simultaneous downloads,
   connections, speed limit, folder), `system.multicall` and batches.
-- Not yet: live notifications over WebSocket (tools poll instead), the queue order (`changePosition`) and
-  per-download options (`changeOption`). Files always go to PDM's folder, sorted by category: `dir` is only
+- Not yet: the queue order (`changePosition`) and per-download options (`changeOption`). Files always go to PDM's folder, sorted by category: `dir` is only
   accepted when it names that folder. Options about how to download (`split`, `max-connection-per-server`…) are
   accepted and left to PDM.
 
@@ -386,8 +389,11 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
   call needs its 256-bit secret, kept in a file readable by your user only (`rpc.json`, `0600`). Unlike the
   daemon's socket, a local port can be reached by every account and program on the machine. The `Host` header
   must name `127.0.0.1` or `localhost`, against DNS rebinding (a page pointing its own domain at your machine).
-  Web pages are refused unless you allow their origin. POST only: aria2's JSONP over GET, which any site can
-  read, is not offered.
+  Web pages are refused unless you allow their origin, and for WebSocket that check is the only barrier: browsers
+  apply no CORS to it, so without it any site could connect. POST only: aria2's JSONP over GET, which any site can
+  read, is not offered. Like aria2's, the notifications go to every connected client, secret or not: they carry
+  only a download's GID, which allows nothing without the secret. A WebSocket client that stops reading or
+  answering pings is cut, never waited for.
 - **Private browsing** downloads are never taken over.
 - **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
   lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.
@@ -407,7 +413,7 @@ engine/
                            hosts.py (connections per site) · limiter.py (speed limit)
                            checksum.py (expected and computed checksums) · metalink.py (mirrors)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
-                           rpc.py (aria2-compatible JSON-RPC API)
+                           rpc.py (aria2-compatible JSON-RPC API, HTTP and WebSocket)
 tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh
 ```

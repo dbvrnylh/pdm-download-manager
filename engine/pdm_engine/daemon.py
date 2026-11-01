@@ -63,13 +63,18 @@ class Daemon:
     def __init__(self):
         self.config = Config()
         self.tools = Tools(self.config)
-        self.engine = Engine(self.config, self.tools, self.broadcast)
+        self.engine = Engine(self.config, self.tools, self.emit)
         # aria2.shutdown : l'arrêt habituel, sauvegarde comprise (voir run).
         self.rpc = RpcServer(self.engine, self.config, shutdown=lambda: os.kill(os.getpid(), signal.SIGTERM))
         self.clients = set()
         self.clients_lock = threading.Lock()
         self.clock = time.monotonic  # remplacée dans les tests
         self.idle_since = self.clock()  # None : occupé (client connecté ou téléchargement)
+
+    def emit(self, event):
+        """Un événement du moteur : aux clients du démon, et en notification d'aria2 aux clients WebSocket."""
+        self.broadcast(event)
+        self.rpc.observe(event)
 
     def broadcast(self, message):
         with self.clients_lock:
@@ -209,7 +214,7 @@ class Daemon:
                 config = self.config.update(changes) if changes else self.config.snapshot()
                 if "ytdlpPath" in changes:
                     self.tools.refresh()
-                if {"rpc", "rpcPort"} & set(changes):
+                if {"rpc", "rpcPort", "rpcOrigins"} & set(changes):
                     self.rpc.apply()
                 reply(config=config, tools=self.tools.info())
                 if changes:

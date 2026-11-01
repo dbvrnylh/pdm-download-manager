@@ -2,7 +2,10 @@
 
 AriaNg, les scripts écrits pour aria2, les extensions qui lui envoient leurs
 liens : ils parlent tous la même API (« RPC interface » du manuel d'aria2).
-PDM en parle le cœur, en HTTP : POST /jsonrpc.
+PDM en parle le cœur, en HTTP (POST /jsonrpc) et en WebSocket (ws://…/jsonrpc).
+Le WebSocket apporte en plus les notifications : un client apprend aussitôt
+qu'un téléchargement démarre, s'arrête ou finit, sans redemander chaque seconde
+l'état de tous.
 
 Désactivée par défaut. Une fois activée (pdm-host rpc on) :
 - elle n'écoute que 127.0.0.1, jamais le réseau ;
@@ -12,11 +15,14 @@ Désactivée par défaut. Une fois activée (pdm-host rpc on) :
 - l'en-tête Host doit nommer 127.0.0.1 ou localhost : une page qui fait
   pointer son propre domaine sur 127.0.0.1 (« DNS rebinding ») est refusée ;
 - une requête venue d'une page web (en-tête Origin) n'est acceptée que des
-  origines autorisées dans les réglages (rpcOrigins), aucune par défaut ;
+  origines autorisées dans les réglages (rpcOrigins), aucune par défaut. Pour
+  le WebSocket, c'est la seule barrière : le navigateur ne lui applique pas
+  CORS, et laisserait n'importe quelle page s'y connecter ;
 - POST seulement : aria2 accepte aussi GET avec JSONP, qu'une page de
   n'importe quel site peut lire.
 """
 
+import base64
 import errno
 import hashlib
 import hmac
@@ -25,9 +31,12 @@ import inspect
 import json
 import logging
 import os
+import queue
 import re
 import secrets
+import socket
 import threading
+import time
 import uuid
 
 from . import checksum, paths
@@ -42,11 +51,17 @@ MAX_CALLS = 100  # appels d'un lot JSON-RPC, ou d'un system.multicall
 MAX_CLIENTS = 16  # connexions servies à la fois : au-delà, refusées
 TIMEOUT = 10  # s pour envoyer sa requête
 MAX_LIST = 1000  # téléchargements par réponse de tellWaiting et tellStopped
+MAX_SOCKETS = 8  # connexions WebSocket ouvertes à la fois : les autres places restent au HTTP
+PING = 30  # s entre deux pings WebSocket ; sans rien recevoir pendant deux fois plus, la connexion est coupée
+OUTBOX = 256  # trames en attente vers un client WebSocket : au-delà, il ne lit plus, et il est coupé
 
 # États de PDM → ceux d'aria2.
 STATUS = {"queued": "waiting", "downloading": "active", "paused": "paused", "completed": "complete",
           "failed": "error", "canceled": "removed"}
 STOPPED = ("complete", "error", "removed")
+# L'état où entre un téléchargement → la notification d'aria2 qui l'annonce.
+EVENTS = {"active": "aria2.onDownloadStart", "paused": "aria2.onDownloadPause", "removed": "aria2.onDownloadStop",
+          "complete": "aria2.onDownloadComplete", "error": "aria2.onDownloadError"}
 # Options d'aria2 qui règlent la façon de télécharger, que PDM décide seul (connexions,
 # reprise, renommage, vérification) : acceptées et ignorées, plutôt que de refuser le lien.
 IGNORED = {"split", "max-connection-per-server", "min-split-size", "continue", "max-tries", "retry-wait",
@@ -169,7 +184,7 @@ class Api:
             return [f"aria2.{name}" for name in METHODS] + ["system.listMethods", "system.listNotifications",
                                                             "system.multicall"]
         if method == "system.listNotifications":
-            return []  # pas encore de WebSocket
+            return list(EVENTS.values())
         if method == "system.multicall":
             return self._multicall(params)
         name = method[len("aria2."):] if method.startswith("aria2.") else None
@@ -479,9 +494,66 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                                "Access-Control-Allow-Headers": "Content-Type"})
 
     def do_GET(self):
+        if (self.headers.get("Upgrade") or "").lower() != "websocket":
+            return self._refuse(405, "POST seulement (ou WebSocket)")
+        if not self._allowed():  # avant d'ouvrir : une page refusée ne se connecte pas
+            return
+        if self.path.split("?")[0] != "/jsonrpc":
+            return self._refuse(404, "adresse inconnue : c'est /jsonrpc")
+        key = self.headers.get("Sec-WebSocket-Key") or ""
+        if ("upgrade" not in (self.headers.get("Connection") or "").lower()
+                or self.headers.get("Sec-WebSocket-Version") != "13" or not _ws_key(key)):
+            return self._refuse(400, "poignée de main WebSocket invalide")
+        origin = self.headers.get("Origin")
+        ws = _WebSocket(self.connection, origin.rstrip("/").lower() if origin is not None else None)
+        if not self.server.open_socket(ws):
+            return self._refuse(503, f"déjà {MAX_SOCKETS} connexions WebSocket ouvertes")
+        try:
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+            self.close_connection = True
+            ws.start(self._buffered())
+            self._serve_socket(ws)
+        finally:
+            self.server.forget(ws)
+            ws.finish()
+
+    def do_PUT(self):
         self._refuse(405, "POST seulement")
 
-    do_PUT = do_DELETE = do_PATCH = do_HEAD = do_GET
+    do_DELETE = do_PATCH = do_HEAD = do_PUT
+
+    def _buffered(self):
+        """Ce qui suit la poignée de main et que la lecture des en-têtes a déjà mis en tampon."""
+        self.connection.settimeout(0)
+        try:
+            return self.rfile.read1(MAX_BODY) or b""  # sans attendre : seulement ce qui est déjà là
+        except OSError:
+            return b""
+        finally:
+            self.connection.settimeout(PING)  # pour écrire ; la lecture, elle, attend le client sans fin
+
+    def _serve_socket(self, ws):
+        """Les requêtes d'une connexion WebSocket, chacune avec sa réponse, jusqu'à la fermeture."""
+        try:
+            while True:
+                text = ws.receive()
+                try:
+                    request = json.loads(text)
+                except ValueError:
+                    reply = _error(None, -32700, "Parse error")
+                else:
+                    reply = self.server.api.handle(request)
+                if reply is not None:
+                    ws.send(reply)
+        except _Closing as e:
+            ws.close(e.code, str(e))
+        except (EOFError, OSError):
+            pass
 
     def _allowed(self):
         """Host et Origin acceptables ? Sinon le refus est déjà envoyé."""
@@ -513,7 +585,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         for name, value in (extra or {}).items():
             self.send_header(name, value)
         if code == 405:
-            self.send_header("Allow", "POST, OPTIONS")
+            self.send_header("Allow", "GET, POST, OPTIONS")  # GET : pour ouvrir un WebSocket
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -527,6 +599,9 @@ class _Server(http.server.ThreadingHTTPServer):
         self.api = api
         self.origins = origins
         self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        self.sockets = set()  # connexions WebSocket ouvertes
+        self.sockets_lock = threading.Lock()
+        self.stopping = False
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -544,6 +619,214 @@ class _Server(http.server.ThreadingHTTPServer):
         finally:
             self.slots.release()
 
+    def open_socket(self, ws):
+        """Une place pour cette connexion WebSocket ? (elle garde aussi celle de sa requête HTTP)"""
+        with self.sockets_lock:
+            if self.stopping or len(self.sockets) >= MAX_SOCKETS:
+                return False
+            self.sockets.add(ws)
+            return True
+
+    def forget(self, ws):
+        with self.sockets_lock:
+            self.sockets.discard(ws)
+
+    def broadcast(self, frame):
+        with self.sockets_lock:
+            sockets = list(self.sockets)
+        for ws in sockets:
+            ws.push(frame)
+
+    def close_sockets(self, code, reason, keep=lambda ws: False):
+        with self.sockets_lock:
+            sockets = [ws for ws in self.sockets if not keep(ws)]
+        for ws in sockets:
+            ws.close(code, reason)
+
+    def stop_sockets(self):
+        """L'API s'arrête : ses connexions WebSocket se ferment, et aucune autre ne s'ouvre entre-temps."""
+        with self.sockets_lock:
+            self.stopping = True
+        self.close_sockets(1001, "API arrêtée")
+
+
+# ─── WebSocket (RFC 6455) ──────────────────────────────────────────────────
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # fixé par la RFC, pour la réponse à la poignée de main
+CONTINUATION, TEXT, BINARY, CLOSE, PING_FRAME, PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
+
+
+def _ws_key(key):
+    """La clé d'une poignée de main : 16 octets en base64."""
+    try:
+        return len(base64.b64decode(key, validate=True)) == 16
+    except ValueError:
+        return False
+
+
+def _frame(opcode, payload=b""):
+    """Une trame du serveur : entière, et jamais masquée (seul le client masque les siennes)."""
+    n = len(payload)
+    if n < 126:
+        head = bytes((0x80 | opcode, n))
+    elif n < 1 << 16:
+        head = bytes((0x80 | opcode, 126)) + n.to_bytes(2, "big")
+    else:
+        head = bytes((0x80 | opcode, 127)) + n.to_bytes(8, "big")
+    return head + payload
+
+
+def _unmask(data, key):
+    """Le contenu d'une trame du client, démasqué : un XOR avec la clé répétée, sur tout le bloc d'un coup."""
+    n = len(data)
+    mask = (key * (n // 4 + 1))[:n]
+    return (int.from_bytes(data, "big") ^ int.from_bytes(mask, "big")).to_bytes(n, "big")
+
+
+class _Closing(Exception):
+    """Fermer la connexion WebSocket avec ce code (RFC 6455, 7.4.1) et cette raison."""
+
+    def __init__(self, code, reason=""):
+        super().__init__(reason)
+        self.code = code
+
+
+class _WebSocket:
+    """Une connexion WebSocket : lue par le thread de sa requête, écrite par le sien.
+
+    Écrire depuis son propre thread, c'est ne jamais faire attendre le moteur sur un
+    client lent : une notification est posée dans la file d'envoi, et un client qui ne
+    lit plus est coupé quand elle déborde. Ce thread envoie aussi les pings, et coupe
+    un client parti sans fermer (machine en veille, câble débranché).
+    """
+
+    def __init__(self, sock, origin):
+        self.sock = sock
+        self.origin = origin  # None : pas un navigateur
+        self.buffer = bytearray()
+        self.outbox = queue.Queue(OUTBOX)
+        self.seen = time.monotonic()  # dernière trame reçue
+        self.writer = threading.Thread(target=self._write, daemon=True, name="rpc-ws")
+
+    def start(self, pending):
+        """Après la poignée de main ; `pending` : ce que le client a déjà envoyé à la suite."""
+        self.buffer += pending
+        self.seen = time.monotonic()
+        self.writer.start()  # ce qui attendait dans la file part maintenant, après la réponse 101
+
+    # ─── Lecture ───────────────────────────────────────────────────────────
+
+    def receive(self):
+        """Le prochain message, en texte. Lève _Closing, ou EOFError : connexion coupée."""
+        message, kind = bytearray(), None
+        while True:
+            head = self._read(2)
+            fin, opcode, length = head[0] & 0x80, head[0] & 0x0F, head[1] & 0x7F
+            if head[0] & 0x70:
+                raise _Closing(1002, "aucune extension négociée")
+            if not head[1] & 0x80:
+                raise _Closing(1002, "trame du client non masquée")
+            if length == 126:
+                length = int.from_bytes(self._read(2), "big")
+            elif length == 127:
+                length = int.from_bytes(self._read(8), "big")
+            if opcode >= CLOSE and (not fin or length > 125):
+                raise _Closing(1002, "trame de contrôle invalide")
+            if opcode < CLOSE and len(message) + length > MAX_BODY:  # avant de lire : rien n'est alloué
+                raise _Closing(1009, f"message de plus de {MAX_BODY} octets")
+            key = self._read(4)
+            payload = _unmask(self._read(length), key)
+            self.seen = time.monotonic()
+            if opcode == CLOSE:
+                raise _Closing(1000)
+            if opcode == PING_FRAME:
+                self.push(_frame(PONG, payload))
+                continue
+            if opcode == PONG:
+                continue
+            if opcode not in (CONTINUATION, TEXT, BINARY) or (opcode == CONTINUATION) != (kind is not None):
+                raise _Closing(1002, "trame inattendue")
+            kind = kind or opcode
+            message += payload
+            if fin:
+                if kind == BINARY:
+                    raise _Closing(1003, "du texte (JSON) seulement")
+                try:
+                    return message.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise _Closing(1007, "texte invalide (UTF-8)") from None
+
+    def _read(self, n):
+        while len(self.buffer) < n:
+            try:
+                chunk = self.sock.recv(1 << 16)
+            except socket.timeout:
+                continue  # le délai sert à l'écriture ; un client muet, c'est le thread d'écriture qui le coupe
+            if not chunk:
+                raise EOFError
+            self.buffer += chunk
+        data = bytes(self.buffer[:n])
+        del self.buffer[:n]
+        return data
+
+    # ─── Écriture ──────────────────────────────────────────────────────────
+
+    def send(self, message):
+        self.push(_frame(TEXT, json.dumps(message, ensure_ascii=False).encode()))
+
+    def push(self, frame):
+        """Une trame à envoyer. Un client qui en laisse s'accumuler OUTBOX ne lit plus : il est coupé."""
+        try:
+            self.outbox.put_nowait(frame)
+        except queue.Full:
+            log.warning("API JSON-RPC : client WebSocket coupé, il ne lit plus")
+            self.kill()
+
+    def close(self, code, reason=""):
+        self.push(_frame(CLOSE, code.to_bytes(2, "big") + reason.encode()))
+
+    def kill(self):
+        """Coupe la connexion : les deux threads s'arrêtent sur l'erreur qui suit."""
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def finish(self):
+        """Attend la fin de l'écriture : le serveur ferme ensuite la connexion, et son descripteur."""
+        if self.writer.ident is None:
+            return  # jamais démarrée
+        try:
+            self.outbox.put_nowait(None)
+        except queue.Full:
+            self.kill()
+        self.writer.join()
+
+    def _write(self):
+        last_ping = time.monotonic()
+        while True:
+            wait = last_ping + PING - time.monotonic()
+            if wait > 0:
+                try:
+                    frame = self.outbox.get(timeout=wait)
+                except queue.Empty:
+                    continue
+            elif time.monotonic() - self.seen > 2 * PING:
+                self.kill()  # plus rien reçu, pas même la réponse aux pings : parti sans fermer
+                return
+            else:
+                frame, last_ping = _frame(PING_FRAME), time.monotonic()
+            if frame is None:
+                return
+            try:
+                self.sock.sendall(frame)  # PING s au plus (délai du socket), sinon : coupé
+            except OSError:
+                self.kill()
+                return
+            if frame[0] == 0x80 | CLOSE:
+                self.kill()  # après sa trame de fermeture, c'est le serveur qui coupe (RFC 6455, 7.1.1)
+                return
+
 
 class RpcServer:
     """L'API, démarrée, arrêtée ou déplacée selon les réglages (rpc, rpcPort, rpcOrigins)."""
@@ -554,6 +837,11 @@ class RpcServer:
         self.server = None
         self.error = None  # pourquoi elle n'écoute pas, alors qu'elle est activée
         self.lock = threading.Lock()
+        # L'état d'aria2 de chaque téléchargement, tel que vu au dernier événement : une
+        # notification n'est envoyée que quand il change (les progrès, eux, arrivent sans cesse).
+        with engine.lock:
+            self.states = {job.id: STATUS.get(job.status) for job in engine.jobs.values()}
+        self.states_lock = threading.Lock()
 
     @property
     def running(self):
@@ -568,6 +856,10 @@ class RpcServer:
                 self._start(port)
             elif not wanted:
                 self.error = None
+            if self.server is not None:  # une page retirée des origines autorisées perd aussi son WebSocket
+                allowed = self._origins()
+                self.server.close_sockets(1008, "origine retirée des réglages de PDM",
+                                          keep=lambda ws: ws.origin is None or ws.origin in allowed)
 
     def stop(self):
         with self.lock:
@@ -584,6 +876,32 @@ class RpcServer:
     def info(self):
         return {"enabled": self.config["rpc"], "listening": self.running, "url": self.url(), "error": self.error,
                 "origins": self.config["rpcOrigins"]}
+
+    def observe(self, event):
+        """Un événement du moteur → la notification d'aria2 qui l'annonce, aux clients WebSocket.
+
+        Comme chez aria2, elle va à tous les clients connectés, secret donné ou non : elle
+        ne porte que le GID, qui ne permet rien sans le secret. Les scripts qui ne font
+        qu'écouter (aria2p…) n'appellent rien d'autre.
+        """
+        if event.get("type") == "job":
+            job_id, state = event["job"]["id"], STATUS.get(event["job"]["status"])
+        elif event.get("type") == "removed":
+            job_id, state = event["id"], None
+        else:
+            return
+        with self.states_lock:
+            before = self.states.pop(job_id, None)
+            if state is not None:
+                self.states[job_id] = state
+        if state is None:  # retiré de la liste : arrêté, s'il n'était pas déjà fini
+            state = "removed" if before is not None and before not in STOPPED else None
+        if state == before or state not in EVENTS or (before is None and state == "paused"):  # ajouté en pause
+            return
+        server = self.server
+        if server is not None:
+            notification = {"jsonrpc": "2.0", "method": EVENTS[state], "params": [{"gid": gid(job_id)}]}
+            server.broadcast(_frame(TEXT, json.dumps(notification).encode()))
 
     def _start(self, port):
         self.api.secret = read_secret() or new_secret()
@@ -602,6 +920,7 @@ class RpcServer:
 
     def _stop(self):
         server, self.server = self.server, None
+        server.stop_sockets()
         server.shutdown()
         server.server_close()
         log.info("API JSON-RPC arrêtée")

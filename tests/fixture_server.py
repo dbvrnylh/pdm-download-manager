@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import ssl
 import subprocess
 import threading
@@ -370,6 +371,119 @@ def start(port=0, static_dir=None, tls=None):
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+class WsClient:
+    """Un client WebSocket minimal (RFC 6455), écrit à part de celui du moteur : le côté AriaNg.
+
+    `status` : la réponse à la poignée de main (101 : ouverte). Les notifications reçues
+    en attendant une réponse sont gardées dans `notifications`.
+    """
+
+    def __init__(self, port, origin=None, host=None, headers=None):
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        self.buffer = b""
+        self.notifications = []
+        self.next_id = 0
+        key = base64.b64encode(os.urandom(16)).decode()
+        lines = {"Host": host or f"127.0.0.1:{port}", "Upgrade": "websocket", "Connection": "keep-alive, Upgrade",
+                 "Sec-WebSocket-Key": key, "Sec-WebSocket-Version": "13", **({"Origin": origin} if origin else {}),
+                 **(headers or {})}
+        request = "GET /jsonrpc HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in lines.items() if v is not None)
+        self.sock.sendall((request + "\r\n").encode())
+        while b"\r\n\r\n" not in self.buffer:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            self.buffer += chunk
+        head, _, self.buffer = self.buffer.partition(b"\r\n\r\n")
+        self.status = int(head.split()[1])
+        if self.status == 101:
+            accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+            assert b"Sec-WebSocket-Accept: " + accept in head, head
+
+    def send(self, payload, opcode=0x1, fin=True, mask=True, length=None):
+        """Une trame ; `length` : la longueur annoncée, si elle doit mentir."""
+        data = payload.encode() if isinstance(payload, str) else payload
+        n = len(data) if length is None else length
+        head = bytes([(0x80 if fin else 0) | opcode])
+        flag = 0x80 if mask else 0
+        if n < 126:
+            head += bytes([flag | n])
+        elif n < 1 << 16:
+            head += bytes([flag | 126]) + n.to_bytes(2, "big")
+        else:
+            head += bytes([flag | 127]) + n.to_bytes(8, "big")
+        if mask:
+            key = os.urandom(4)
+            data = key + bytes(b ^ key[i % 4] for i, b in enumerate(data))
+        self.sock.sendall(head + data)
+
+    def receive(self, pong=True):
+        """(opcode, contenu) de la prochaine trame ; None : connexion fermée. Répond aux pings."""
+        while True:
+            head = self._read(2)
+            if head is None:
+                return None
+            n = head[1] & 0x7F
+            if n == 126:
+                n = int.from_bytes(self._read(2), "big")
+            elif n == 127:
+                n = int.from_bytes(self._read(8), "big")
+            assert not head[1] & 0x80, "le serveur ne masque pas"
+            assert head[0] & 0x80, "le serveur n'envoie pas de fragments"
+            opcode, payload = head[0] & 0x0F, self._read(n) if n else b""
+            if opcode == 0x9 and pong:
+                self.send(payload, opcode=0xA)
+                continue
+            return opcode, payload
+
+    def call(self, method, *params, call_id=None):
+        """Un appel JSON-RPC → la réponse entière (result ou error)."""
+        self.next_id += 1
+        call_id = self.next_id if call_id is None else call_id
+        self.send(json.dumps({"jsonrpc": "2.0", "id": call_id, "method": method, "params": list(params)}))
+        while True:
+            message = self.message()
+            if message.get("id") == call_id and "method" not in message:
+                return message
+            self.notifications.append(message)
+
+    def message(self):
+        frame = self.receive()
+        assert frame is not None and frame[0] == 0x1, frame
+        return json.loads(frame[1])
+
+    def notification(self):
+        """La prochaine notification : (méthode, GID)."""
+        message = self.notifications.pop(0) if self.notifications else self.message()
+        return message["method"], message["params"][0]["gid"]
+
+    def closed_with(self):
+        """Le code de la trame de fermeture qui arrive (en sautant le reste), puis la fin de la connexion."""
+        while True:
+            frame = self.receive()
+            if frame is None:
+                return None
+            if frame[0] == 0x8:
+                code = int.from_bytes(frame[1][:2], "big")
+                assert self.receive() is None, "le serveur coupe après sa trame de fermeture"
+                return code
+
+    def close(self):
+        self.sock.close()
+
+    def _read(self, n):
+        while len(self.buffer) < n:
+            try:
+                chunk = self.sock.recv(65536)
+            except ConnectionResetError:
+                chunk = b""
+            if not chunk:
+                return None
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:n], self.buffer[n:]
+        return data
 
 
 if __name__ == "__main__":

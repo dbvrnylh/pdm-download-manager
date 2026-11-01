@@ -15,7 +15,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   not the world-readable `config.json`), because unlike the daemon's socket a local port is open to every account
   of the machine. The `Host` header must name 127.0.0.1 or localhost (against DNS rebinding), web pages are refused
   unless their origin is allowed (`--allow`), and aria2's JSONP over GET is not offered. While the API is on, the
-  engine does not quit when idle. Not yet: WebSocket notifications, queue order and per-download options.
+  engine does not quit when idle. Not yet: queue order and per-download options.
+- The aria2-compatible API over WebSocket too (`ws://127.0.0.1:6800/jsonrpc`), with aria2's notifications: a
+  download that starts, pauses, stops, completes or fails is announced at once (`aria2.onDownloadStart`…), so
+  AriaNg no longer has to ask for every download's state each second. A page can only connect if its origin is
+  allowed, since browsers apply no CORS to WebSocket, and a page removed from the allowed ones loses its
+  connection. Each connection writes from its own thread, so a client that stops reading is cut instead of
+  holding up the engine, and one that no longer answers pings is cut too. At most 8 connections at once.
 - Downloads from several mirrors at once. A mirror server (Metalink/HTTP, RFC 6249: MirrorBrain, which serves
   LibreOffice and Kiwix) lists the file's other mirrors on its redirect; when an expected checksum will verify the
   whole file, the engine takes pieces from up to 4 of them besides the origin. A download taken over from the
