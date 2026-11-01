@@ -859,8 +859,8 @@ class EngineTest(unittest.TestCase):
         last = self.engine.queue()[-1]
         self.wait(last.id, {"completed"})
         started = []
-        for event in self.events:
-            if event["type"] == "job" and event["job"]["status"] == "downloading":
+        for event in self.events:  # la progression de celui annulé peut encore arriver : on l'écarte
+            if event["type"] == "job" and event["job"]["status"] == "downloading" and event["job"]["id"] != slow.id:
                 name = event["job"]["filename"]
                 started += [] if name in started else [name]
         self.assertEqual(started, ["c.zip", "d.zip", "a.zip", "b.zip", "e.zip"])
