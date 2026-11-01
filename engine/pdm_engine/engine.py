@@ -41,9 +41,11 @@ PERSISTED = {
     # écartées, après un fichier qui ne correspondait pas.
     "mirrors": [],
     "metalink": None,  # adresse de son document Metalink (.meta4) : les sommes de ses morceaux
+    # Adresse d'où le navigateur est parti, avant les redirections qui ont mené à `url`.
+    "startUrl": None,
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
-HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "metalink"}
+HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "metalink", "startUrl"}
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
 
 
@@ -159,8 +161,12 @@ class Engine:
             preset = preset or self.config["videoQuality"]
             if preset not in QUALITIES:
                 raise ValueError(f"qualité inconnue : {preset}")
+        start = spec.get("startUrl")
+        # Un indice, pas une demande : mal formée, elle est ignorée plutôt que refusée.
+        start = start if isinstance(start, str) and len(start) <= 8192 and re.match(r"^https?://", start, re.I) else None
         job = Job(
             id=spec.get("id"), kind=kind, url=url, referer=spec.get("referer"),
+            startUrl=start if kind == "http" and start != url else None,
             cookies=spec.get("cookies") or None, userAgent=spec.get("userAgent"),
             headers=clean_headers(spec.get("headers")) if kind == "http" else None,
             checksums=checksum.clean(spec.get("checksums")) if kind == "http" else [],

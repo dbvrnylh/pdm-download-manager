@@ -35,9 +35,10 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
 - **Verified files.** Every file's SHA-256 is computed while it downloads and compared with the checksum shown next
   to the link (GitHub, Linux distributions…) or announced by the server: a damaged file is never delivered.
   **Vérifier…** checks a finished file against a checksum you paste.
-- **Several servers at once.** When the site lists its mirrors (Metalink/HTTP, like LibreOffice), each connection
-  goes to the fastest server of the moment: when the origin limits or slows down, the mirrors take over, and a
-  mirror that is down, slow or serves another file is dropped. Only when a checksum can verify the whole file.
+- **Several servers at once.** When the site lists its mirrors (Metalink/HTTP, like LibreOffice or Kiwix), also
+  for a download taken from the browser, each connection goes to the fastest server of the moment: when the origin
+  limits or slows down, the mirrors take over, and a mirror that is down, slow or serves another file is dropped.
+  Only when a checksum can verify the whole file.
   With the checksum of each piece (`.meta4`), a wrong piece is downloaded again alone.
 - **Videos in one click.** A "download this video" button appears on players; the popup lists detected media;
   YouTube and hundreds of sites are supported through [yt-dlp](https://github.com/yt-dlp/yt-dlp), with quality
@@ -224,12 +225,14 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    match is never delivered: it stays as `.pdm`, the download fails with both checksums, and **Réessayer** starts
    over from zero.
 8. A mirror server (Metalink/HTTP, RFC 6249) lists the file's other mirrors on its redirect
-   (`Link: <…>; rel=duplicate`) along with its checksum. When an expected checksum will verify the whole file, PDM
-   takes pieces from several of them: at the end of each segment, the connection moves to the fastest server
-   measured. An unknown mirror is tried one at a time, and only when the download should last more than ten
-   seconds or connections are waiting for a place: on a line the nearest mirror already fills, the others get
-   nothing. A mirror that does not serve a file of the same size, fails or lags is dropped; if the final file does
-   not match, the next try does without mirrors.
+   (`Link: <…>; rel=duplicate`) along with its checksum. A download taken from the browser arrives with the
+   address Chrome was redirected to: the extension also sends the address it started from, and the engine asks it
+   again, one redirect at a time, stopping at the first that announces something. When an expected checksum will
+   verify the whole file, PDM takes pieces from several of them: at the end of each segment, the connection moves
+   to the fastest server measured. An unknown mirror is tried one at a time, and only when the download should last
+   more than ten seconds or connections are waiting for a place: on a line the nearest mirror already fills, the
+   others get nothing. A mirror that does not serve a file of the same size, fails or lags is dropped; if the final
+   file does not match, the next try does without mirrors.
 9. The same server often announces a Metalink document (`.meta4`) with the checksum of each piece of the file
    (256 KB at LibreOffice). PDM then checks every piece while it computes the SHA-256, in the same read: a wrong
    piece is downloaded again alone, without the mirrors that had sent any byte of it, and the checksums start

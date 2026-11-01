@@ -33,7 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from . import checksum, metalink
 from .hosts import Hosts
@@ -145,6 +145,16 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _opener = urllib.request.build_opener(_SafeRedirect)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # La redirection rendue telle quelle (une HTTPError 3xx) : ce sont ses en-têtes qu'on veut.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_no_redirect = urllib.request.build_opener(_NoRedirect)
+MAX_HOPS = 5  # redirections suivies une à une depuis l'adresse de départ (voir HttpDownload._ask_start)
 
 
 def http_error_message(error):
@@ -579,6 +589,7 @@ class HttpDownload:
                     if first is None:
                         return self.stop_reason or "paused"  # arrêté en attendant le serveur
                 self._apply_probe(first)
+                self._ask_start()
                 self._read_metalink(fresh=True)
                 self._use_mirrors()
                 self._create_file()
@@ -634,6 +645,49 @@ class HttpDownload:
         if job.mirrors is not None:  # None : écartés après un fichier faux (voir _verify)
             job.mirrors = result.mirrors
         job.metalink = result.described
+
+    def _ask_start(self):
+        """Redemande à l'adresse de départ ce que ses redirections annonçaient.
+
+        Un téléchargement repris au navigateur arrive avec l'adresse finale : Chrome
+        a suivi lui-même les redirections, jusqu'à un miroir. Or c'est la
+        redirection du serveur de miroirs qui annonce les autres miroirs, la somme
+        du fichier et son document Metalink (Hugging Face, elle, la somme d'un gros
+        fichier). On refait le chemin une redirection à la fois, et on s'arrête à
+        la première qui annonce quelque chose : jamais jusqu'au serveur final, qui
+        n'a rien de plus à dire et peut-être plus de place pour nous (la sonde
+        tient déjà sa connexion).
+        """
+        job = self.job
+        if not job.startUrl or job.startUrl in (job.url, job.finalUrl) or not job.resumable or not self.size:
+            return
+        announced, url = [], job.startUrl
+        for _ in range(MAX_HOPS):
+            foreign = urlparse(url).hostname != self.site
+            try:
+                with _no_redirect.open(build_request(job, url, 0, 0, foreign=foreign), timeout=TIMEOUT):
+                    break  # pas une redirection : le bout du chemin
+            except urllib.error.HTTPError as e:
+                headers = e.headers
+                e.close()
+                if not 300 <= e.code < 400 or not headers.get("Location"):
+                    break
+            except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
+                log.info("%s : adresse de départ injoignable (%s)", job.filename, _reason(e))
+                break
+            announced.append((url, headers))
+            if any(headers.get(name) for name in ("Link", "Digest", "X-Linked-Etag")):
+                break
+            url = urljoin(url, headers["Location"])
+        if not announced:
+            return
+        digest = checksum.from_headers(http.client.HTTPMessage(), False, announced, self.size)
+        if digest and not any(c["source"] == "server" for c in job.checksums):
+            job.checksums.append(digest)
+        if job.mirrors is not None:
+            found = metalink.mirrors(announced, exclude=(job.url, job.finalUrl, job.startUrl))
+            job.mirrors = metalink.merge(job.mirrors, found, job.url, exclude=(job.url, job.finalUrl))
+        job.metalink = job.metalink or metalink.describedby(announced)
 
     def _read_metalink(self, fresh):
         """Lit le document Metalink du fichier : les sommes de ses morceaux (voir _repair).

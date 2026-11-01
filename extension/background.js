@@ -188,6 +188,7 @@ async function handOverToEngine(item, requested) {
     // Rejouée par le moteur ; s'il ne l'a pas vue, cookies reconstitués comme avant.
     headers: takeHeaders(recentRequests, [item.finalUrl, item.url]),
     checksums: takeChecksums(recentChecksums, [item.url, item.finalUrl]),
+    startUrl: item.url, // avant les redirections : ce qu'elles annonçaient (miroirs, somme) y reste
   });
   try {
     await client.request({ type: 'add', probe: true, job }, PROBE_TIMEOUT);

@@ -7,16 +7,19 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Downloads from several mirrors at once. A mirror server (Metalink/HTTP, RFC 6249: MirrorBrain, which serves
-  LibreOffice) lists the file's other mirrors on its redirect; when an expected checksum will verify the whole
-  file, the engine takes pieces from up to 4 of them besides the origin. Each connection picks, at the end of each
-  segment, the fastest server measured (aria2's "feedback" selector); an unknown mirror is tried one at a time,
-  only when the download should last more than 10 s or connections are waiting for a place (an origin that limits
-  connections per IP). On a line the nearest mirror already fills, nothing changes: measured on LibreOffice's
-  212 MB tarball, 53–56 MB/s with mirrors against 51–52 MB/s without, where spreading connections evenly had given
-  31–48 MB/s. A mirror whose file has another size, that fails or lags is dropped; one that sends another file of
-  the same size is caught by the checksum, and the next try does without mirrors. Mirrors never get the site's
-  cookies, never get `If-Range` (their ETags differ), and an `http://` mirror listed over `https://` is ignored.
-  The manager shows "N serveurs" while several send the file.
+  LibreOffice and Kiwix) lists the file's other mirrors on its redirect; when an expected checksum will verify the
+  whole file, the engine takes pieces from up to 4 of them besides the origin. A download taken over from the
+  browser arrives with the mirror Chrome was redirected to: the extension also sends the address the download
+  started from, and the engine asks it again, one redirect at a time, stopping at the first one that announces
+  something (never as far as the final server, which may have no room for one more connection). Each connection
+  picks, at the end of each segment, the fastest server measured (aria2's "feedback" selector); an unknown mirror
+  is tried one at a time, only when the download should last more than 10 s or connections are waiting for a place
+  (an origin that limits connections per IP). On a line the nearest mirror already fills, nothing changes: measured
+  on LibreOffice's 212 MB tarball, 53–56 MB/s with mirrors against 51–52 MB/s without, where spreading connections
+  evenly had given 31–48 MB/s. A mirror whose file has another size, that fails or lags is dropped; one that sends
+  another file of the same size is caught by the checksum, and the next try does without mirrors. Mirrors never get
+  the site's cookies, never get `If-Range` (their ETags differ), and an `http://` mirror listed over `https://` is
+  ignored. The manager shows "N serveurs" while several send the file.
 - Wrong pieces are downloaded again, alone. When the mirror server also announces a Metalink document (`.meta4`,
   RFC 5854: LibreOffice's gives a SHA-1 for each 256 KB piece), the engine checks every piece while it computes
   the file's checksum, in the same pass. A wrong piece is carved out and downloaded again, without the mirrors that

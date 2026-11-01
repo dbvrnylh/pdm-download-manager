@@ -518,6 +518,29 @@ class EngineTest(unittest.TestCase):
         piece = f"bytes={3 * fx.PIECE}-{4 * fx.PIECE - 1}"
         self.assertEqual(sum(1 for _, r, _ in fx.LOG if r == piece), httpdl.MAX_REPAIRS)
 
+    def test_a_download_taken_from_the_browser_still_hears_the_mirror_server(self):
+        # Chrome a suivi la redirection : le moteur reçoit l'adresse du miroir, plus celle de départ.
+        fx.HOSTS.clear()
+        start = self.base + "/mirrorbrain/good/mid.bin?limited&meta4"
+        job = self.add("/limited/1/mid.bin", startUrl=start, source="intercept")
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(job.checksums, [{"algo": "sha-256", "hex": self.hashes["mid.bin"], "source": "server"}])
+        self.assertTrue(job.verified)
+        self.assertEqual(job.mirrors, [f"http://localhost:{self.server.server_port}/mirror/good/mid.bin"])
+        self.assertTrue(job.metalink.endswith("/meta4/good/mid.bin"))
+        self.assertTrue(self.mirror_requests("good", "mid.bin"), "le miroir annoncé a servi")
+        self.assertNotIn("startUrl", job.public(), "rien de plus à envoyer à l'interface")
+
+    def test_a_start_address_that_does_not_redirect_announces_nothing(self):
+        fx.LOG.clear()
+        job = self.wait(self.add("/range/mid.bin", startUrl=self.base + "/norange/mid.bin").id, {"completed", "failed"})
+        self.assertEqual((job.status, job.checksums, job.mirrors), ("completed", [], []))
+        self.assertIn(("/norange/mid.bin", "bytes=0-0"), [(p, r) for p, r, _ in fx.LOG], "un octet demandé, pas plus")
+        for start in ("javascript:alert(1)", self.base + "/range/mid.bin", 42, "https://" + "x" * 9000):
+            with self.subTest(start=str(start)[:30]):
+                self.assertIsNone(self.add("/range/mid.bin", startUrl=start).startUrl)
+
     def test_a_mirror_never_gets_the_session_of_the_site(self):
         job = SimpleNamespace(headers=[["Cookie", "a=1"], ["Authorization", "Basic x"], ["Accept-Language", "fr"]],
                               userAgent=None, referer=None, cookies=None)

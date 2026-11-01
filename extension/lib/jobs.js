@@ -33,11 +33,18 @@ export async function cookieHeader(url) {
 // `headers` : les en-têtes que Chrome a envoyés (lib/headers.js), rejoués par
 // le moteur. Leur Cookie est celui d'origine : inutile de le reconstituer.
 // `checksums` : les sommes affichées à côté du lien (lib/checksums.js).
-export async function httpJob(url, { filename, referer, source, size, mime, headers, checksums, id = newJobId() } = {}) {
+// `startUrl` : l'adresse d'où le téléchargement est parti, quand Chrome a suivi
+// des redirections jusqu'à `url`. Un serveur de miroirs y annonce ses miroirs et
+// la somme du fichier ; le moteur la lui redemande (httpdl._ask_start).
+export async function httpJob(
+  url,
+  { filename, referer, source, size, mime, headers, checksums, startUrl, id = newJobId() } = {},
+) {
   return {
     id,
     kind: 'http',
     url,
+    ...(startUrl && startUrl !== url ? { startUrl } : {}),
     filename,
     referer,
     source,

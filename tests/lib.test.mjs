@@ -339,3 +339,13 @@ test('jobs: les sommes de la page partent avec le téléchargement', async () =>
   assert.equal('checksums' in (await httpJob('https://x.org/a.iso', { checksums: undefined })), false);
   delete globalThis.chrome;
 });
+
+test("jobs: l'adresse de départ part avec le téléchargement, s'il y a eu des redirections", async () => {
+  globalThis.chrome = { cookies: { getAll: async () => [] } };
+  const start = 'https://download.example.org/office.tar.gz';
+  const job = await httpJob('https://miroir.example.fr/office.tar.gz', { startUrl: start });
+  assert.equal(job.startUrl, start);
+  assert.equal('startUrl' in (await httpJob(start, { startUrl: start })), false, 'pas de redirection');
+  assert.equal('startUrl' in (await httpJob(start)), false);
+  delete globalThis.chrome;
+});
