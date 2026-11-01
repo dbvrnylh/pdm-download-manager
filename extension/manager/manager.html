@@ -27,6 +27,10 @@
     </header>
 
     <p id="engine-banner" class="banner" hidden></p>
+    <p id="power-banner" class="banner" data-state="power" role="alert" hidden>
+      <span id="power-text"></span>
+      <button type="button" id="power-cancel">Annuler</button>
+    </p>
 
     <nav class="filters">
       <div id="category-filters" class="chips"></div>
@@ -36,6 +40,11 @@
           <option value="active">En cours</option>
           <option value="complete">Terminés</option>
           <option value="failed">Échoués</option>
+        </select>
+        <select id="when-done" aria-label="Quand tout sera fini" hidden>
+          <option value="">À la fin : rien</option>
+          <option value="suspend">À la fin : veille</option>
+          <option value="poweroff">À la fin : éteindre</option>
         </select>
         <button id="clear-complete">Vider les terminés</button>
       </div>

@@ -178,7 +178,7 @@ class Daemon:
         try:
             if kind == "hello":
                 reply(version=VERSION, config=self.config.snapshot(), tools=self.tools.info(),
-                      jobs=self.engine.public_jobs())
+                      jobs=self.engine.public_jobs(), power=self.engine.power_state())
             elif kind == "add":
                 if message.get("probe"):
                     # La sonde prend du temps (réseau) : on ne bloque pas ce client.
@@ -188,6 +188,9 @@ class Daemon:
             elif kind == "program":
                 self.engine.program(message["id"], bool(message.get("scheduled", True)))
                 reply()
+            elif kind == "when-done":
+                self.engine.when_done(message.get("action"))
+                reply(power=self.engine.power_state())
             elif kind == "options":
                 reply(job=self.engine.set_options(message["id"], message.get("set") or {}).public())
             elif kind == "move":

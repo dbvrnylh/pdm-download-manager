@@ -7,12 +7,15 @@ import base64
 import errno
 import hashlib
 import http.client
+import io
 import json
 import os
 import shutil
 import socket
 import ssl
+import stat
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -20,6 +23,7 @@ import unittest
 import unittest.mock
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +36,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import checksum, daemon, httpdl, metalink, paths, rpc, util  # noqa: E402
+from pdm_engine import checksum, daemon, finish, httpdl, metalink, paths, rpc, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
 from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
@@ -900,6 +904,76 @@ class EngineTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 self.engine.set_options(other.id, bad)
 
+    def test_an_archive_is_extracted_and_the_end_program_runs_like_with_aria2(self):
+        fx.FILES["outils.zip"] = make_zip({"outils/lisez-moi.txt": b"bonjour",
+                                           "outils/bin/lancer": (b"#!/bin/sh", 0o755)})
+        fx.VERSION["outils.zip"] = 1
+        program = self.root / "fin.sh"
+        program.write_text('#!/bin/sh\nprintf "%s\\n" "$@" "$PDM_URL" > "$PDM_PATH.args"\n')
+        program.chmod(0o755)
+        self.config.update({"extract": True, "onComplete": str(program)})
+        job = self.wait(self.add("/range/outils.zip").id, {"completed"})
+        deadline = time.time() + 10
+        while (job.extracted is None or job.id in self.engine.finishing) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIsNone(job.afterError)
+        folder = Path(job.extracted)
+        self.assertEqual((folder.name, folder.parent), ("outils", Path(job.path).parent))
+        self.assertEqual((folder / "outils/lisez-moi.txt").read_bytes(), b"bonjour")
+        self.assertTrue(os.access(folder / "outils/bin/lancer", os.X_OK))
+        args = Path(job.path + ".args")
+        while not args.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.1)  # le temps qu'il finisse d'écrire
+        self.assertEqual(args.read_text().split("\n")[:4], [rpc.gid(job.id), "1", job.path, job.url],
+                         "GID, nombre de fichiers, chemin : comme --on-download-complete d'aria2")
+        # Un programme disparu entre-temps : le téléchargement reste terminé, la raison est dite.
+        program.unlink()
+        job = self.wait(self.add("/range/small.zip").id, {"completed"})
+        while job.afterError is None and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIn("programme de fin impossible", job.afterError)
+        self.assertEqual(job.status, "completed")
+
+    def test_the_computer_sleeps_once_everything_is_done(self):
+        calls, notes = [], []
+        self.engine._desktop = lambda title, body: notes.append(body)
+        with unittest.mock.patch.object(finish, "power", calls.append), \
+                unittest.mock.patch.object(finish, "POWER_DELAY", 0.4):
+            with self.assertRaises(ValueError):
+                self.engine.when_done("suspend")  # rien à attendre
+            with self.assertRaises(ValueError):
+                self.engine.when_done("reboot")
+            job = self.add("/range/mid.bin")
+            self.engine.when_done("suspend")
+            self.assertEqual(self.engine.power_state(), {"action": "suspend", "at": None})
+            self.wait(job.id, {"completed"})
+            deadline = time.time() + 5
+            while self.engine.power_at is None and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertIsNotNone(self.engine.power_at, "compte à rebours, une fois tout fini")
+            self.assertEqual(calls, [], "pas avant la fin du délai")
+            other = self.add("/crawl/mid.bin")  # du travail revient : le compte à rebours s'arrête
+            time.sleep(0.6)
+            self.assertEqual((calls, self.engine.power_at), ([], None))
+            self.engine.cancel(other.id)
+            while not calls and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(calls, ["suspend"])
+            self.assertEqual(self.engine.power_state(), {"action": None, "at": None}, "une seule fois")
+            self.assertIn("Mise en veille dans", notes[0])
+            # Annulé pendant le compte à rebours : rien.
+            job = self.add("/range/small.zip")
+            self.engine.when_done("poweroff")
+            self.wait(job.id, {"completed"})
+            while self.engine.power_at is None and time.time() < deadline + 5:
+                time.sleep(0.02)
+            self.engine.when_done(None)
+            time.sleep(0.6)
+            self.assertEqual(calls, ["suspend"])
+        states = [e["power"] for e in self.events if e["type"] == "power"]
+        self.assertIn({"action": "poweroff", "at": None}, states, "l'interface suit l'état")
+
     def test_cookies_follow_same_host_redirect_only(self):
         job = self.engine.add({"url": self.base + "/redirect/cookies", "cookies": "session=secret"})
         same = Path(self.wait(job.id, {"completed"}).path).read_text()
@@ -1387,7 +1461,107 @@ class RpcTest(unittest.TestCase):
         self.assertEqual(theirs.recv(10), b"", "la file a débordé : coupé")
 
 
+def make_zip(entries):
+    """Une archive .zip en mémoire : {nom: contenu, ou (contenu, mode)}."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in entries.items():
+            data, mode = data if isinstance(data, tuple) else (data, 0o644)
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (stat.S_IFREG | mode) << 16
+            archive.writestr(info, data)
+    return buffer.getvalue()
+
+
+class FinishTest(unittest.TestCase):
+    """Ce qui suit un téléchargement (finish.py) : surtout, des archives venues d'internet."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(dir=TMP)) / "Archives"
+        self.dir.mkdir()
+
+    def archive(self, name, data):
+        path = self.dir / name
+        path.write_bytes(data)
+        return str(path)
+
+    def tar(self, name, members):
+        """{nom: contenu} ; (sorte tarfile, cible) pour un lien ou un fichier spécial."""
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for member, data in members.items():
+                info = tarfile.TarInfo(member)
+                if isinstance(data, tuple):
+                    info.type, info.linkname = data
+                    archive.addfile(info)
+                else:
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+        return self.archive(name, buffer.getvalue())
+
+    def test_archive_kinds(self):
+        for name, kind in (("a.zip", "zip"), ("A.TAR.GZ", "tar"), ("a.tgz", "tar"), ("a.tar.xz", "tar"),
+                           ("a.gz", None), (".zip", None), ("a.zip.part", None), (None, None)):
+            self.assertEqual(finish.archive_kind(name), kind, name)
+
+    def test_zip_and_tar_are_extracted_next_to_the_archive(self):
+        path = self.archive("projet.zip", make_zip({"projet/a.txt": b"A", "projet/sous/b.txt": b"B"}))
+        folder, skipped = finish.extract(path)
+        self.assertEqual((Path(folder), skipped), (self.dir / "projet", 0))
+        self.assertEqual((Path(folder) / "projet/sous/b.txt").read_bytes(), b"B")
+        again, _ = finish.extract(path)
+        self.assertEqual(Path(again).name, "projet (1)", "jamais par-dessus une extraction précédente")
+        path = self.tar("source.tar.gz", {"source/x.c": b"int main;", "source/lien": (tarfile.SYMTYPE, "/etc/passwd"),
+                                          "source/dur": (tarfile.LNKTYPE, "source/x.c"),
+                                          "source/fifo": (tarfile.FIFOTYPE, "")})
+        folder, skipped = finish.extract(path)
+        self.assertEqual(Path(folder).name, "source")
+        self.assertEqual(skipped, 3, "liens et fichiers spéciaux ignorés")
+        self.assertEqual(sorted(p.name for p in (Path(folder) / "source").iterdir()), ["x.c"])
+
+    def test_a_hostile_archive_writes_nothing(self):
+        outside = self.dir.parent / "evil.txt"
+        for name, data in (
+            ("glisse.zip", make_zip({"ok.txt": b"1", "../evil.txt": b"!"})),
+            ("absolu.zip", make_zip({"/tmp/evil.txt": b"!"})),
+            ("windows.zip", make_zip({"..\\evil.txt": b"!"})),
+            ("lecteur.zip", make_zip({"C:/evil.txt": b"!"})),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError) as caught:
+                finish.extract(self.archive(name, data))
+            self.assertIn("archive refusée", str(caught.exception))
+        with self.assertRaises(ValueError):
+            finish.extract(self.tar("glisse.tar.gz", {"../evil.txt": b"!"}))
+        self.assertFalse(outside.exists())
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir() if p.is_dir()), [], "aucun dossier laissé")
+        with self.assertRaises(ValueError) as caught:
+            finish.extract(self.archive("abime.zip", b"PK\x03\x04 pas une archive"))
+        self.assertIn("illisible", str(caught.exception))
+
+    def test_an_archive_that_does_not_fit_is_not_extracted(self):
+        path = self.archive("gros.zip", make_zip({"gros.bin": bytes(1 << 20)}))
+        full = SimpleNamespace(free=finish.MARGIN + 1000)
+        with unittest.mock.patch.object(finish.shutil, "disk_usage", return_value=full), \
+                self.assertRaises(ValueError) as caught:
+            finish.extract(path)
+        self.assertIn("pas assez de place", str(caught.exception))
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["gros.zip"])
+
+
 class ConfigTest(unittest.TestCase):
+    def test_the_end_program_must_be_an_executable(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        config = Config(root / "config.json")
+        self.assertEqual((config["extract"], config["onComplete"]), (False, None))
+        script = root / "fin.sh"
+        script.write_text("#!/bin/sh\n")
+        for bad in ("fin.sh", str(root / "absent.sh"), str(script), str(root)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                config.update({"onComplete": bad})
+        script.chmod(0o755)
+        self.assertEqual(config.update({"onComplete": str(script)})["onComplete"], str(script))
+        self.assertIsNone(config.update({"onComplete": ""})["onComplete"])
+
     def test_rpc_settings_are_checked(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
         self.assertEqual((config["rpc"], config["rpcPort"], config["rpcOrigins"]), (False, 6800, []))

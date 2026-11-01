@@ -48,6 +48,8 @@ const fields = {
   categorize: document.getElementById('categorize'),
   notify: document.getElementById('notify'),
   autoResume: document.getElementById('auto-resume'),
+  extract: document.getElementById('extract'),
+  onComplete: document.getElementById('on-complete'),
   videoQuality: document.getElementById('video-quality'),
   languages: document.getElementById('languages'),
   subtitles: document.getElementById('subtitles'),
@@ -116,6 +118,11 @@ function fillForm(config) {
   fields.categorize.checked = config.categorize;
   fields.notify.checked = config.notify;
   fields.autoResume.checked = config.autoResume;
+  const hasFinish = 'extract' in config; // moteur assez récent
+  fields.extract.closest('label').hidden = !hasFinish;
+  fields.onComplete.closest('label').hidden = !hasFinish;
+  fields.extract.checked = Boolean(config.extract);
+  fields.onComplete.value = config.onComplete ?? '';
   // Un moteur plus ancien (install.sh pas relancé) ne connaît pas ces réglages :
   // on les cache, sinon il refuserait tout l'enregistrement.
   fields.videoQuality.closest('label').hidden = !('videoQuality' in config);
@@ -220,6 +227,10 @@ form.addEventListener('submit', async (event) => {
     autoResume: fields.autoResume.checked,
   };
   if (!fields.videoQuality.closest('label').hidden) changes.videoQuality = fields.videoQuality.value;
+  if (!fields.extract.closest('label').hidden) {
+    changes.extract = fields.extract.checked;
+    changes.onComplete = fields.onComplete.value.trim() || null;
+  }
   if (!document.getElementById('speed-and-window').hidden) {
     changes.speedLimit = Math.round((Number(fields.speedLimit.value) || 0) * MIB);
     changes.windowStart = fields.windowStart.value;

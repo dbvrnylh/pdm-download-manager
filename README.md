@@ -45,8 +45,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
 - **Organized.** Files are sorted into `Videos/`, `Musique/`, `Documents/`, `Archives/`, `Programmes/`,
   `Images/` and `Generique/` for the rest, by extension; each category's extensions and folder name can be edited. Download queue, desktop notifications, right-click "Télécharger avec PDM".
-- **Your queue, your way.** Drag waiting downloads into the order they should start, and give one download its
-  own number of connections or speed limit, even while it runs.
+- **Your queue, your way.** Drag waiting downloads into the order they should start, give one download its own
+  number of connections or speed limit (even while it runs), have finished archives extracted next to them, run
+  your own program after each download, and put the computer to sleep or shut it down once everything is done.
 - **Speaks aria2.** AriaNg, aria2 scripts and the extensions that send their links to aria2 can drive PDM through
   the same JSON-RPC API: local only, with a secret, and off until you turn it on.
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
@@ -103,6 +104,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Verify a file | Nothing to do when the page shows its checksum next to the link: PDM picks it up on click and checks the file. Otherwise, Manager → **Vérifier…** on a finished download → paste the site's checksum (SHA-256, SHA-512, SHA-1 or MD5). Not the one PDM shows: compared with itself, a file always matches, and PDM refuses it. |
 | Change the order of the queue | Manager → **En cours** → drag a waiting download to its place. Or **Options…** on it → **En premier** / **En dernier**. |
 | Limit one download, or give it more connections | Manager → **Options…** on it: connections and maximum speed for this file only, applied at once while it runs (a video: from its next start). |
+| Sleep or shut down when everything is done | Manager → **À la fin : veille** or **éteindre** (or `pdm-host when-done suspend\|poweroff`). Once nothing downloads or waits in the queue, a 60 s countdown with **Annuler** appears, then systemd puts the computer to sleep or shuts it down. Once only: the choice goes back to "rien". |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 | Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
@@ -332,6 +334,8 @@ Everything lives in the extension's **Réglages** page:
 | Sort by category | on | `Videos/`, `Musique/`, `Archives/`… (ASCII folder names on purpose). |
 | Categories | IDM-like lists | Each category's **extensions** and **folder name** are edited in **Réglages → Catégories**; whatever matches none goes to **Générique** (`Generique/`). A file is sorted by its extension, else by the type the server announces. An extension can only belong to one category, and folder names stay in ASCII (Chrome silently refuses an accented path when the system locale isn't UTF-8). Already downloaded files don't move. |
 | Desktop notifications | on | Needs `notify-send`. |
+| Extract archives | off | A finished `.zip` or `.tar` (`.gz`, `.bz2`, `.xz`) is extracted into a new folder named after it, next to it; the manager shows where, or why not. See [Privacy & security](#privacy--security). |
+| Program at the end | none | Run after each finished download (after the extraction), with aria2's `--on-download-complete` arguments: the GID, `1` and the file's path, plus `PDM_PATH` and `PDM_URL`. Scripts written for aria2 work as they are. Its failures go to the engine log. |
 | Auto-resume | on | Restarts interrupted downloads when the engine starts. |
 | Your languages | `fr, es, en` | Used for subtitles and extra audio tracks, in this order. |
 | Subtitles | on | Embedded into video downloads when they exist. Needs ffmpeg. |
@@ -401,6 +405,12 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
   read, is not offered. Like aria2's, the notifications go to every connected client, secret or not: they carry
   only a download's GID, which allows nothing without the secret. A WebSocket client that stops reading or
   answering pings is cut, never waited for.
+- **Archives come from the internet, and are extracted as such** (only when you turn it on). PDM writes every
+  file itself, never through `zipfile` or `tarfile`, at a path it checked: an archive aiming outside its folder
+  (absolute path, `..`) is refused whole, links and special files are skipped, nothing overwrites a file, nothing
+  goes beyond the free space, and an archive that does not match its checksum is not extracted at all.
+- **The program run at the end is yours only:** it is set in the settings page or `config.json`, never through
+  the JSON-RPC API, and is started without a shell, with its arguments as a list.
 - **Private browsing** downloads are never taken over.
 - **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
   lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.
@@ -421,6 +431,7 @@ engine/
                            checksum.py (expected and computed checksums) · metalink.py (mirrors)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
                            rpc.py (aria2-compatible JSON-RPC API, HTTP and WebSocket)
+                           finish.py (after a download: extraction, program, sleep or shutdown)
 tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh
 ```

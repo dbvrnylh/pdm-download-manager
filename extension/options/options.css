@@ -234,7 +234,8 @@ pre {
   display: none;
 }
 
-.languages {
+.languages,
+.on-complete {
   margin-top: 14px;
 }
 

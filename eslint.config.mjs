@@ -15,6 +15,7 @@ export default [
         console: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
+        clearInterval: 'readonly',
         setInterval: 'readonly',
         requestAnimationFrame: 'readonly',
         HTMLVideoElement: 'readonly',

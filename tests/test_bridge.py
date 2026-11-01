@@ -284,6 +284,19 @@ esac
         self.assertTrue(chrome.request({"type": "config", "set": {"rpc": False}})["ok"])
         self.assertEqual(ws.closed_with(), 1001, "API désactivée : connexions fermées")
 
+    def test_the_managers_commands_reach_the_engine(self):
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+        ids = [chrome.request({"type": "add", "job": {"url": self.base + "/range/list-a.bin", "paused": True}})["job"]["id"]
+               for _ in range(2)]
+        self.assertEqual(chrome.request({"type": "move", "id": ids[1], "position": 0})["position"], 0)
+        job = chrome.request({"type": "options", "id": ids[0], "set": {"maxConnections": 2, "speedLimit": 65536}})["job"]
+        self.assertEqual((job["maxConnections"], job["speedLimit"]), (2, 65536))
+        refused = chrome.request({"type": "when-done", "action": "poweroff"})  # en pause : rien à attendre
+        self.assertFalse(refused["ok"])
+        self.assertIn("rien à attendre", refused["error"])
+        self.assertEqual(chrome.request({"type": "hello"})["power"], {"action": None, "at": None})
+
     def test_errors_are_replies_not_crashes(self):
         chrome = self.connect()
         bad = chrome.request({"type": "add", "job": {"url": "file:///etc/passwd"}})

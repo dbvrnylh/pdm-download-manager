@@ -177,6 +177,24 @@ def _rpc(args):
         print(f"  Pages web autorisées : {', '.join(info['origins']) or 'aucune'}")
 
 
+WHEN_DONE_USAGE = "Usage : pdm-host when-done [suspend | poweroff | nothing]"
+
+
+def _when_done(args):
+    """Veille ou extinction quand tout sera fini, une fois (comme le choix du gestionnaire)."""
+    actions = {"suspend": "suspend", "poweroff": "poweroff", "nothing": None}
+    if len(args) > 1 or (args and args[0] not in actions):
+        sys.exit(WHEN_DONE_USAGE)
+    connection = _Connection()
+    if args:
+        reply = connection.request({"type": "when-done", "action": actions[args[0]]})
+        if not reply["ok"]:
+            sys.exit(f"Erreur : {reply['error']}")
+    power = connection.request({"type": "hello"})["power"]
+    what = {"suspend": "mise en veille", "poweroff": "extinction", None: "rien"}[power["action"]]
+    print(f"Quand tout sera fini : {what}." + (" Compte à rebours en cours." if power["at"] else ""))
+
+
 def main(args):
     # Chrome lance le pont avec l'origine de l'extension en argument
     # (« chrome-extension://…/ ») : tout ce qui n'est pas une sous-commande
@@ -208,6 +226,8 @@ def main(args):
         print("Ajouté." if reply["ok"] else f"Erreur : {reply['error']}")
     elif command == "rpc":
         _rpc(args[1:])
+    elif command == "when-done":
+        _when_done(args[1:])
     elif command == "stop":
         from .host import connect
 

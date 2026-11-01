@@ -16,6 +16,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   running file takes them at once: connections are opened on the way, extra ones leave their piece to the others
   without waiting for its end, and its own token bucket applies next to the global one. A video takes them at its
   next start. Changing the global number of connections now also reaches running files.
+- After a download: extract archives (`.zip`, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, off by default) into a
+  new folder next to them, run your own program with aria2's `--on-download-complete` arguments, and put the
+  computer to sleep or shut it down once everything is done (manager or `pdm-host when-done`, once, after a 60 s
+  countdown that can be cancelled; a new download in the meantime stops the countdown). Extraction never trusts
+  the archive: PDM writes each file itself at a checked path, refuses an archive aiming outside its folder, skips
+  links and special files, never overwrites, checks the free space first, and leaves nothing half extracted.
 - An aria2-compatible JSON-RPC API, so tools written for aria2 (AriaNg, scripts, extensions that send their links
   to aria2) can drive PDM. `pdm-host rpc on` turns it on at `http://127.0.0.1:6800/jsonrpc` (aria2's port;
   `--port` to move it) and prints its secret. It covers adding (`addUri`, several addresses being mirrors of the

@@ -78,6 +78,15 @@
           <label class="check"><input id="categorize" type="checkbox" /> Ranger par catégorie (Videos/, Musique/, Archives/…)</label>
           <label class="check"><input id="notify" type="checkbox" /> Notification du bureau à la fin de chaque téléchargement</label>
           <label class="check"><input id="auto-resume" type="checkbox" /> Reprendre automatiquement les téléchargements interrompus</label>
+          <label class="check"><input id="extract" type="checkbox" /> Extraire les archives terminées (.zip, .tar.gz, .tar.xz…) dans un dossier à côté</label>
+          <label class="field on-complete">
+            <span>Programme à lancer à la fin de chaque téléchargement</span>
+            <input id="on-complete" type="text" spellcheck="false" placeholder="facultatif, par exemple ~/bin/apres-pdm.sh" />
+            <small>
+              Il reçoit, comme avec l’option --on-download-complete d’aria2 : le GID, 1 et le chemin du fichier
+              (et les variables PDM_PATH, PDM_URL). Ses échecs vont au journal du moteur.
+            </small>
+          </label>
           <label class="field video-quality">
             <span>Qualité des vidéos</span>
             <select id="video-quality"></select>

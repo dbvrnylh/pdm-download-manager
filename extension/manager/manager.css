@@ -265,6 +265,20 @@ footer {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
+/* Compte à rebours avant la veille ou l'extinction : bien visible, et annulable. */
+.banner[data-state='power'] {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.banner[hidden] {
+  display: none;
+}
+
 .download[data-status='queued'] .meta {
   font-style: italic;
 }

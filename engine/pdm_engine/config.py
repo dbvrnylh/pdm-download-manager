@@ -28,6 +28,8 @@ DEFAULTS = {
     "rpc": False,  # API JSON-RPC compatible aria2 (voir rpc.py) : désactivée tant qu'on ne la demande pas
     "rpcPort": 6800,  # son port, sur 127.0.0.1 seulement : celui d'aria2, que les outils essaient d'abord
     "rpcOrigins": [],  # pages web autorisées à l'appeler (AriaNg…) : aucune par défaut
+    "extract": False,  # extraire les archives .zip et .tar terminées, dans un dossier à côté (voir finish.py)
+    "onComplete": None,  # programme lancé à la fin de chaque téléchargement, comme --on-download-complete d'aria2
 }
 
 LIMITS = {"connections": (1, 32), "maxParallel": (1, 10), "rpcPort": (1024, 65535)}
@@ -121,6 +123,8 @@ class Config:
                 value = _categories(value)
             elif key == "rpcOrigins":
                 value = _origins(value)
+            elif key == "onComplete":
+                value = _program(value)
             elif key == "speedLimit":
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
                         value == 0 or MIN_SPEED <= value <= MAX_SPEED):
@@ -145,6 +149,18 @@ class Config:
             self.data.update(clean)
             write_json_atomic(self.path, self.data, mode=0o644)
         return self.snapshot()
+
+
+def _program(value):
+    """Le programme de fin : un chemin complet vers un fichier exécutable, ou None."""
+    if value in ("", None):
+        return None
+    path = os.path.expanduser(value) if isinstance(value, str) else ""
+    if not os.path.isabs(path):
+        raise ValueError("programme de fin : indique son chemin complet (qui commence par / ou ~)")
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise ValueError(f"programme de fin introuvable ou non exécutable : {path}")
+    return path
 
 
 def _origins(value):

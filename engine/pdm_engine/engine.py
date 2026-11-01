@@ -17,11 +17,12 @@ import time
 import uuid
 from urllib.parse import quote
 
-from . import checksum, httpdl, metalink, paths
+from . import checksum, finish, httpdl, metalink, paths
 from .config import LIMITS, MAX_SPEED, MIN_SPEED, QUALITIES
 from .hosts import Hosts
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
 from .limiter import Limiter
+from .rpc import gid
 from .util import filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
 from .ytdlp import YtdlpDownload, cleanup_files
 
@@ -36,6 +37,8 @@ PERSISTED = {
     "order": None,  # rang dans la file d'attente, une fois déplacé ; None : sa date d'ajout (voir queue_key)
     # Réglages propres à ce téléchargement (voir job_options) ; None : les réglages généraux.
     "maxConnections": None, "speedLimit": None,
+    # Après la fin (voir finish.py) : le dossier où l'archive a été extraite, ou ce qui a échoué.
+    "extracted": None, "afterError": None,
     # Intégrité : sommes attendues (voir checksum.py), SHA-256 du fichier terminé,
     # et résultat de la dernière comparaison (None : rien à quoi comparer).
     "checksums": [], "sha256": None, "verified": None,
@@ -121,6 +124,11 @@ class Engine:
         self.reserved = {}  # chemin réservé → id du téléchargement
         self.cancelled = set()  # annulés pendant leur sonde, avant même d'exister
         self.verifying = set()  # fichiers terminés en cours de vérification (« Vérifier… »)
+        self.finishing = set()  # terminés dont l'extraction ou le programme de fin est en cours
+        # Veille ou extinction quand tout sera fini (finish.POWER), pour une fois ; et quand,
+        # une fois tout fini (horloge time.time, pour l'affichage).
+        self.power_action = None
+        self.power_at = None
         self.dirty = False
         self.last_save = 0.0
         # Limite de vitesse : un seau pour tout le moteur HTTP, et une part fixe
@@ -168,7 +176,7 @@ class Engine:
 
     def has_work(self):
         with self.lock:
-            return any(job.status in ("queued", "downloading") for job in self.jobs.values())
+            return bool(self.finishing) or any(job.status in ("queued", "downloading") for job in self.jobs.values())
 
     # ─── Commandes ─────────────────────────────────────────────────────────
 
@@ -352,6 +360,60 @@ class Engine:
             self.dirty = True
         self._publish(job)
         return job
+
+    def when_done(self, action):
+        """Veille (« suspend ») ou extinction (« poweroff ») quand tout sera fini, une fois ; None : rien.
+
+        « Tout » : ce qui télécharge, ce qui attend en file (programmés compris : leur plage
+        horaire viendra), et les extractions. Pas ce qui est en pause : ça attend quelqu'un.
+        """
+        if action not in (None, *finish.POWER):
+            raise ValueError(f"à la fin : {', '.join(finish.POWER)}, ou rien")
+        if action and not self.has_work() and self.power_at is None:
+            raise ValueError("rien à attendre : aucun téléchargement en cours ni en file")
+        with self.lock:
+            self.power_action, self.power_at = action, None
+        self._publish_power()
+
+    def power_state(self):
+        return {"action": self.power_action, "at": self.power_at}
+
+    def _publish_power(self, error=None):
+        self.emit({"type": "power", "power": self.power_state(), **({"error": error} if error else {})})
+
+    def _check_power(self):
+        """À chaque battement : tout est-il fini ? Alors le compte à rebours, puis la veille ou l'extinction."""
+        action = self.power_action
+        if action is None:
+            return
+        busy = self.has_work()
+        with self.lock:
+            if busy:  # du travail est revenu (un ajout, une reprise) : on attend encore
+                changed, self.power_at = self.power_at is not None, None
+            elif self.power_at is None:
+                changed, self.power_at = True, time.time() + finish.POWER_DELAY
+            elif time.time() >= self.power_at:
+                changed, self.power_action, self.power_at = True, None, None
+            else:
+                return
+            go = changed and not busy and self.power_action is None
+        if changed:
+            self._publish_power()
+        if self.power_at is not None and changed:
+            what = "Mise en veille" if action == "suspend" else "Extinction"
+            self._desktop("Tout est terminé", f"{what} dans {finish.POWER_DELAY} s (Annuler : dans le gestionnaire)")
+        if go:
+            threading.Thread(target=self._power, args=(action,), daemon=True).start()
+
+    def _power(self, action):
+        log.info("tout est terminé : %s", action)
+        self.save()
+        try:
+            finish.power(action)
+        except OSError as e:
+            log.warning("%s refusée : %s", action, e)
+            self._desktop("PDM n'a pas pu " + ("mettre en veille" if action == "suspend" else "éteindre"), str(e))
+            self._publish_power(error=str(e))
 
     def window_is_open(self):
         return in_window(self.now(), self.config["windowStart"], self.config["windowEnd"])
@@ -546,8 +608,57 @@ class Engine:
             log.info("%s %s : %s %s", job.id, job.filename, outcome, error or "")
             self._publish(job)
             self._notify(job)
+            if outcome == "completed":
+                self._after(job)
         self.save()
         self.schedule()
+
+    def _after(self, job):
+        """Extraction de l'archive et programme de fin (voir finish.py), à part : ils peuvent être longs."""
+        extract = (self.config["extract"] and job.kind == "http" and finish.archive_kind(job.path)
+                   and job.verified is not False)  # une archive qui ne correspond pas à sa somme : surtout pas
+        program = self.config["onComplete"]
+        if not extract and not program:
+            return
+        with self.lock:
+            self.finishing.add(job.id)
+        threading.Thread(target=self._finish, args=(job, extract, program), daemon=True,
+                         name=f"after-{job.id}").start()
+
+    def _finish(self, job, extract, program):
+        errors, folder = [], None
+        try:
+            if extract:
+                shown = [0.0]
+
+                def progress(done, total):
+                    if time.monotonic() - shown[0] >= self.TICK:
+                        shown[0] = time.monotonic()
+                        self._set_stage(job, f"Extraction… {done * 100 // max(total, 1)} %")
+
+                self._set_stage(job, "Extraction…")
+                try:
+                    folder, skipped = finish.extract(job.path, progress)
+                    log.info("%s extrait dans %s (%d liens ou fichiers spéciaux ignorés)",
+                             job.filename, folder, skipped)
+                except ValueError as e:
+                    errors.append(f"extraction impossible : {e}")
+            if program:
+                problem = finish.run_program(program, gid(job.id), job.path, job.url)  # le GID, comme aria2
+                if problem:
+                    errors.append(problem)
+        except Exception as e:  # bug : journalisé, le téléchargement reste terminé
+            log.exception("après %s", job.id)
+            errors.append(f"erreur interne : {e}")
+        finally:
+            with self.lock:
+                self.finishing.discard(job.id)
+                job.stage, job.extracted, job.afterError = None, folder, "; ".join(errors) or None
+                self.dirty = True
+                removed = job.id not in self.jobs
+            if not removed:
+                self._publish(job)
+            self.save()
 
     def _http_rate(self):
         """Débit permis au moteur HTTP : la limite, moins les parts données aux yt-dlp."""
@@ -577,6 +688,7 @@ class Engine:
         while True:
             time.sleep(self.TICK)
             self._check_window()
+            self._check_power()
             updates = []
             with self.lock:
                 now = time.monotonic()
@@ -676,15 +788,19 @@ class Engine:
     def _notify(self, job):
         if not self.config["notify"] or job.status not in ("completed", "failed"):
             return
-        exe = shutil.which("notify-send")
-        if not exe:
-            return
         name = job.filename or job.url
         if job.status == "completed":
             title, body = "Téléchargement terminé", f"{name} ({human_size(job.size)})"
         else:
             title, body = "Échec du téléchargement", f"{name}\n{job.error}"
-        _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
+        self._desktop(title, body)
+
+    @staticmethod
+    def _desktop(title, body):
+        """Une notification du bureau, si notify-send existe."""
+        exe = shutil.which("notify-send")
+        if exe:
+            _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
 
 
 def _mirrors(raw, url):

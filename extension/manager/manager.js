@@ -89,6 +89,10 @@ const emptyEl = document.getElementById('empty');
 const errorEl = document.getElementById('error');
 const summaryEl = document.getElementById('summary');
 const bannerEl = document.getElementById('engine-banner');
+const powerBanner = document.getElementById('power-banner');
+const whenDone = document.getElementById('when-done');
+let power = null; // { action, at } : veille ou extinction quand tout sera fini (voir finish.py)
+let powerTimer = null;
 const addKind = document.getElementById('add-kind');
 const importDialog = document.getElementById('import-dialog');
 const importText = document.getElementById('import-text');
@@ -144,6 +148,8 @@ function fromEngine(job) {
     order: job.order ?? job.createdAt,
     hasOptions: 'speedLimit' in job, // moteur assez récent pour des options par téléchargement
     speedLimit: job.speedLimit,
+    extracted: job.extracted,
+    afterError: job.afterError,
   };
 }
 
@@ -362,8 +368,10 @@ function describe(entry) {
       return 'Bloqué : Chrome l’a identifié comme malveillant';
     case 'complete': {
       const parts = ['Terminé', formatBytes(entry.total ?? entry.done), hostOf(entry.host ?? entry.url)];
-      const check = entry.stage ?? integrity(entry); // « Vérification… 42 % », puis son résultat
-      return [...parts, ...(check ? [check] : [])].join(' · ');
+      // « Vérification… 42 % » ou « Extraction… 42 % », puis leur résultat.
+      const extracted = entry.extracted ? `extrait dans « ${basename(entry.extracted)} »` : '';
+      const after = entry.stage ? [entry.stage] : [integrity(entry), extracted, entry.afterError ?? ''];
+      return [...parts, ...after.filter(Boolean)].join(' · ');
     }
     case 'missing':
       return 'Fichier supprimé ou déplacé';
@@ -613,6 +621,7 @@ async function connectEngine() {
     const info = await engine.connect();
     engineJobs.clear();
     for (const job of info.jobs) engineJobs.set(job.id, job);
+    showPower(info.power);
     setEngineState('ok');
   } catch (err) {
     setEngineState('missing', err.message);
@@ -636,7 +645,44 @@ function setEngineState(state, message = '') {
   if (importDialog.open && !importing) renderImportPreview();
 }
 
+// ─── Veille ou extinction quand tout sera fini ─────────────────────────────
+
+function showPower(state, error) {
+  power = state ?? null;
+  whenDone.hidden = power === null; // moteur plus ancien : pas de choix
+  whenDone.value = power?.action ?? '';
+  clearInterval(powerTimer);
+  powerTimer = null;
+  if (error) showError(`${power?.action === 'poweroff' ? 'Extinction' : 'Mise en veille'} refusée : ${error}`);
+  if (!power?.at) {
+    powerBanner.hidden = true;
+    return;
+  }
+  const tick = () => {
+    const left = Math.max(0, Math.round(power.at - Date.now() / 1000));
+    const what = power.action === 'poweroff' ? 'Extinction de l’ordinateur' : 'Mise en veille';
+    document.getElementById('power-text').textContent = `Tout est terminé. ${what} dans ${left} s.`;
+  };
+  tick();
+  powerTimer = setInterval(tick, 1000);
+  powerBanner.hidden = false;
+}
+
+async function setWhenDone(action) {
+  try {
+    const reply = await engine.request({ type: 'when-done', action });
+    showPower(reply.power);
+  } catch (err) {
+    showError(err.message);
+    showPower(power); // le choix affiché revient à l'état réel
+  }
+}
+
+whenDone.addEventListener('change', () => setWhenDone(whenDone.value || null));
+document.getElementById('power-cancel').addEventListener('click', () => setWhenDone(null));
+
 engine.on((event) => {
+  if (event.type === 'power') showPower(event.power, event.error);
   if (event.type === 'job') engineJobs.set(event.job.id, event.job);
   else if (event.type === 'removed') engineJobs.delete(event.id);
   else if (event.type === 'disconnected') {
