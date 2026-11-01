@@ -35,6 +35,10 @@ dans l'esprit d'Internet Download Manager — pour Chrome, Chromium, Brave, Edge
 - **Fichiers vérifiés.** Le SHA-256 de chaque fichier est calculé pendant le téléchargement et comparé à la somme
   affichée à côté du lien (GitHub, distributions Linux…) ou annoncée par le serveur : un fichier abîmé n'est jamais
   livré. **Vérifier…** compare un fichier terminé à la somme que tu colles.
+- **Plusieurs serveurs à la fois.** Quand le site annonce ses miroirs (Metalink/HTTP, comme LibreOffice), chaque
+  connexion va au serveur le plus rapide du moment : quand l'origine limite ou ralentit, les miroirs prennent le
+  relais, et un miroir en panne, lent ou qui sert un autre fichier est écarté. Seulement quand une somme permet de
+  tout vérifier.
 - **Vidéos en un clic.** Un bouton « Télécharger cette vidéo » apparaît sur les lecteurs ; la popup liste les
   médias détectés ; YouTube et des centaines de sites passent par [yt-dlp](https://github.com/yt-dlp/yt-dlp),
   avec choix de la qualité (meilleure, 1080p, 720p, 480p, MP3). Les flux HLS/DASH sont assemblés en un seul MP4.
@@ -218,6 +222,13 @@ obtient une erreur ou une page HTML, Chrome continue.
    Google Cloud Storage, la redirection de Hugging Face ou d'un serveur de miroirs comme celui de LibreOffice) ou de
    l'utilisateur. Un fichier qui ne correspond pas n'est jamais livré : il reste en `.pdm`, le téléchargement échoue
    avec les deux sommes, et **Réessayer** repart de zéro.
+8. Un serveur de miroirs (Metalink/HTTP, RFC 6249) annonce sur sa redirection les autres miroirs du fichier
+   (`Link: <…>; rel=duplicate`) et sa somme. Quand une somme attendue permettra de vérifier le tout, PDM prend des
+   morceaux chez plusieurs d'entre eux : à chaque fin de segment, la connexion repart vers le serveur le plus
+   rapide mesuré. Un miroir inconnu n'est essayé qu'un à la fois, et seulement si le téléchargement doit durer plus
+   de dix secondes ou si des connexions attendent une place : sur une ligne que le miroir le plus proche sature
+   déjà, les autres ne prennent rien. Un miroir qui ne sert pas un fichier de la même taille, qui échoue ou qui
+   traîne est écarté ; si le fichier final ne correspond pas, le prochain essai se passe des miroirs.
 
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de
@@ -320,7 +331,8 @@ Oui. Le démon est indépendant du navigateur ; rouvre le gestionnaire pour voir
 - **Seule cette extension peut lancer le moteur :** la déclaration du programme natif n'autorise qu'un identifiant
   d'extension, fixé par la clé publique de `manifest.json`.
 - **Les cookies restent à leur place.** Ils ne sont transmis au moteur que pour le site du téléchargement, et
-  retirés si une redirection quitte ce site. La liste des téléchargements qui les contient (`jobs.json`) n'est
+  retirés si une redirection quitte ce site ; les miroirs ne les reçoivent jamais, et un miroir en `http://`
+  annoncé par un site en `https://` est ignoré. La liste des téléchargements qui les contient (`jobs.json`) n'est
   lisible que par ton utilisateur (`0600`), tout comme le socket Unix du démon.
 - **Tout ce qui vient du web est considéré comme hostile :** noms de fichiers nettoyés, aucun contenu injecté avec
   `innerHTML`, yt-dlp appelé avec une liste d'arguments (sans shell) après `--`.
@@ -342,7 +354,7 @@ engine/
   pdm-host                 point d'entrée (pont, démon, ligne de commande)
   pdm_engine/              httpdl.py (HTTP segmenté) · ytdlp.py · engine.py (file d'attente, persistance)
                            hosts.py (connexions par site) · limiter.py (vitesse maximale)
-                           checksum.py (sommes attendues et calculées)
+                           checksum.py (sommes attendues et calculées) · metalink.py (miroirs)
                            daemon.py (socket Unix) · host.py (pont Native Messaging)
 tests/                     tests d'intégration Python contre un serveur HTTP local, tests unitaires Node
 install.sh · uninstall.sh

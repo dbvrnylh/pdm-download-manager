@@ -20,9 +20,10 @@ Routes :
   /mirrorbrain/SORTE/NOM  302 vers /range/NOM, comme un serveur de miroirs : il annonce les sommes
                     (Digest, une par en-tête) et un miroir /mirror/SORTE/NOM sur l'autre hôte (Link:
                     rel=duplicate). Sortes : celles de /mirror/ ; bare, les sommes sans miroir (une
-                    redirection quelconque : à ignorer) ; nodigest, le miroir sans les sommes
+                    redirection quelconque : à ignorer) ; nodigest, le miroir sans les sommes.
+                    ?limited : vers /limited/1/NOM, un serveur d'origine qui n'accepte qu'une connexion
   /mirror/SORTE/NOM un miroir : good (le fichier), stale (une autre version, plus longue), corrupt (même
-                    taille, un octet différent), down (404)
+                    taille, un octet faux tous les 4 Ko), down (404)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 """
@@ -105,7 +106,8 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "mirrorbrain":
             kind, _, name = rest.partition("/")
             data = FILES.get(name, b"")
-            headers = [("Location", f"http://127.0.0.1:{self.server.server_port}/range/{name}")]
+            target = f"limited/1/{name}" if self.path.endswith("?limited") else f"range/{name}"
+            headers = [("Location", f"http://127.0.0.1:{self.server.server_port}/{target}")]
             if kind != "bare":
                 mirror = "good" if kind == "nodigest" else kind
                 headers.append(("Link", f"<http://localhost:{self.server.server_port}/mirror/{mirror}/{name}>; "
@@ -197,9 +199,9 @@ class Handler(SimpleHTTPRequestHandler):
             etag = f'"{name}-{variant}"'
             if variant == "stale":
                 data += b"ancienne version"
-            elif variant == "corrupt":
-                middle = len(data) // 2
-                data = data[:middle] + bytes([data[middle] ^ 1]) + data[middle + 1:]
+            elif variant == "corrupt":  # un octet faux tous les 4 Ko : quel que soit le morceau servi
+                data = bytearray(data)
+                data[::4096] = bytes(b ^ 1 for b in data[::4096])
         if unstable:  # étiquette différente à chaque requête (fichier généré par un script)
             UNSTABLE[0] += 1
             etag = f'"{name}-r{UNSTABLE[0]}"'

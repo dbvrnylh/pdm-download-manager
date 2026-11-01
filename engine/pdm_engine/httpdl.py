@@ -12,6 +12,10 @@ Principe (celui d'IDM) :
    redémarrage, chaque segment repart de là où il s'était arrêté.
 5. Le fichier est vérifié : son SHA-256 est calculé au fil du téléchargement, et
    comparé à la fin aux sommes attendues (serveur, page, utilisateur).
+6. Miroirs : quand le serveur en annonce (metalink.py) et qu'une somme attendue
+   permettra de vérifier le tout, chaque connexion choisit, à chaque segment, le
+   serveur le plus rapide mesuré (comme le « feedback » d'aria2). Un miroir
+   inconnu n'est essayé que quand ça vaut le coup (voir _candidates).
 """
 
 import ctypes
@@ -29,7 +33,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import checksum
+from . import checksum, metalink
 from .hosts import Hosts
 from .util import (
     ensure_extension,
@@ -65,6 +69,7 @@ WAITING = "En attente du serveur…"
 VERIFYING = "Vérification…"
 SYNC_EVERY = 5.0  # s entre deux points de reprise sûrs (fdatasync) : au pire, autant à refaire
 HASH_EVERY = 0.2  # s entre deux coups d'œil du calcul des sommes, quand il a rattrapé le téléchargement
+MIRROR_AFTER = 10.0  # s restantes : en dessous, essayer un miroir inconnu coûterait plus qu'il ne rapporte
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) PDM/2.0"
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 LIMIT_HTTP = {429, 503}  # « trop de connexions » (nginx limit_conn, mod_limitipconn…)
@@ -105,6 +110,10 @@ class Rejected(DownloadError):
 
 class ResourceChanged(DownloadError):
     """Le fichier a changé sur le serveur : la reprise est impossible."""
+
+
+class _BadMirror(DownloadError):
+    """Un miroir qui ne sert pas le même fichier : il est écarté, pas le téléchargement."""
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
@@ -202,7 +211,8 @@ def clean_headers(raw):
     return clean or None
 
 
-def build_request(job, url, start=None, end=None, validator=None):
+def build_request(job, url, start=None, end=None, validator=None, foreign=False):
+    """La requête d'une plage du fichier. `foreign` : chez un autre serveur (un miroir)."""
     if job.headers:
         # La requête exacte du navigateur (prise de contrôle), façon IDM : son
         # Cookie d'origine, Accept-Language, sec-fetch-*… Certains anti-robots
@@ -214,6 +224,10 @@ def build_request(job, url, start=None, end=None, validator=None):
             headers["Referer"] = job.referer
         if job.cookies:
             headers["Cookie"] = job.cookies
+    if foreign:
+        # Comme une redirection vers un autre hôte (voir _SafeRedirect) : la session
+        # du site d'origine ne regarde pas ses miroirs.
+        headers = {name: value for name, value in headers.items() if name.lower() not in ("cookie", "authorization")}
     # Pas de compression : les plages d'octets doivent porter sur le fichier lui-même.
     headers["Accept-Encoding"] = "identity"
     if start is not None:
@@ -225,7 +239,7 @@ def build_request(job, url, start=None, end=None, validator=None):
 
 
 class ProbeResult:
-    def __init__(self, resp, size, resumable, filename, final_url, validator, mime, digest=None):
+    def __init__(self, resp, size, resumable, filename, final_url, validator, mime, digest=None, mirrors=()):
         self.resp = resp
         self.size = size
         self.resumable = resumable
@@ -234,6 +248,7 @@ class ProbeResult:
         self.validator = validator
         self.mime = mime
         self.digest = digest  # somme du fichier annoncée par le serveur, ou None
+        self.mirrors = list(mirrors)  # autres adresses du même fichier, annoncées par le serveur
 
     def close(self):
         if self.resp is not None:
@@ -289,8 +304,10 @@ def probe(job, timeout=TIMEOUT):
     # Une ETag « faible » (W/…) n'est pas acceptée par If-Range.
     validator = etag if etag and not etag.startswith("W/") else headers.get("Last-Modified")
     filename = sanitize_filename(ensure_extension(name, mime))
-    digest = checksum.from_headers(headers, full, getattr(resp, "redirects", ()), size)
-    return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime, digest)
+    redirects = list(getattr(resp, "redirects", ()))
+    digest = checksum.from_headers(headers, full, redirects, size)
+    mirrors = metalink.mirrors(redirects + [(resp.geturl(), headers)], exclude=(job.url, resp.geturl()))
+    return ProbeResult(resp, size, resumable, filename, resp.geturl(), validator, mime, digest, mirrors)
 
 
 def hang_up(resp):
@@ -310,16 +327,29 @@ def hang_up(resp):
         pass
 
 
+class Source:
+    """Une adresse d'où vient le fichier : celle du téléchargement, ou un miroir."""
+
+    __slots__ = ("url", "site", "places", "rate", "dropped")
+
+    def __init__(self, url, site):
+        self.url = url  # None : celle du téléchargement (finale, puis d'origine, voir _open_range)
+        self.site = site  # son serveur, pour les places (hosts.py)
+        self.places = 0  # places prises chez lui par ce téléchargement
+        self.rate = None  # vitesse d'une de ses connexions (octets/s), dernière mesure ; None : inconnue
+        self.dropped = False  # miroir écarté : en panne, trop lent, ou un autre fichier
+
+
 class Segment:
-    __slots__ = ("start", "end", "pos", "active", "resp", "since", "origin", "moved", "kicked", "kicks")
+    __slots__ = ("start", "end", "pos", "active", "resp", "source", "since", "origin", "moved", "kicked", "kicks")
 
     def __init__(self, start, end, pos):
         self.start, self.end, self.pos = start, end, pos  # end inclus ; None = inconnu
         self.active = False
-        # Sa connexion en cours (voir HttpDownload._watch) : la réponse, quand et à
-        # quelle position elle a commencé, la dernière fois qu'elle a reçu quelque
-        # chose, et si elle vient d'être coupée exprès (combien de fois en tout).
-        self.resp, self.since, self.origin, self.moved = None, 0.0, pos, 0.0
+        # Sa connexion en cours (voir HttpDownload._watch) : la réponse et son adresse,
+        # quand et à quelle position elle a commencé, la dernière fois qu'elle a reçu
+        # quelque chose, et si elle vient d'être coupée exprès (combien de fois en tout).
+        self.resp, self.source, self.since, self.origin, self.moved = None, None, 0.0, pos, 0.0
         self.kicked, self.kicks = False, 0
 
     def rate(self, now, grace=SLOW_GRACE):
@@ -407,8 +437,11 @@ class HttpDownload:
         self.limiter = limiter  # limite de vitesse globale (limiter.Limiter), partagée
         self.hosts = hosts or Hosts()  # places chez chaque site (hosts.Hosts), partagées
         self.site = urlparse(job.url).hostname or ""
+        self.origin = Source(None, self.site)
+        self.sources = [self.origin]  # plus les miroirs, quand ils servent (voir _use_mirrors)
         self.waiting = 0  # connexions qui attendent une place chez le serveur
         self.best_rate = 0.0  # la meilleure vitesse d'une connexion de ce téléchargement (octets/s)
+        self.total_rate = 0.0  # la vitesse de toutes ses connexions, à la dernière mesure
         self.reserve = reserve  # fonction du moteur : choisit et réserve un chemin libre
         self.first = first  # ProbeResult déjà ouvert (sonde faite à l'ajout)
         self.lock = threading.Lock()
@@ -416,7 +449,7 @@ class HttpDownload:
         self.stop_reason = None
         self.error = None
         self.fd = None
-        self.responses = set()
+        self.responses = {}  # réponse ouverte → son serveur
         self.segments = [Segment(*s) for s in (job.segments or [])]
         # Point de reprise sûr : les segments tels qu'ils sont sur le disque, pas
         # seulement dans le cache du système. C'est lui que le moteur sauvegarde.
@@ -451,6 +484,7 @@ class HttpDownload:
                 "segments": [s.to_list() for s in self.segments],
                 "saved": self.saved,
                 "connections": connections,
+                "sources": len({s.source for s in self.segments if s.resp is not None}),
                 "stage": stage,
             }
 
@@ -516,6 +550,7 @@ class HttpDownload:
         first, self.first = self.first, None
         if first is not None:
             self.hosts.take(self.site, force=True)  # la sonde faite à l'ajout est une connexion ouverte
+            self.origin.places += 1
         resuming = (
             first is None and self.segments and job.resumable and job.path
             and os.path.exists(job.path + PART_SUFFIX)
@@ -529,14 +564,17 @@ class HttpDownload:
                     if first is None:
                         return self.stop_reason or "paused"  # arrêté en attendant le serveur
                 self._apply_probe(first)
+                self._use_mirrors()
                 self._create_file()
+            if resuming:
+                self._use_mirrors()
             # Une reprise recompte depuis le début, en relisant ce qui est déjà sur le disque.
             self.digester = checksum.Digester(checksum.algorithms(job.checksums))
             self._download(first)
         finally:
             if first is not None:
                 if first.resp is not None:  # pas confiée à une connexion : sa place est libre
-                    self.hosts.give_back(self.site)
+                    self._give_back(self.origin)
                 first.close()
         return self._finish()
 
@@ -548,7 +586,7 @@ class HttpDownload:
         téléchargement passera quand une place se libérera.
         """
         retries = 0
-        while self._wait_place(lambda: True)[0]:
+        while self._wait_place(lambda: True, [self.origin])[0]:
             for attempt in range(2):  # un refus isolé : une seconde chance, un peu plus tard (voir _fetch)
                 if attempt:
                     self.stop_event.wait(LAG_WAIT)
@@ -558,8 +596,8 @@ class HttpDownload:
                     error = e
                     if self.stop_event.is_set() or not is_refusal(e.__cause__):
                         break
-            if self.stop_event.is_set() or not is_refusal(error.__cause__) or not self.hosts.refused(self.site):
-                self.hosts.give_back(self.site)
+            if self.stop_event.is_set() or not is_refusal(error.__cause__) or not self._refused(self.origin):
+                self._give_back(self.origin)
                 raise error
             retries += 1
             self._pause_waiting(min(2 ** retries, 30))
@@ -576,6 +614,21 @@ class HttpDownload:
         job.category = self.config.category_for(job.filename, job.mime)[0]
         # Celle d'une sonde précédente ne vaut plus : le fichier a pu changer depuis.
         job.checksums = [c for c in job.checksums if c["source"] != "server"] + ([result.digest] if result.digest else [])
+        if job.mirrors is not None:  # None : écartés après un fichier faux (voir _verify)
+            job.mirrors = result.mirrors
+
+    def _use_mirrors(self):
+        """Ajoute les miroirs du fichier aux adresses où le prendre, quand c'est sûr.
+
+        Seulement avec une somme attendue : un miroir en retard d'une version
+        servirait un autre fichier de la même taille, que seul le contrôle final
+        verrait. Et avec des requêtes partielles : un miroir ne sert qu'à prendre
+        des morceaux.
+        """
+        job = self.job
+        self.sources = [self.origin]
+        if job.mirrors and job.checksums and job.resumable and self.size:
+            self.sources += [Source(url, urlparse(url).hostname or "") for url in job.mirrors]
 
     def _create_file(self):
         job = self.job
@@ -594,7 +647,8 @@ class HttpDownload:
             if job.resumable and self.size is not None:
                 # Un site qui n'accepte que 2 connexions : 2 segments, pas 8 qui se
                 # passeraient la main (la segmentation dynamique ajoute ce qu'il faut).
-                limit = self.hosts.limit(self.site)
+                # Avec des miroirs, les autres serveurs prennent le reste.
+                limit = self.hosts.limit(self.site) if len(self.sources) == 1 else None
                 connections = self.config["connections"] if limit is None else min(self.config["connections"], limit)
                 self.segments = plan_segments(self.size, connections)
             else:
@@ -685,10 +739,15 @@ class HttpDownload:
         now = time.monotonic()
         with self.lock:
             live = [seg for seg in self.segments if seg.resp is not None and not seg.kicked]
+            rates = {}  # adresse → vitesses de ses connexions
             for seg in live:
                 rate = seg.rate(now, grace=1.0)
                 if rate:
                     self.best_rate = max(self.best_rate, rate)
+                    rates.setdefault(seg.source, []).append(rate)
+            for source, measured in rates.items():  # pour le choix des adresses (voir _candidates)
+                source.rate = sum(measured) / len(measured)
+            self.total_rate = sum(map(sum, rates.values()))
             if not self.best_rate:
                 return
             slow = [
@@ -754,21 +813,70 @@ class HttpDownload:
         with self.lock:
             return any(not s.active and not s.done() for s in self.segments) or self._victim() is not None
 
-    def _wait_place(self, has_work):
-        """Prend une place chez le serveur, en attendant s'il est plein.
+    def _wait_place(self, has_work, sources=None):
+        """Prend une place chez un serveur du fichier, en attendant s'ils sont pleins.
 
-        Renvoie (prise, à l'aveugle). Pas prise : arrêt, ou plus rien à faire pour
-        cette connexion (`has_work`). À l'aveugle : prise du premier coup, sans
-        limite connue pour ce site (une limite apprise entre-temps compte comme
-        connue : au pire, on apprendra au refus suivant).
+        Renvoie (adresse, à l'aveugle). Adresse None : arrêt, ou plus rien à faire
+        pour cette connexion (`has_work`). Parmi plusieurs (miroirs), la meilleure
+        qui a une place (voir _candidates). À l'aveugle : prise du premier coup,
+        sans limite connue pour ce site (une limite apprise entre-temps compte
+        comme connue : au pire, on apprendra au refus suivant).
         """
         first = True
         while not self.stop_event.is_set() and has_work():
-            if self.hosts.take(self.site):
-                return True, first and self.hosts.limit(self.site) is None
+            # Choix et prise d'un seul tenant : deux connexions n'essaient pas le même miroir inconnu.
+            with self.lock:
+                # Une connexion qui attend déjà : de la place perdue, un miroir inconnu vaut l'essai.
+                for source in self._candidates(sources or self.sources, explore=not first or self._lasting()):
+                    if self.hosts.take(source.site):
+                        source.places += 1
+                        return source, first and self.hosts.limit(source.site) is None
             first = False
             self._pause_waiting(PLACE_WAIT)
-        return False, False
+        return None, False
+
+    def _candidates(self, sources, explore):
+        """Les adresses où ouvrir une connexion, la meilleure d'abord (sous verrou).
+
+        La plus rapide par connexion, mesurée (voir _kick_slow) : quand le serveur
+        le plus proche suffit à saturer la ligne, les miroirs lointains ne prennent
+        rien, et les connexions vont là où ça va vite. Un miroir inconnu n'est
+        essayé qu'un à la fois, et quand ça vaut le coup (`explore`) : sinon, il
+        prendrait un morceau du fichier sans qu'on sache encore à quelle vitesse.
+        """
+        live = [s for s in sources if not s.dropped]
+        known = [s for s in live if s is self.origin or s.rate is not None]
+        known.sort(key=lambda s: s.rate or 0, reverse=True)  # à égalité, celle du téléchargement d'abord
+        untried = [s for s in live if s not in known]
+        if explore and untried and not any(s.places for s in untried):
+            return untried[:1] + known
+        return known
+
+    def _lasting(self):
+        """Le téléchargement durera-t-il assez pour que l'essai d'un miroir paie ? (sous verrou)"""
+        if not self.total_rate or self.size is None:
+            return False
+        return (self.size - self.downloaded) / self.total_rate > MIRROR_AFTER
+
+    def _give_back(self, source):
+        self.hosts.give_back(source.site)
+        with self.lock:
+            source.places -= 1
+
+    def _refused(self, source):
+        """Voir Hosts.refused. True : c'est la limite de ce serveur, et la place est rendue."""
+        if not self.hosts.refused(source.site):
+            return False
+        with self.lock:
+            source.places -= 1
+        return True
+
+    def _drop(self, source, why):
+        with self.lock:
+            if source.dropped:
+                return
+            source.dropped = True
+        log.info("%s : miroir %s écarté (%s)", self.job.filename, source.site, why)
 
     def _pause_waiting(self, delay):
         with self.lock:
@@ -781,21 +889,29 @@ class HttpDownload:
 
     def _worker(self, seg, resp):
         # La première connexion (la sonde, `resp`) a déjà sa place chez le serveur.
-        placed, blind = resp is not None, False
+        source, blind = (self.origin if resp is not None else None), False
+        served = set()  # serveurs qui ont déjà accepté cette connexion : plus à l'aveugle chez eux
         try:
             while not self.stop_event.is_set():
-                if not placed:
-                    placed, blind = self._wait_place(self._has_work)
-                    if not placed:
+                if source is None:
+                    source, blind = self._wait_place(self._has_work)
+                    if source is None:
                         return
+                    blind = blind and source.site not in served
                 if seg is None:
                     seg = self._next_segment()
                     if seg is None:
                         return
-                if self._fetch(seg, resp, blind):
+                if self._fetch(seg, source, resp, blind):
                     blind = False
-                else:  # refusée : place rendue, le segment reste à prendre
-                    placed = False
+                    served.add(source.site)
+                    if len(self.sources) > 1:
+                        # Fin du segment : le suivant ira à l'adresse la plus rapide du
+                        # moment. Sans rien perdre : chaque requête ouvre sa connexion.
+                        self._give_back(source)
+                        source = None
+                else:  # refusée, ou miroir écarté : place rendue, le segment reste à prendre
+                    source = None
                     self._pause_waiting(PLACE_WAIT)
                 resp = None
                 with self.lock:
@@ -810,29 +926,32 @@ class HttpDownload:
                 with self.lock:
                     seg.active = False
             self._release(resp)
-            if placed:
-                self.hosts.give_back(self.site)
+            if source is not None:
+                self._give_back(source)
 
-    def _track(self, resp):
+    def _track(self, resp, source):
         with self.lock:
-            self.responses.add(resp)
-        self.hosts.accepted(self.site)  # le serveur l'a acceptée : une preuve de ce qu'il permet
+            self.responses[resp] = source.site
+        self.hosts.accepted(source.site)  # le serveur l'a acceptée : une preuve de ce qu'il permet
 
     def _release(self, resp):
         if resp is None:
             return
         with self.lock:
-            tracked = resp in self.responses
-            self.responses.discard(resp)
-        if tracked:
-            self.hosts.closed(self.site)
+            site = self.responses.pop(resp, None)
+        if site is not None:
+            self.hosts.closed(site)
         try:
             resp.close()
         except Exception:
             pass
 
-    def _fetch(self, seg, resp, blind=False):
-        """Télécharge le segment. False : le serveur refuse cette connexion de plus.
+    def _fetch(self, seg, source, resp, blind=False):
+        """Télécharge le segment. False : place rendue, le segment reste à prendre.
+
+        Rendue quand le serveur refuse cette connexion de plus, ou quand `source`
+        est un miroir qui échoue : il est écarté, les autres adresses prennent le
+        segment. Celle du téléchargement, elle, insiste.
 
         Un refus quand d'autres connexions tiennent déjà ce site, c'est la limite
         du serveur, pas une panne : plutôt qu'insister jusqu'à faire échouer tout
@@ -856,17 +975,17 @@ class HttpDownload:
             opening = resp is None
             try:
                 if opening:
-                    resp = self._open_range(seg)
+                    resp = self._open_range(seg, source)
                     opening, opened = False, True
-                self._track(resp)
-                self._attach(seg, resp)
+                self._track(resp, source)
+                self._attach(seg, resp, source)
                 if self._stream(seg, resp):
                     break
                 raise http.client.IncompleteRead(b"")
             except (_DiskError, ResourceChanged):
                 raise
             except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError,
-                    AttributeError) as e:
+                    AttributeError, _BadMirror) as e:
                 error = e  # HTTPError compris (c'est une URLError)
             finally:
                 self._detach(seg)
@@ -876,15 +995,21 @@ class HttpDownload:
                 break
             with self.lock:
                 kicked, seg.kicked = seg.kicked, False
-            if kicked:  # trop lente, coupée exprès (voir _kick_slow) : rouverte aussitôt, sans attente
+            mirror = source is not self.origin
+            if kicked and not mirror:  # trop lente, coupée exprès (voir _kick_slow) : rouverte aussitôt
                 continue
-            if opening and self.job.resumable and is_refusal(error, accepted=True):
+            if not kicked and opening and self.job.resumable and is_refusal(error, accepted=True):
                 if not lagged and not (blind and not opened):
                     lagged = True
                     self.stop_event.wait(LAG_WAIT)
                     continue
-                if self.hosts.refused(self.site):  # False : seule chez ce site, une vraie erreur
+                if self._refused(source):  # False : seule chez ce site, une vraie erreur
                     return False
+            if mirror:
+                # Les autres adresses font mieux : inutile d'insister sur celle-ci.
+                self._drop(source, "trop lent" if kicked else _reason(error))
+                self._give_back(source)
+                return False
             lagged = False
             if isinstance(error, urllib.error.HTTPError) and error.code not in RETRYABLE_HTTP:
                 raise DownloadError(http_error_message(error)) from error
@@ -896,10 +1021,10 @@ class HttpDownload:
             self.stop_event.wait(min(2 ** retries, 30))  # attente croissante, interrompue par une pause
         return True
 
-    def _attach(self, seg, resp):
+    def _attach(self, seg, resp, source):
         now = time.monotonic()
         with self.lock:
-            seg.resp, seg.since, seg.origin, seg.moved = resp, now, seg.pos, now
+            seg.resp, seg.source, seg.since, seg.origin, seg.moved = resp, source, now, seg.pos, now
 
     def _detach(self, seg):
         now = time.monotonic()
@@ -963,8 +1088,10 @@ class HttpDownload:
                 raise _DiskError("écriture impossible : le disque n'accepte plus rien")
             data, position = data[written:], position + written
 
-    def _open_range(self, seg):
+    def _open_range(self, seg, source):
         job = self.job
+        if source is not self.origin:
+            return self._open_mirror(seg, source)
         urls = [job.finalUrl or job.url]
         if job.url not in urls:
             urls.append(job.url)  # l'URL finale (signée, redirigée) a pu expirer
@@ -986,6 +1113,27 @@ class HttpDownload:
                 raise ResourceChanged("le fichier a changé sur le serveur")
             return resp
         raise DownloadError("aucune URL utilisable")
+
+    def _open_mirror(self, seg, source):
+        """Une plage chez un miroir, qui doit prouver qu'il a le même fichier.
+
+        Sans If-Range : chaque miroir a ses propres ETag. Sa taille doit être
+        celle du fichier ; le contenu, lui, sera vérifié par la somme attendue.
+        """
+        try:
+            resp = _opener.open(build_request(self.job, source.url, seg.pos, seg.end, foreign=True), timeout=TIMEOUT)
+        except urllib.error.HTTPError as e:
+            e.close()  # sa connexion, que personne ne lira
+            raise
+        match = CONTENT_RANGE.match(resp.headers.get("Content-Range") or "")
+        encoding = (resp.headers.get("Content-Encoding") or "identity").strip().lower()
+        if resp.status != 206 or not match or encoding != "identity":
+            resp.close()
+            raise _BadMirror("pas de requêtes partielles")
+        if int(match.group(1)) != seg.pos or match.group(3) != str(self.size):
+            resp.close()
+            raise _BadMirror("pas le même fichier")
+        return resp
 
     def _finish(self):
         if self.error is not None:
@@ -1035,7 +1183,13 @@ class HttpDownload:
         if wrong:
             with self.lock:
                 self.segments, self.saved, self.downloaded = [], [], 0
-            raise DownloadError(checksum.failure(wrong, self.digester.hexdigest(wrong["algo"])))
+            message = checksum.failure(wrong, self.digester.hexdigest(wrong["algo"]))
+            if len(self.sources) > 1:
+                # Un miroir a peut-être un autre fichier, mais lequel ? Le prochain
+                # essai se passera d'eux : il dira si l'adresse d'origine, elle, est bonne.
+                job.mirrors = None
+                message += " ; le prochain essai se passera des miroirs"
+            raise DownloadError(message)
         job.sha256 = self.digester.hexdigest("sha-256")
         job.verified = True if job.checksums else None
         if job.checksums:

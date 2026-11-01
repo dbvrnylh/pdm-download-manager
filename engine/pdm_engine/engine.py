@@ -37,8 +37,12 @@ PERSISTED = {
     # Intégrité : sommes attendues (voir checksum.py), SHA-256 du fichier terminé,
     # et résultat de la dernière comparaison (None : rien à quoi comparer).
     "checksums": [], "sha256": None, "verified": None,
+    # Autres adresses du fichier annoncées par son serveur (metalink.py) ; None :
+    # écartées, après un fichier qui ne correspondait pas.
+    "mirrors": [],
 }
-SECRET = {"cookies", "headers", "userAgent", "validator"}  # jamais envoyés à l'interface
+# Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
+HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors"}
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
 
 
@@ -52,6 +56,7 @@ class Job:
         self.speed = 0.0
         self.eta = None
         self.connections = 0
+        self.sources = 0  # serveurs qui envoient le fichier en ce moment (miroirs compris)
         self.stage = None
         self.sample = None
         # Segments affichés : ceux reçus. `segments`, sauvegardé, ne garde que ceux
@@ -62,8 +67,9 @@ class Job:
         return {name: getattr(self, name) for name in PERSISTED}
 
     def public(self):
-        data = {k: v for k, v in self.to_dict().items() if k not in SECRET}
-        data.update(speed=self.speed, eta=self.eta, connections=self.connections, stage=self.stage)
+        data = {k: v for k, v in self.to_dict().items() if k not in HIDDEN}
+        data.update(speed=self.speed, eta=self.eta, connections=self.connections, sources=self.sources,
+                    stage=self.stage)
         if self.status not in ("downloading", "paused"):
             data["segments"] = []
         elif self.bar is not None:
@@ -419,7 +425,7 @@ class Engine:
                 runner.cleanup()
                 self._reset(job)
             job.status, job.error = outcome, error
-            job.speed, job.eta, job.connections, job.stage = 0.0, None, 0, None
+            job.speed, job.eta, job.connections, job.sources, job.stage = 0.0, None, 0, 0, None
             if outcome == "completed":
                 job.completedAt = time.time()
                 job.segments = []
@@ -502,6 +508,7 @@ class Engine:
             job.bar = progress["segments"]
             job.segments = progress.get("saved", progress["segments"])
         job.connections = progress.get("connections", 0)
+        job.sources = progress.get("sources", 0)
         job.stage = progress.get("stage")
 
     # ─── Utilitaires ───────────────────────────────────────────────────────

@@ -125,6 +125,7 @@ function fromEngine(job) {
     eta: job.eta,
     segments: job.kind === 'http' ? job.segments : null,
     connections: job.connections,
+    sources: job.sources ?? 1,
     stage: job.stage,
     resumable: job.resumable,
     scheduled: job.scheduled,
@@ -326,6 +327,7 @@ function describe(entry) {
       if (entry.eta > 0) parts.push(`reste ${formatDuration(entry.eta)}`);
       if (entry.connections > 1) parts.push(`${entry.connections} connexions`);
       else if (entry.kind === 'ytdlp' && entry.connections === 1) parts.push('1 connexion');
+      if (entry.sources > 1) parts.push(`${entry.sources} serveurs`); // miroirs pris en même temps
       return parts.join(' · ');
     }
     case 'paused': {

@@ -414,6 +414,76 @@ class EngineTest(unittest.TestCase):
         job = self.wait(self.add("/mirrorbrain/bare/mid.bin").id, {"completed", "failed"})
         self.assertEqual((job.status, job.checksums, job.verified), ("completed", [], None))
 
+    # ─── Miroirs ───────────────────────────────────────────────────────────
+
+    def mirror_requests(self, kind, name):
+        return [(host, cookie) for host, path, cookie in fx.HOSTS if path == f"/mirror/{kind}/{name}"]
+
+    def test_a_file_comes_from_its_mirrors_at_the_same_time(self):
+        # Le serveur d'origine n'accepte qu'une connexion : le miroir prend les autres.
+        fx.HOSTS.clear()
+        job = self.add("/mirrorbrain/good/big.bin?limited", cookies="session=secret")
+        sources = 0
+        while job.status in ("queued", "downloading"):
+            sources = max(sources, job.sources)
+            time.sleep(0.05)
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["big.bin"])
+        self.assertTrue(job.verified)
+        self.assertEqual(job.mirrors, [f"http://localhost:{self.server.server_port}/mirror/good/big.bin"])
+        self.assertEqual(sources, 2, "le serveur d'origine et son miroir en même temps")
+        mirror = self.mirror_requests("good", "big.bin")
+        self.assertGreaterEqual(len(mirror), 3, "le miroir a servi des morceaux")
+        origin = [cookie for host, path, cookie in fx.HOSTS if path == "/limited/1/big.bin"]
+        self.assertTrue(origin and all(cookie == "session=secret" for cookie in origin))
+        self.assertEqual({cookie for _, cookie in mirror}, {None}, "la session du site ne va pas chez ses miroirs")
+
+    def test_a_fast_server_keeps_a_short_download_to_itself(self):
+        # Un miroir inconnu coûterait plus qu'il ne rapporterait : le fichier est là dans la seconde.
+        fx.HOSTS.clear()
+        job = self.wait(self.add("/mirrorbrain/good/mid.bin").id, {"completed", "failed"})
+        self.assertEqual((job.status, job.verified), ("completed", True))
+        self.assertEqual(self.mirror_requests("good", "mid.bin"), [])
+
+    def test_a_mirror_that_fails_is_left_out(self):
+        for kind in ("stale", "down"):
+            with self.subTest(kind):
+                fx.HOSTS.clear()
+                job = self.wait(self.add(f"/mirrorbrain/{kind}/mid.bin?limited").id, {"completed", "failed"})
+                self.assertEqual(job.status, "completed", job.error)
+                self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+                self.assertEqual(len(self.mirror_requests(kind, "mid.bin")), 1, "essayé une fois, puis écarté")
+
+    def test_mirrors_are_only_used_with_a_checksum(self):
+        fx.HOSTS.clear()
+        job = self.wait(self.add("/mirrorbrain/nodigest/mid.bin?limited").id, {"completed", "failed"})
+        self.assertEqual((job.status, job.checksums), ("completed", []))
+        self.assertEqual(self.mirror_requests("good", "mid.bin"), [], "sans somme, un autre fichier passerait")
+
+    def test_a_mirror_with_a_wrong_file_is_left_out_of_the_next_try(self):
+        job = self.wait(self.add("/mirrorbrain/corrupt/mid.bin?limited").id, {"completed", "failed"})
+        self.assertEqual(job.status, "failed")
+        self.assertIn("vérification échouée", job.error)
+        self.assertIn("le prochain essai se passera des miroirs", job.error)
+        self.assertIsNone(job.mirrors)
+        fx.HOSTS.clear()
+        self.engine.retry(job.id)
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["mid.bin"])
+        self.assertEqual(self.mirror_requests("corrupt", "mid.bin"), [])
+
+    def test_a_mirror_never_gets_the_session_of_the_site(self):
+        job = SimpleNamespace(headers=[["Cookie", "a=1"], ["Authorization", "Basic x"], ["Accept-Language", "fr"]],
+                              userAgent=None, referer=None, cookies=None)
+        request = httpdl.build_request(job, "https://miroir.example/f.iso", 0, None, foreign=True)
+        self.assertEqual({k.lower() for k in request.headers}, {"accept-language", "accept-encoding", "range"})
+        job = SimpleNamespace(headers=None, userAgent=None, referer="https://site.example/", cookies="a=1")
+        request = httpdl.build_request(job, "https://miroir.example/f.iso", 0, None, foreign=True)
+        self.assertNotIn("Cookie", request.headers)
+        self.assertEqual(request.headers["Referer"], "https://site.example/")
+
     def test_a_file_that_does_not_match_is_never_delivered(self):
         fx.LOG.clear()
         job = self.wait(self.add("/digest/wrong/mid.bin").id, {"completed", "failed"})

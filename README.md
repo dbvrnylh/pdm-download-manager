@@ -35,6 +35,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
 - **Verified files.** Every file's SHA-256 is computed while it downloads and compared with the checksum shown next
   to the link (GitHub, Linux distributions…) or announced by the server: a damaged file is never delivered.
   **Vérifier…** checks a finished file against a checksum you paste.
+- **Several servers at once.** When the site lists its mirrors (Metalink/HTTP, like LibreOffice), each connection
+  goes to the fastest server of the moment: when the origin limits or slows down, the mirrors take over, and a
+  mirror that is down, slow or serves another file is dropped. Only when a checksum can verify the whole file.
 - **Videos in one click.** A "download this video" button appears on players; the popup lists detected media;
   YouTube and hundreds of sites are supported through [yt-dlp](https://github.com/yt-dlp/yt-dlp), with quality
   presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
@@ -219,6 +222,13 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    the redirect of Hugging Face or of a mirror server such as LibreOffice's) or from the user. A file that does not
    match is never delivered: it stays as `.pdm`, the download fails with both checksums, and **Réessayer** starts
    over from zero.
+8. A mirror server (Metalink/HTTP, RFC 6249) lists the file's other mirrors on its redirect
+   (`Link: <…>; rel=duplicate`) along with its checksum. When an expected checksum will verify the whole file, PDM
+   takes pieces from several of them: at the end of each segment, the connection moves to the fastest server
+   measured. An unknown mirror is tried one at a time, and only when the download should last more than ten
+   seconds or connections are waiting for a place: on a line the nearest mirror already fills, the others get
+   nothing. A mirror that does not serve a file of the same size, fails or lags is dropped; if the final file does
+   not match, the next try does without mirrors.
 
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official
@@ -319,7 +329,8 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
 - **Only this extension can start the engine:** the native host manifest allows a single extension ID,
   pinned by the public key in `manifest.json`.
 - **Cookies stay scoped.** They are forwarded to the engine only for the download's site and are stripped when a
-  redirect leaves that host. The job list that stores them (`jobs.json`) is readable by your user only (`0600`),
+  redirect leaves that host; mirrors never get them, and an `http://` mirror listed by an `https://` site is
+  ignored. The job list that stores them (`jobs.json`) is readable by your user only (`0600`),
   and the daemon's Unix socket is private to your user.
 - **Hostile input is treated as such:** file names are sanitized, page content is never injected with `innerHTML`,
   and yt-dlp is called with an argument list (no shell) after `--`.
@@ -340,7 +351,7 @@ engine/
   pdm-host                 entry point (bridge, daemon, CLI)
   pdm_engine/              httpdl.py (segmented HTTP) · ytdlp.py · engine.py (queue, persistence)
                            hosts.py (connections per site) · limiter.py (speed limit)
-                           checksum.py (expected and computed checksums)
+                           checksum.py (expected and computed checksums) · metalink.py (mirrors)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
 tests/                     Python integration tests against a local HTTP server, Node unit tests
 install.sh · uninstall.sh

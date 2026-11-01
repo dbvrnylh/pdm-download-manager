@@ -6,6 +6,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Downloads from several mirrors at once. A mirror server (Metalink/HTTP, RFC 6249: MirrorBrain, which serves
+  LibreOffice) lists the file's other mirrors on its redirect; when an expected checksum will verify the whole
+  file, the engine takes pieces from up to 4 of them besides the origin. Each connection picks, at the end of each
+  segment, the fastest server measured (aria2's "feedback" selector); an unknown mirror is tried one at a time,
+  only when the download should last more than 10 s or connections are waiting for a place (an origin that limits
+  connections per IP). On a line the nearest mirror already fills, nothing changes: measured on LibreOffice's
+  212 MB tarball, 53–56 MB/s with mirrors against 51–52 MB/s without, where spreading connections evenly had given
+  31–48 MB/s. A mirror whose file has another size, that fails or lags is dropped; one that sends another file of
+  the same size is caught by the checksum, and the next try does without mirrors. Mirrors never get the site's
+  cookies, never get `If-Range` (their ETags differ), and an `http://` mirror listed over `https://` is ignored.
+  The manager shows "N serveurs" while several send the file.
 - Downloaded files are verified. The engine computes each file's SHA-256 while it downloads (reading back in
   order what was just written, still in memory, so a finished file is not read again from the start) and
   compares it with the expected checksums: a file that does not match is never delivered — it stays as `.pdm`,
