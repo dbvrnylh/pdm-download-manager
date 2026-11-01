@@ -222,11 +222,13 @@ class Daemon:
             elif kind == "list":
                 reply(jobs=self.engine.public_jobs())
             elif kind == "rpc":
-                # État de l'API JSON-RPC ; « renew » : un nouveau secret. Le secret lui-même
-                # n'est jamais envoyé : il est dans un fichier réservé à l'utilisateur.
+                # État de l'API JSON-RPC ; « renew » : un nouveau secret ; « secret » : le
+                # donner, pour le copier depuis la page Réglages. Ce canal n'est ouvert qu'à
+                # l'extension de PDM (allowed_origins du manifeste natif) et à l'utilisateur
+                # (socket 0600) : comme le fichier où il est rangé.
                 if message.get("renew"):
                     self.rpc.renew()
-                reply(rpc=self.rpc.info())
+                reply(rpc=self.rpc.info(secret=bool(message.get("secret"))))
             elif kind == "shutdown":
                 reply()
                 # Arrêt propre par le chemin habituel : sauvegarde dans run().

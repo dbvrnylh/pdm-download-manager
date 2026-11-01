@@ -36,11 +36,13 @@ h2 {
   letter-spacing: 0.04em;
 }
 
-.engine-status {
+.engine-status,
+.rpc-status {
   margin: 0;
 }
 
-.engine-status::before {
+.engine-status::before,
+.rpc-status::before {
   content: '';
   display: inline-block;
   width: 9px;
@@ -50,12 +52,24 @@ h2 {
   background: var(--muted);
 }
 
-.engine-status[data-state='ok']::before {
+.engine-status[data-state='ok']::before,
+.rpc-status[data-state='ok']::before {
   background: var(--success);
 }
 
-.engine-status[data-state='missing']::before {
+.engine-status[data-state='missing']::before,
+.rpc-status[data-state='error']::before {
   background: var(--danger);
+}
+
+/* État de l'API : ses adresses, à recopier dans l'outil. */
+.rpc-status {
+  margin: 4px 0 14px;
+  overflow-wrap: anywhere;
+}
+
+.rpc-status code {
+  font-size: 12px;
 }
 
 .callout {
@@ -89,7 +103,8 @@ pre {
   color: var(--muted);
 }
 
-.field input {
+.field input,
+.field textarea {
   font: inherit;
   padding: 6px 10px;
   border: 1px solid var(--border);
@@ -107,6 +122,19 @@ pre {
 .field .input-row input {
   flex: 1;
   min-width: 0;
+}
+
+.field textarea {
+  resize: vertical;
+}
+
+/* Le secret et ses trois boutons : sur un écran étroit, les boutons passent dessous. */
+#rpc-secret-field .input-row {
+  flex-wrap: wrap;
+}
+
+#rpc-secret-field .input-row input {
+  flex-basis: 220px;
 }
 
 .field .unit {

@@ -24,6 +24,17 @@ const categoriesList = document.getElementById('categories');
 const categoriesSaved = document.getElementById('categories-saved');
 const resetCategories = document.getElementById('reset-categories');
 const dirWarning = document.getElementById('download-dir-warning');
+const rpcForm = document.getElementById('rpc-form');
+const rpcEnabled = document.getElementById('rpc-enabled');
+const rpcPort = document.getElementById('rpc-port');
+const rpcOrigins = document.getElementById('rpc-origins');
+const rpcStatus = document.getElementById('rpc-status');
+const rpcDetails = document.getElementById('rpc-details');
+const rpcSecretField = document.getElementById('rpc-secret-field');
+const rpcSecret = document.getElementById('rpc-secret');
+const rpcShow = document.getElementById('rpc-show');
+const rpcSaved = document.getElementById('rpc-saved');
+const SECRET_MASK = rpcSecret.value;
 const PICKER_TIMEOUT = 10 * 60 * 1000; // la fenêtre attend l'utilisateur
 const MIB = 1024 * 1024;
 
@@ -82,6 +93,7 @@ try {
   renderCategories(info.config);
   renderTools(info.tools);
   form.hidden = false;
+  showRpc(info.config).catch((err) => showSaved(err.message, true, rpcSaved));
 } catch (err) {
   status.dataset.state = 'missing';
   status.textContent = `${err.message}.`;
@@ -225,6 +237,112 @@ form.addEventListener('submit', async (event) => {
     showSaved(free == null ? 'Enregistré.' : `Enregistré · ${formatBytes(free)} libres dans ce dossier.`);
   } catch (err) {
     showSaved(err.message, true);
+  }
+});
+
+// ─── API compatible aria2 ──────────────────────────────────────────────────
+
+// Un moteur plus ancien ne la connaît pas : la section reste cachée.
+async function showRpc(config) {
+  rpcForm.hidden = !('rpc' in config);
+  if (rpcForm.hidden) return;
+  rpcEnabled.checked = config.rpc;
+  rpcPort.value = config.rpcPort;
+  rpcOrigins.value = config.rpcOrigins.join('\n');
+  rpcDetails.hidden = !config.rpc;
+  await refreshRpc();
+}
+
+// L'état réel de l'API : à l'écoute, ou pourquoi elle ne l'est pas (port déjà pris…).
+async function refreshRpc(extra = {}) {
+  const { rpc } = await engine.request({ type: 'rpc', ...extra });
+  rpcSecretField.hidden = !rpc.listening; // le secret n'existe qu'une fois l'API démarrée
+  if (!rpc.listening) hideSecret();
+  if (!rpc.enabled) {
+    rpcStatus.dataset.state = 'off';
+    rpcStatus.textContent = 'Désactivée : aucun port ouvert.';
+  } else if (rpc.error) {
+    rpcStatus.dataset.state = 'error';
+    rpcStatus.textContent = `Activée, mais n’écoute pas : ${rpc.error}.`;
+  } else {
+    rpcStatus.dataset.state = 'ok';
+    rpcStatus.replaceChildren(
+      'À l’écoute : ',
+      el('code', '', rpc.url),
+      ', et ',
+      el('code', '', rpc.url.replace(/^http/, 'ws')),
+      ' pour les notifications (WebSocket).',
+    );
+  }
+  return rpc;
+}
+
+// Le secret n'est demandé au moteur qu'au moment de s'en servir.
+async function fetchSecret(renew = false) {
+  const { secret } = await refreshRpc({ secret: true, renew });
+  return secret;
+}
+
+function hideSecret() {
+  rpcSecret.type = 'password';
+  rpcSecret.value = SECRET_MASK;
+  rpcShow.textContent = 'Afficher';
+}
+
+rpcEnabled.addEventListener('change', () => {
+  rpcDetails.hidden = !rpcEnabled.checked;
+});
+
+rpcShow.addEventListener('click', async () => {
+  if (rpcSecret.type === 'text') {
+    hideSecret();
+    return;
+  }
+  try {
+    rpcSecret.value = await fetchSecret();
+    rpcSecret.type = 'text';
+    rpcShow.textContent = 'Masquer';
+  } catch (err) {
+    showSaved(err.message, true, rpcSaved);
+  }
+});
+
+document.getElementById('rpc-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(await fetchSecret());
+    showSaved('Secret copié.', false, rpcSaved);
+  } catch (err) {
+    showSaved(`Copie impossible (${err.message}) : affiche-le pour le copier à la main.`, true, rpcSaved);
+  }
+});
+
+document.getElementById('rpc-renew').addEventListener('click', async () => {
+  const question = 'Créer un nouveau secret ? L’ancien ne marchera plus : les outils déjà réglés devront le recevoir.';
+  if (!window.confirm(question)) return;
+  try {
+    const secret = await fetchSecret(true);
+    if (rpcSecret.type === 'text') rpcSecret.value = secret;
+    showSaved('Nouveau secret créé : à recopier dans tes outils.', false, rpcSaved);
+  } catch (err) {
+    showSaved(err.message, true, rpcSaved);
+  }
+});
+
+rpcForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const changes = { rpc: rpcEnabled.checked };
+  if (changes.rpc) {
+    changes.rpcPort = Number(rpcPort.value);
+    changes.rpcOrigins = rpcOrigins.value.split(/[\s,]+/).filter(Boolean);
+  }
+  try {
+    const reply = await engine.request({ type: 'config', set: changes });
+    rpcOrigins.value = reply.config.rpcOrigins.join('\n'); // telles que le moteur les a rangées
+    const rpc = await refreshRpc();
+    if (rpc.error) showSaved(rpc.error, true, rpcSaved);
+    else showSaved(rpc.enabled ? 'Enregistré : l’API écoute.' : 'Enregistré : l’API est désactivée.', false, rpcSaved);
+  } catch (err) {
+    showSaved(err.message, true, rpcSaved);
   }
 });
 

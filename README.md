@@ -100,7 +100,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Download later (at night) | Manager → **Plus tard** on a download, or the **Plus tard** box when importing a list, or `pdm-host add --later URL`. It only progresses during the time window of **Réglages**; the rest starts right away. |
 | Verify a file | Nothing to do when the page shows its checksum next to the link: PDM picks it up on click and checks the file. Otherwise, Manager → **Vérifier…** on a finished download → paste the site's checksum (SHA-256, SHA-512, SHA-1 or MD5). Not the one PDM shows: compared with itself, a file always matches, and PDM refuses it. |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
-| Drive PDM from other tools | `pdm-host rpc on` turns on the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
+| Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
 If a heavily protected site refuses the engine, **Avec Chrome** retries the download in the browser,
 with the browser's own session.
@@ -174,7 +174,8 @@ Good to know:
 
 Tools written for [aria2](https://aria2.github.io/) can drive PDM: [AriaNg](https://github.com/mayswind/AriaNg),
 scripts, extensions that send it their links. PDM speaks the core of aria2's JSON-RPC API, over HTTP and
-WebSocket. It is off until you ask:
+WebSocket. It is off until you ask, in the extension's settings (*Piloter PDM depuis d'autres outils*: the switch,
+the port, the secret to copy, the web pages allowed) or in a terminal:
 
 ```bash
 ~/.local/share/pdm/app/pdm-host rpc on

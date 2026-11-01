@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -253,6 +254,35 @@ esac
         args = (bin_dir / "args").read_text().split("\n")
         self.assertIn("--directory", args)
         self.assertIn(f"--filename={start}/", args)
+
+    def test_the_aria2_api_as_the_settings_page_drives_it(self):
+        chrome = self.connect()
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        reply = chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False,
+                                                          "rpc": True, "rpcPort": port}})
+        self.assertTrue(reply["ok"], reply)
+        info = chrome.request({"type": "rpc", "secret": True})["rpc"]
+        self.assertEqual((info["listening"], info["url"]), (True, f"http://127.0.0.1:{port}/jsonrpc"))
+        stored = json.loads((Path(self.env["PDM_DATA_DIR"]) / "rpc.json").read_text())["secret"]
+        self.assertEqual(info["secret"], stored, "le secret à copier dans AriaNg")
+        self.assertNotIn("secret", chrome.request({"type": "rpc"})["rpc"], "seulement à la demande")
+
+        # Le démon relaie les événements du moteur en notifications d'aria2.
+        ws = fx.WsClient(port)
+        self.addCleanup(ws.close)
+        added = chrome.request({"type": "add", "job": {"url": self.base + "/range/list-a.bin", "source": "intercept"}})
+        g = added["job"]["id"].rjust(16, "0")
+        self.assertEqual([ws.notification() for _ in range(2)],
+                         [("aria2.onDownloadStart", g), ("aria2.onDownloadComplete", g)])
+
+        renewed = chrome.request({"type": "rpc", "renew": True, "secret": True})["rpc"]["secret"]
+        self.assertNotEqual(renewed, stored)
+        self.assertEqual(ws.call("aria2.getVersion", "token:" + stored)["error"]["message"], "Unauthorized")
+        self.assertIn("result", ws.call("aria2.tellStatus", "token:" + renewed, g))
+        self.assertTrue(chrome.request({"type": "config", "set": {"rpc": False}})["ok"])
+        self.assertEqual(ws.closed_with(), 1001, "API désactivée : connexions fermées")
 
     def test_errors_are_replies_not_crashes(self):
         chrome = self.connect()

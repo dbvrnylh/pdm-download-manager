@@ -22,6 +22,9 @@ versions follow [Semantic Versioning](https://semver.org/).
   allowed, since browsers apply no CORS to WebSocket, and a page removed from the allowed ones loses its
   connection. Each connection writes from its own thread, so a client that stops reading is cut instead of
   holding up the engine, and one that no longer answers pings is cut too. At most 8 connections at once.
+- The API in the extension's settings (*Piloter PDM depuis d'autres outils*): the switch, the port, the web pages
+  allowed, its address, why it does not listen (port taken by aria2…), and the secret, shown or copied only when
+  asked for, or replaced.
 - Downloads from several mirrors at once. A mirror server (Metalink/HTTP, RFC 6249: MirrorBrain, which serves
   LibreOffice and Kiwix) lists the file's other mirrors on its redirect; when an expected checksum will verify the
   whole file, the engine takes pieces from up to 4 of them besides the origin. A download taken over from the

@@ -7,7 +7,7 @@ Le WebSocket apporte en plus les notifications : un client apprend aussitôt
 qu'un téléchargement démarre, s'arrête ou finit, sans redemander chaque seconde
 l'état de tous.
 
-Désactivée par défaut. Une fois activée (pdm-host rpc on) :
+Désactivée par défaut. Une fois activée (page Réglages de l'extension, ou pdm-host rpc on) :
 - elle n'écoute que 127.0.0.1, jamais le réseau ;
 - chaque appel porte le secret (« token:… », comme --rpc-secret d'aria2). Le
   socket du démon n'est ouvert qu'à l'utilisateur ; un port local, lui, est
@@ -873,9 +873,12 @@ class RpcServer:
     def url(self):
         return f"http://127.0.0.1:{self.server.server_port}/jsonrpc" if self.server else None
 
-    def info(self):
-        return {"enabled": self.config["rpc"], "listening": self.running, "url": self.url(), "error": self.error,
+    def info(self, secret=False):
+        info = {"enabled": self.config["rpc"], "listening": self.running, "url": self.url(), "error": self.error,
                 "origins": self.config["rpcOrigins"]}
+        if secret:
+            info["secret"] = self.api.secret or read_secret()  # None : jamais activée
+        return info
 
     def observe(self, event):
         """Un événement du moteur → la notification d'aria2 qui l'annonce, aux clients WebSocket.
