@@ -1,0 +1,421 @@
+"""BitTorrent et liens magnet : confiés à aria2c, que le moteur lance et pilote.
+
+PDM ne réécrit pas BitTorrent (DHT, échanges entre pairs, choix des morceaux) :
+aria2 le fait déjà bien. Le moteur lance aria2c à part, un programme séparé (sa
+licence est la GPL-2.0, celle de PDM le MIT : rien n'est lié), quand un torrent
+démarre, et l'arrête quand aucun ne tourne plus. Il le pilote par son API JSON-RPC :
+- sur 127.0.0.1, à un port libre choisi à chaque lancement ;
+- avec un secret tiré au hasard, passé par un fichier de configuration réservé à
+  l'utilisateur, jamais en argument (que `ps` montre à tous les comptes) ;
+- sans session d'aria2 : PDM garde sa liste, et redonne à aria2c chaque torrent
+  quand il reprend (le fichier de contrôle .aria2 repart de ce qui est reçu).
+
+Un torrent s'écrit dans un dossier caché à lui (comme le .pdm d'un fichier), puis
+rejoint le dossier des torrents une fois fini : annuler n'efface que ce dossier, jamais
+un fichier de l'utilisateur qui porterait le même nom que le torrent.
+"""
+
+import base64
+import hashlib
+import http.client
+import json
+import logging
+import os
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from . import httpdl, paths
+from .httpdl import DownloadError
+from .util import unique_path
+
+log = logging.getLogger("pdm")
+
+POLL = 0.5  # s entre deux relevés de l'état d'un torrent
+START_WAIT = 10  # s pour qu'aria2c réponde, une fois lancé
+MAX_TORRENT = 10 * 1024 * 1024  # octets d'un fichier .torrent : ceux de dizaines de milliers de fichiers y tiennent
+FOLDER = "Torrents"  # dossier des torrents dans celui de PDM, quand il range par catégorie
+STAGING = ".pdm-torrent-"  # préfixe du dossier caché où un torrent s'écrit, jusqu'à sa fin
+# Trouver des pairs sans tracker (DHT), et par ceux déjà trouvés (PEX). Coupés dans les tests.
+DISCOVERY = ["--enable-dht=true", "--enable-peer-exchange=true"]
+KEYS = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "connections",
+        "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files"]
+MAGNET = re.compile(r"^magnet:\?(.*&)?xt=urn:btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})(&|$)")
+
+
+def find():
+    return shutil.which("aria2c")
+
+
+# ─── Liens et fichiers .torrent ────────────────────────────────────────────
+
+
+def magnet_hash(url):
+    """L'empreinte (info-hash, en hexadécimal) d'un lien magnet ; ValueError s'il n'en a pas."""
+    match = MAGNET.match(url)
+    if not match:
+        raise ValueError("lien magnet sans empreinte BitTorrent (xt=urn:btih:…)")
+    value = match.group(2)
+    return value.lower() if len(value) == 40 else base64.b32decode(value.upper()).hex()
+
+
+def parse_torrent(data):
+    """Un fichier .torrent → {infohash, name, length, trackers} ; ValueError s'il est illisible.
+
+    Il vient d'internet : lu sans jamais suivre une longueur au-delà des données, ni
+    descendre sans fin dans des listes imbriquées.
+    """
+    try:
+        top, end, spans = _decode(data, 0, 0)
+    except (ValueError, IndexError, RecursionError):
+        raise ValueError("fichier .torrent illisible") from None
+    if end != len(data) or not isinstance(top, dict) or not isinstance(top.get(b"info"), dict):
+        raise ValueError("fichier .torrent illisible")
+    info = top[b"info"]
+    name = info.get(b"name.utf-8") or info.get(b"name")
+    if not isinstance(name, bytes) or not name:
+        raise ValueError("fichier .torrent sans nom")
+    if isinstance(info.get(b"length"), int):
+        length = info[b"length"]
+    else:
+        files = info.get(b"files")
+        if not isinstance(files, list):
+            raise ValueError("fichier .torrent sans fichiers")
+        length = sum(f.get(b"length", 0) for f in files if isinstance(f, dict) and isinstance(f.get(b"length"), int))
+    start, stop = spans[b"info"]
+    trackers = [t.decode(errors="replace") for t in [top.get(b"announce")] if isinstance(t, bytes)]
+    for tier in top.get(b"announce-list") or []:
+        if isinstance(tier, list):
+            trackers += [t.decode(errors="replace") for t in tier if isinstance(t, bytes)]
+    return {"infohash": hashlib.sha1(data[start:stop]).hexdigest(), "name": name.decode(errors="replace"),
+            "length": length, "trackers": list(dict.fromkeys(trackers))}
+
+
+def _decode(data, i, depth):
+    """Une valeur bencodée à partir de i → (valeur, fin, positions des valeurs d'un dictionnaire)."""
+    if depth > 64:
+        raise ValueError("trop imbriqué")
+    kind = data[i:i + 1]
+    if kind == b"i":
+        end = data.index(b"e", i)
+        return int(data[i + 1:end]), end + 1, None
+    if kind in (b"l", b"d"):
+        items, spans, i = [], {}, i + 1
+        while data[i:i + 1] != b"e":
+            if not data[i:i + 1]:
+                raise ValueError("fin inattendue")
+            if kind == b"d":
+                key, i, _ = _decode(data, i, depth + 1)
+                if not isinstance(key, bytes):
+                    raise ValueError("clé invalide")
+                start = i
+                value, i, _ = _decode(data, i, depth + 1)
+                items.append((key, value))
+                spans[key] = (start, i)
+            else:
+                value, i, _ = _decode(data, i, depth + 1)
+                items.append(value)
+        return (dict(items) if kind == b"d" else items), i + 1, spans
+    colon = data.index(b":", i)
+    if not data[i:colon].isdigit():
+        raise ValueError("chaîne invalide")
+    end = colon + 1 + int(data[i:colon])
+    if end > len(data):
+        raise ValueError("chaîne tronquée")
+    return data[colon + 1:end], end, None
+
+
+def fetch(job):
+    """Le .torrent d'une adresse http(s), lu avec les cookies et en-têtes du site ; DownloadError sinon."""
+    try:
+        with httpdl._opener.open(httpdl.build_request(job, job.url), timeout=httpdl.TIMEOUT) as resp:
+            data = resp.read(MAX_TORRENT + 1)
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        raise DownloadError(f"fichier .torrent inaccessible : {httpdl._reason(e)}") from None
+    if len(data) > MAX_TORRENT:
+        raise DownloadError("fichier .torrent de plus de 10 Mo")
+    try:
+        parse_torrent(data)
+    except ValueError as e:
+        raise DownloadError(f"ce lien ne donne pas un fichier .torrent ({e})") from None
+    return data
+
+
+def stored(job_id):
+    """Où le moteur garde le .torrent d'un téléchargement (réservé à l'utilisateur)."""
+    return paths.data_dir() / "torrents" / f"{job_id}.torrent"
+
+
+def keep(job_id, data):
+    path = stored(job_id)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def forget(job_id):
+    try:
+        os.unlink(stored(job_id))
+    except OSError:
+        pass
+
+
+# ─── aria2c ────────────────────────────────────────────────────────────────
+
+
+class Aria2Error(Exception):
+    """Une erreur rendue par aria2c."""
+
+
+class Aria2:
+    """aria2c, lancé à la demande, partagé par les torrents du moteur."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.proc = None
+        self.port = None
+        self.secret = None
+        self.users = 0  # torrents en cours : à zéro, aria2c s'arrête
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # jamais par un proxy
+
+    @property
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def acquire(self):
+        with self.lock:
+            if not self.running:
+                self._start()
+            self.users += 1
+
+    def release(self):
+        with self.lock:
+            self.users -= 1
+            if self.users <= 0:
+                self.users = 0
+                self._stop()
+
+    def stop(self):
+        with self.lock:
+            self._stop()
+
+    def call(self, method, *params):
+        body = json.dumps({"jsonrpc": "2.0", "id": "pdm", "method": method,
+                           "params": [f"token:{self.secret}", *params]}).encode()
+        request = urllib.request.Request(f"http://127.0.0.1:{self.port}/jsonrpc", body,
+                                         {"Content-Type": "application/json"})
+        try:
+            try:
+                with self.opener.open(request, timeout=10) as resp:
+                    reply = json.load(resp)
+            except urllib.error.HTTPError as e:  # aria2c rend ses erreurs avec un code HTTP 400
+                with e:
+                    reply = json.load(e)
+        except (OSError, ValueError) as e:
+            raise Aria2Error(f"ne répond plus ({e})") from None
+        if "error" in reply:
+            raise Aria2Error(reply["error"].get("message") or "erreur d'aria2c")
+        return reply["result"]
+
+    def _start(self):
+        exe = find()
+        if not exe:
+            raise DownloadError("aria2c absent : pour les torrents et les liens magnet, installe aria2 "
+                                "(sudo apt install aria2)")
+        paths.ensure_dirs()
+        self.port, self.secret = _free_port(), secrets.token_urlsafe(32)
+        conf = paths.data_dir() / "aria2.conf"
+        fd = os.open(conf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)  # même s'il existait déjà avec d'autres droits
+            f.write(f"rpc-secret={self.secret}\n")
+        data = paths.data_dir()
+        self.proc = subprocess.Popen(
+            [exe, f"--conf-path={conf}", "--enable-rpc", f"--rpc-listen-port={self.port}", "--rpc-listen-all=false",
+             "--rpc-save-upload-metadata=false", "--seed-time=0", "--file-allocation=trunc",
+             f"--dht-file-path={data / 'dht.dat'}", f"--stop-with-process={os.getpid()}",
+             f"--log={data / 'aria2.log'}", "--log-level=warn", "--console-log-level=error", *DISCOVERY],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        deadline = time.monotonic() + START_WAIT
+        while True:
+            try:
+                self.call("aria2.getVersion")
+                log.info("aria2c lancé (pid %d, port %d)", self.proc.pid, self.port)
+                return
+            except Aria2Error:
+                if self.proc.poll() is not None or time.monotonic() > deadline:
+                    self._stop()
+                    raise DownloadError(f"aria2c ne démarre pas (voir {data / 'aria2.log'})") from None
+                time.sleep(0.1)
+
+    def _stop(self):
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            try:
+                self.call("aria2.shutdown")  # il écrit ses fichiers de contrôle avant de partir
+                proc.wait(timeout=10)
+            except (Aria2Error, subprocess.TimeoutExpired):
+                proc.kill()
+                proc.wait()
+        log.info("aria2c arrêté")
+
+
+def _safe(name):
+    """Un nom de torrent, pas un chemin : il vient de ses pairs, et rien ne doit sortir du dossier des torrents."""
+    return name not in ("", ".", "..") and "/" not in name and "\\" not in name and "\0" not in name
+
+
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+# ─── Un torrent ────────────────────────────────────────────────────────────
+
+
+class TorrentDownload:
+    """Un torrent ou un lien magnet, téléchargé par aria2c. Même interface que HttpDownload."""
+
+    def __init__(self, job, config, aria2, directory):
+        self.job = job
+        self.config = config
+        self.aria2 = aria2
+        self.directory = Path(directory)  # le dossier des torrents
+        self.staging = self.directory / f"{STAGING}{job.id}"  # où il s'écrit, jusqu'à sa fin
+        self.limit_rate = None  # octets/s, donnés par le moteur (sa part de la limite, ou la sienne)
+        self.stop_event = threading.Event()
+        self.stop_reason = None
+        self.lock = threading.Lock()
+        self.gid = None
+        self.state = {"downloaded": job.downloaded or 0, "size": job.size}
+
+    # ─── Pilotage par le moteur ────────────────────────────────────────────
+
+    def stop(self, reason):
+        self.stop_reason = reason
+        self.stop_event.set()
+
+    def progress(self):
+        with self.lock:
+            return dict(self.state)
+
+    def limit(self, rate):
+        """Change sa vitesse maximale, même en cours (0 : aucune)."""
+        self.limit_rate = rate or None
+        if self.gid:
+            try:
+                self.aria2.call("aria2.changeOption", self.gid, {"max-download-limit": str(rate or 0)})
+            except Aria2Error:
+                pass  # au pire, la suivante
+
+    def cleanup(self):
+        """Annulé : son dossier caché part, et rien d'autre."""
+        shutil.rmtree(self.staging, ignore_errors=True)
+
+    def run(self):
+        self.aria2.acquire()
+        try:
+            return self._run()
+        except Aria2Error as e:
+            raise DownloadError(f"aria2c : {e}") from None
+        except OSError as e:  # le disque : dossier impossible à créer, contenu impossible à déplacer
+            raise DownloadError(f"écriture impossible : {e.strerror or e}") from None
+        finally:
+            self._forget()
+            self.aria2.release()
+
+    # ─── Déroulement ───────────────────────────────────────────────────────
+
+    def _run(self):
+        self.staging.mkdir(parents=True, exist_ok=True)
+        options = {"dir": str(self.staging), "max-download-limit": str(self.limit_rate or 0)}
+        metainfo = self._metainfo()
+        if metainfo is not None:
+            self.gid = self.aria2.call("aria2.addTorrent", base64.b64encode(metainfo).decode(), [], options)
+        else:
+            self.gid = self.aria2.call("aria2.addUri", [self.job.url], options)
+        metadata = metainfo is None  # un lien magnet commence par chercher la description du torrent
+        while not self.stop_event.wait(POLL):
+            status = self.aria2.call("aria2.tellStatus", self.gid, KEYS)
+            if status.get("followedBy"):  # description reçue : le vrai téléchargement la suit
+                self._forget()
+                self.gid, metadata = status["followedBy"][0], False
+                continue
+            self._read(status, metadata)
+            if status["status"] == "complete":
+                self._deliver(status)
+                return "completed"
+            if status["status"] == "error":
+                raise DownloadError(status.get("errorMessage") or f"aria2c : erreur {status.get('errorCode')}")
+            if status["status"] == "removed":
+                raise DownloadError("arrêté par aria2c")
+        return self.stop_reason
+
+    def _metainfo(self):
+        """Le .torrent : gardé par le moteur, sinon téléchargé (une fois) ; None pour un lien magnet."""
+        path = stored(self.job.id)
+        if path.exists():
+            return path.read_bytes()
+        if self.job.url.startswith("magnet:"):
+            return None
+        data = fetch(self.job)
+        keep(self.job.id, data)
+        self.job.infoHash = parse_torrent(data)["infohash"]
+        return data
+
+    def _read(self, status, metadata):
+        name = ((status.get("bittorrent") or {}).get("info") or {}).get("name")
+        done, total = int(status.get("completedLength") or 0), int(status.get("totalLength") or 0)
+        peers = int(status.get("connections") or 0)
+        speed = float(status.get("downloadSpeed") or 0)
+        if metadata:
+            stage = "Recherche de la description du torrent…" if not peers else "Description du torrent…"
+        else:
+            stage = "Recherche de pairs…" if not peers and done < total else None
+        if name and not metadata and _safe(name):
+            self.job.filename = name
+            self.job.path = str(self.staging / name)
+        with self.lock:
+            self.state = {
+                "downloaded": done if not metadata else self.state["downloaded"],
+                "size": total if not metadata and total else self.state["size"],
+                "speed": speed, "eta": (total - done) / speed if speed > 1 and total else None,
+                "connections": peers, "sources": int(status.get("numSeeders") or 0),
+                "upload": float(status.get("uploadSpeed") or 0), "stage": stage,
+            }
+
+    def _deliver(self, status):
+        """Fini : le contenu rejoint le dossier des torrents, sous un nom libre ; son dossier caché part."""
+        name = ((status.get("bittorrent") or {}).get("info") or {}).get("name") or self.job.filename
+        if not name or not _safe(name):
+            raise DownloadError(f"nom de torrent refusé : {name!r}")
+        source = self.staging / name
+        if not source.exists():
+            raise DownloadError(f"contenu du torrent introuvable une fois fini ({name})")
+        target = unique_path(self.directory, name)
+        os.replace(source, target)
+        shutil.rmtree(self.staging, ignore_errors=True)  # reste : le fichier de contrôle .aria2
+        self.job.filename, self.job.path = target.name, str(target)
+
+    def _forget(self):
+        """aria2c oublie ce téléchargement (fini, arrêté ou annulé) ; ses fichiers restent."""
+        gid, self.gid = self.gid, None
+        if gid is None or not self.aria2.running:
+            return
+        for method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
+            try:
+                self.aria2.call(method, gid)
+            except Aria2Error:
+                pass  # déjà fini, ou déjà oublié

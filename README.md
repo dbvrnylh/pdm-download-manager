@@ -48,6 +48,8 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
 - **Your queue, your way.** Drag waiting downloads into the order they should start, give one download its own
   number of connections or speed limit (even while it runs), have finished archives extracted next to them, run
   your own program after each download, and put the computer to sleep or shut it down once everything is done.
+- **Torrents and magnet links.** Click a magnet link or a `.torrent` link and PDM downloads what it describes,
+  with [aria2](https://aria2.github.io/) doing the BitTorrent work in the background (`sudo apt install aria2`).
 - **Speaks aria2.** AriaNg, aria2 scripts and the extensions that send their links to aria2 can drive PDM through
   the same JSON-RPC API: local only, with a secret, and off until you turn it on.
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
@@ -105,6 +107,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Change the order of the queue | Manager → **En cours** → drag a waiting download to its place. Or **Options…** on it → **En premier** / **En dernier**. |
 | Limit one download, or give it more connections | Manager → **Options…** on it: connections and maximum speed for this file only, applied at once while it runs (a video: from its next start). |
 | Sleep or shut down when everything is done | Manager → **À la fin : veille** or **éteindre** (or `pdm-host when-done suspend\|poweroff`). Once nothing downloads or waits in the queue, a 60 s countdown with **Annuler** appears, then systemd puts the computer to sleep or shuts it down. Once only: the choice goes back to "rien". |
+| Download a torrent | Click its magnet link or its `.torrent` link, as usual; or paste the magnet link in the manager, or `pdm-host add "magnet:?xt=…"`. Needs aria2 (`sudo apt install aria2`). See [below](#torrents-and-magnet-links). |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 | Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
@@ -196,6 +199,28 @@ Good to know:
 - At most 1000 links per import and 1 MB for the file: split a longer list. The manager shows every download,
   200 rows at a time (**Afficher plus** below the list).
 - The engine must be installed: without it there is no queue, and Chrome would start everything at once.
+
+### Torrents and magnet links
+
+PDM does not reimplement BitTorrent: it hands torrents to [aria2](https://aria2.github.io/), which handles
+trackers, DHT and peers well. Install it once:
+
+```bash
+sudo apt install aria2
+```
+
+- **Click a magnet link** in the browser, or a **`.torrent` link**: PDM takes it like any download. A `.torrent`
+  is read at once, with the site's cookies (private trackers); if it is not one, the browser keeps the file.
+  Without aria2, or with **Prendre le contrôle des téléchargements** off, links go to your system as before.
+- Files go to `Torrents/` in PDM's folder (a whole folder for a multi-file torrent). Until it is complete, a
+  torrent is written in a hidden folder of its own (`.pdm-torrent-…`): cancel it and only that folder goes.
+- Pause and resume keep what was received, even across a restart. **Options…** sets its maximum speed, at once.
+- PDM starts `aria2c` itself, only while a torrent runs, and stops it after. It listens on `127.0.0.1` only,
+  with a random secret given through a file only you can read, never on the command line (`ps` shows that to
+  every account).
+- **Sharing:** while it downloads, a torrent sends pieces to other peers, as BitTorrent works. Once complete,
+  PDM stops sharing it.
+- Through the [JSON-RPC API](#the-aria2-compatible-api): `addUri` with a magnet link, and `addTorrent`.
 
 ### The aria2-compatible API
 
@@ -432,6 +457,9 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
   goes beyond the free space, and an archive that does not match its checksum is not extracted at all.
 - **The program run at the end is yours only:** it is set in the settings page or `config.json`, never through
   the JSON-RPC API, and is started without a shell, with its arguments as a list.
+- **BitTorrent shows your IP address to the other peers** of a torrent, and you share pieces while you download:
+  that is how the protocol works, in PDM as in any client. Where sharing a work without its owner's permission
+  is illegal, downloading it with BitTorrent is sharing it.
 - **Private browsing** downloads are never taken over.
 - **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
   lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.
@@ -454,6 +482,7 @@ engine/
                            rpc.py (aria2-compatible JSON-RPC API, HTTP and WebSocket)
                            aria2.py (aria2 options, and lists in its input-file format)
                            finish.py (after a download: extraction, program, sleep or shutdown)
+                           torrent.py (torrents and magnet links, through aria2c)
 tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh
 ```

@@ -6,6 +6,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Torrents and magnet links, through aria2 (`sudo apt install aria2`). A magnet link clicked in the browser, a
+  `.torrent` link taken over, one pasted in the manager or given to `pdm-host add`, or `addUri` / `addTorrent`
+  through the JSON-RPC API: the engine starts `aria2c` only while a torrent runs, on 127.0.0.1 with a random
+  secret passed through a file readable by the user only (never on its command line, which `ps` shows to every
+  account), drives it through its JSON-RPC API, and stops it after (also with the daemon). A `.torrent` taken
+  from the browser is read at once with the site's cookies; one that is not a torrent stays with the browser.
+  Without aria2, magnet links go to the system as before. A torrent is written in a hidden folder of its own,
+  then moved into `Torrents/` once complete: canceling removes only that folder, never a file of the user's
+  that bears the torrent's name. Pause, resume and restarts keep what was received (aria2's control file).
+  The manager shows its peers, the complete ones and what it uploads; its speed limit applies at once. It
+  stops sharing once complete. `.torrent` files and torrent names come from strangers: they are read without
+  following a length past the data or nesting without end, and a name that is a path is refused. Tested
+  against a local swarm (a tracker, an `aria2c` seeding) for links, magnets with folders, pause, resume,
+  cancel, the API and aria2c leaving with the daemon.
 - Lists in aria2's input-file format (`aria2c -i`), in the manager's **Importer une liste…** and in
   `pdm-host add --file`: mirrors of the same file on one line, separated by a tab; its options below it,
   indented (`out`, `checksum`, `header`, `referer`, `user-agent`, `pause`, `split`, `max-connection-per-server`,

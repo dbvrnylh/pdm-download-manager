@@ -46,7 +46,8 @@
       ],
       "js": [
         "content/grab.js",
-        "content/links.js"
+        "content/links.js",
+        "content/magnet.js"
       ],
       "all_frames": true,
       "run_at": "document_idle"

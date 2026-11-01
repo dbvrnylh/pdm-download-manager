@@ -15,7 +15,7 @@ import { EngineClient } from './lib/engine.js';
 import { basename } from './lib/filename.js';
 import { rememberRequest, takeHeaders } from './lib/headers.js';
 import { isKnownVariant, masterVariants } from './lib/hls.js';
-import { directFilename, httpJob, isStreamUrl, videoJob } from './lib/jobs.js';
+import { directFilename, httpJob, isStreamUrl, isTorrent, torrentJob, videoJob } from './lib/jobs.js';
 import { detectMedia } from './lib/media.js';
 import { getSettings } from './lib/settings.js';
 import { addMedia, clearMedia, getMedia, pruneMedia, rememberName, takeBypass, takeName } from './lib/store.js';
@@ -180,16 +180,22 @@ async function handOverToEngine(item, requested) {
   const client = await getEngine();
   if (!client) return false;
 
-  const job = await httpJob(url, {
-    filename: requested ?? basename(item.filename),
-    referer: item.referrer || undefined,
-    source: 'intercept',
-    mime: item.mime,
-    // Rejouée par le moteur ; s'il ne l'a pas vue, cookies reconstitués comme avant.
-    headers: takeHeaders(recentRequests, [item.finalUrl, item.url]),
-    checksums: takeChecksums(recentChecksums, [item.url, item.finalUrl]),
-    startUrl: item.url, // avant les redirections : ce qu'elles annonçaient (miroirs, somme) y reste
-  });
+  const filename = requested ?? basename(item.filename);
+  // Rejouée par le moteur ; s'il ne l'a pas vue, cookies reconstitués comme avant.
+  const headers = takeHeaders(recentRequests, [item.finalUrl, item.url]);
+  // Un .torrent : le moteur le lit tout de suite, et télécharge ce qu'il décrit (aria2c).
+  // Sans aria2c, il refuse : Chrome garde le fichier .torrent, comme sans PDM.
+  const job = isTorrent(filename, item.mime)
+    ? await torrentJob(url, { referer: item.referrer || undefined, source: 'intercept', headers, filename })
+    : await httpJob(url, {
+        filename,
+        referer: item.referrer || undefined,
+        source: 'intercept',
+        mime: item.mime,
+        headers,
+        checksums: takeChecksums(recentChecksums, [item.url, item.finalUrl]),
+        startUrl: item.url, // avant les redirections : ce qu'elles annonçaient (miroirs, somme) y reste
+      });
   try {
     await client.request({ type: 'add', probe: true, job }, PROBE_TIMEOUT);
   } catch (err) {
@@ -287,6 +293,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'downloads-started') {
     openManagerIfWanted().catch(console.error);
   }
+  if (message?.type === 'magnet' && /^magnet:\?/i.test(message.url ?? '')) {
+    addMagnet(message).then(sendResponse, () => sendResponse({ ok: false }));
+    return true; // réponse asynchrone
+  }
   if (message?.type === 'link-checksums' && /^https?:/i.test(message.url ?? '')) {
     rememberChecksums(recentChecksums, message.url, findChecksums(message));
   }
@@ -296,6 +306,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   onMenuClicked(info, tab).catch((err) => console.error('PDM :', err.message));
 });
+
+// Un lien magnet cliqué (content/magnet.js). { ok: false } : le système s'en charge,
+// comme sans PDM (prise de contrôle coupée, moteur ou aria2c absents).
+async function addMagnet({ url, pageUrl }) {
+  const { takeOver } = await getSettings();
+  const client = takeOver ? await getEngine() : null;
+  if (!client) return { ok: false };
+  try {
+    await client.request({ type: 'add', job: await torrentJob(url, { referer: pageUrl, source: 'magnet' }) });
+  } catch (err) {
+    console.info(`PDM : le système garde ce lien magnet (${err.message})`);
+    return { ok: false };
+  }
+  await openManagerIfWanted();
+  return { ok: true };
+}
 
 async function onMenuClicked(info, tab) {
   if (info.menuItemId === MENU_VIDEO) {
@@ -348,7 +374,10 @@ async function injectIntoOpenTabs() {
   await Promise.all(
     tabs.map((tab) =>
       chrome.scripting
-        .executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['content/grab.js', 'content/links.js'] })
+        .executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          files: ['content/grab.js', 'content/links.js', 'content/magnet.js'],
+        })
         .catch(() => {}), // onglet en veille, page interdite (Web Store)… : sans importance
     ),
   );

@@ -13,7 +13,7 @@ import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
 import { basename, filenameFromUrl } from '../lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../lib/format.js';
-import { PRESETS, httpJob, videoJob } from '../lib/jobs.js';
+import { PRESETS, httpJob, torrentJob, videoJob } from '../lib/jobs.js';
 import { MAX_LINKS, formatEntry, parseLinkList } from '../lib/linklist.js';
 import { inWindow } from '../lib/schedule.js';
 import { markBypass } from '../lib/store.js';
@@ -156,6 +156,7 @@ function fromEngine(job) {
     speedLimit: job.speedLimit,
     extracted: job.extracted,
     afterError: job.afterError,
+    upload: job.upload ?? 0,
   };
 }
 
@@ -303,7 +304,7 @@ function updateRow(row, entry) {
   row.li.dataset.source = entry.source;
   row.li.dataset.integrity = entry.verified === false ? 'bad' : '';
   row.tag.dataset.category = entry.category.id;
-  row.tag.textContent = entry.category.label;
+  row.tag.textContent = entry.kind === 'torrent' ? 'Torrent' : entry.category.label;
   row.name.textContent = entry.filename;
   row.name.title = entry.url;
   updateBar(row, entry);
@@ -361,9 +362,13 @@ function describe(entry) {
       parts.push(`${done} / ${total}`);
       if (entry.speed > 0) parts.push(formatSpeed(entry.speed));
       if (entry.eta > 0) parts.push(`reste ${formatDuration(entry.eta)}`);
-      if (entry.connections > 1) parts.push(`${entry.connections} connexions`);
+      if (entry.kind === 'torrent') {
+        // Les pairs reliés, dont ceux qui ont tout (« sources ») ; et ce qu'il leur envoie.
+        if (entry.connections) parts.push(`${plural(entry.connections, 'pair')} (${entry.sources} complets)`);
+        if (entry.upload > 0) parts.push(`↑ ${formatSpeed(entry.upload)}`);
+      } else if (entry.connections > 1) parts.push(`${entry.connections} connexions`);
       else if (entry.kind === 'ytdlp' && entry.connections === 1) parts.push('1 connexion');
-      if (entry.sources > 1) parts.push(`${entry.sources} serveurs`); // miroirs pris en même temps
+      if (entry.kind !== 'torrent' && entry.sources > 1) parts.push(`${entry.sources} serveurs`); // miroirs
       if (entry.speedLimit) parts.push(`limité à ${formatSpeed(entry.speedLimit)}`);
       return parts.join(' · ');
     }
@@ -376,7 +381,8 @@ function describe(entry) {
     case 'blocked':
       return 'Bloqué : Chrome l’a identifié comme malveillant';
     case 'complete': {
-      const parts = ['Terminé', formatBytes(entry.total ?? entry.done), hostOf(entry.host ?? entry.url)];
+      const from = entry.kind === 'torrent' ? 'BitTorrent' : hostOf(entry.host ?? entry.url);
+      const parts = ['Terminé', formatBytes(entry.total ?? entry.done), from];
       // « Vérification… 42 % » ou « Extraction… 42 % », puis leur résultat.
       const extracted = entry.extracted ? `extrait dans « ${basename(entry.extracted)} »` : '';
       const after = entry.stage ? [entry.stage] : [integrity(entry), extracted, entry.afterError ?? ''];
@@ -503,7 +509,8 @@ function engineActions(entry) {
       return [
         button('Ouvrir', send('open'), 'primary'),
         button('Dossier', send('show')),
-        button('Vérifier…', () => openVerify(id)),
+        // Un torrent est vérifié morceau par morceau pendant qu'il arrive (SHA-1 de chaque pièce).
+        ...(entry.kind === 'torrent' ? [] : [button('Vérifier…', () => openVerify(id))]),
         remove,
       ];
     case 'canceled':
@@ -780,6 +787,8 @@ document.getElementById('add-form').addEventListener('submit', async (event) => 
   try {
     if (engineState !== 'ok') {
       await chrome.downloads.download({ url });
+    } else if (/^magnet:/i.test(url)) {
+      await engine.request({ type: 'add', job: await torrentJob(url, { source: 'manual' }) });
     } else if (addKind.value === 'video') {
       await engine.request({ type: 'add', job: await videoJob(url) });
     } else {
@@ -1005,6 +1014,7 @@ function renderOptions() {
   document.getElementById('options-connections-hint').textContent =
     `Vide : le réglage général (${engine.info?.config.connections ?? '?'}).`;
   document.getElementById('options-video').hidden = job.kind !== 'ytdlp';
+  optionsConnections.closest('label').hidden = job.kind === 'torrent'; // ses pairs, c'est aria2c qui les choisit
   const queue = [...engineJobs.values()].map(fromEngine).filter((e) => e.inQueue);
   queue.sort((a, b) => a.order - b.order);
   const place = queue.findIndex((e) => e.id === optionsId);

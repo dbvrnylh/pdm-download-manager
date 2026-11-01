@@ -30,6 +30,7 @@ Routes :
   /mirror/SORTE/NOM un miroir : good (le fichier), stale (une autre version, plus longue), corrupt (même
                     taille, un octet faux tous les 4 Ko), down (404)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
+  /announce         un tracker BitTorrent : il donne pour pairs les Seeder lancés (voir plus bas)
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 
 En HTTPS (start(tls=…), certificat de tls_files) : les mêmes routes, et les adresses
@@ -60,6 +61,7 @@ FLAKY_SEEN = set()
 UNSTABLE = [0]
 LIMITED = {"active": 0, "peak": 0, "refused": 0}  # connexions de /limited/ (serveur entier)
 LIMITED_LOCK = threading.Lock()
+SEEDERS = []  # ports des aria2c qui partagent (Seeder), donnés par /announce
 
 
 def make_file(name, size, seed=None):
@@ -104,6 +106,13 @@ class Handler(SimpleHTTPRequestHandler):
         LOG.append((path, self.headers.get("Range"), self.headers.get("Cookie")))
         HOSTS.append((self.headers.get("Host"), path, self.headers.get("Cookie")))
         route, _, rest = path.lstrip("/").partition("/")
+        if route == "announce":  # tracker : les pairs, en liste compacte (BEP 23)
+            peers = b"".join(socket.inet_aton("127.0.0.1") + port.to_bytes(2, "big") for port in SEEDERS)
+            body = bencode({"interval": 60, "peers": peers})
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if route == "range":
             return self._file(rest, ranges=True)
         if route == "norange":
@@ -371,6 +380,56 @@ def start(port=0, static_dir=None, tls=None):
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+# ─── BitTorrent : un torrent, et qui le partage ────────────────────────────
+
+
+def bencode(value):
+    if isinstance(value, int):
+        return b"i%de" % value
+    if isinstance(value, (bytes, str)):
+        data = value.encode() if isinstance(value, str) else value
+        return b"%d:%s" % (len(data), data)
+    if isinstance(value, list):
+        return b"l" + b"".join(map(bencode, value)) + b"e"
+    return b"d" + b"".join(bencode(k) + bencode(value[k]) for k in sorted(value)) + b"e"
+
+
+def make_torrent(tracker, name, files, piece=256 * 1024):
+    """Un .torrent : (ses octets, son empreinte). `files` : le contenu, ou {chemin relatif : contenu}."""
+    if isinstance(files, bytes):
+        info, data = {"name": name, "length": len(files)}, files
+    else:
+        info = {"name": name, "files": [{"length": len(content), "path": path.split("/")}
+                                        for path, content in files.items()]}
+        data = b"".join(files.values())
+    pieces = b"".join(hashlib.sha1(data[i:i + piece]).digest() for i in range(0, len(data), piece))
+    info.update({"piece length": piece, "pieces": pieces})
+    return bencode({"announce": tracker, "info": info}), hashlib.sha1(bencode(info)).hexdigest()
+
+
+class Seeder:
+    """Un aria2c qui partage un torrent (le contenu déjà dans `directory`), annoncé par /announce."""
+
+    def __init__(self, directory, torrent, upload_limit=None):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        path = Path(directory) / "seed.torrent"
+        path.write_bytes(torrent)
+        self.proc = subprocess.Popen(
+            ["aria2c", "--no-conf", "-q", "--enable-dht=false", "--enable-dht6=false", "--bt-enable-lpd=false",
+             "--enable-peer-exchange=false", f"--listen-port={self.port}", "--seed-ratio=0.0", "--check-integrity=true",
+             f"--max-upload-limit={upload_limit or 0}", f"--dir={directory}", str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        SEEDERS.append(self.port)
+
+    def stop(self):
+        SEEDERS.remove(self.port)
+        self.proc.kill()
+        self.proc.wait()
 
 
 class WsClient:

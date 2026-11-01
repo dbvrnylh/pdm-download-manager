@@ -63,11 +63,11 @@ STOPPED = ("complete", "error", "removed")
 EVENTS = {"active": "aria2.onDownloadStart", "paused": "aria2.onDownloadPause", "removed": "aria2.onDownloadStop",
           "complete": "aria2.onDownloadComplete", "error": "aria2.onDownloadError"}
 # Les méthodes d'aria2 que PDM connaît (les autres : « méthode inconnue »).
-METHODS = ("addUri", "remove", "forceRemove", "pause", "forcePause", "pauseAll", "forcePauseAll", "unpause",
-           "unpauseAll", "changePosition", "changeOption", "tellStatus", "getUris", "getFiles", "getPeers",
-           "tellActive", "tellWaiting", "tellStopped", "getOption", "getGlobalOption", "changeGlobalOption",
-           "getGlobalStat", "removeDownloadResult", "purgeDownloadResult", "getVersion", "getSessionInfo",
-           "saveSession", "shutdown", "forceShutdown")
+METHODS = ("addUri", "addTorrent", "remove", "forceRemove", "pause", "forcePause", "pauseAll", "forcePauseAll",
+           "unpause", "unpauseAll", "changePosition", "changeOption", "tellStatus", "getUris", "getFiles",
+           "getPeers", "tellActive", "tellWaiting", "tellStopped", "getOption", "getGlobalOption",
+           "changeGlobalOption", "getGlobalStat", "removeDownloadResult", "purgeDownloadResult", "getVersion",
+           "getSessionInfo", "saveSession", "shutdown", "forceShutdown")
 
 
 class RpcError(Exception):
@@ -216,7 +216,14 @@ class Api:
             raise RpcError("uris : une liste d'adresses", -32602)
         fields, _ = aria2.to_spec(options, self.config.download_dir())  # strict : une option inconnue est refusée
         spec = {"url": uris[0], "mirrors": uris[1:], "source": "rpc", "position": position, **fields}
-        return gid(self.engine.add(spec).id)
+        return gid(self.engine.add(spec).id)  # un lien magnet : un torrent
+
+    def addTorrent(self, data, uris=None, options=None, position=None):
+        """Ajoute un torrent, son fichier .torrent en base64. `uris` (des sources web en plus) : ignorées."""
+        if not isinstance(data, str):
+            raise RpcError("torrent : le fichier .torrent, en base64", -32602)
+        fields, _ = aria2.to_spec(options, self.config.download_dir())
+        return gid(self.engine.add({"torrent": data, "source": "rpc", "position": position, **fields}).id)
 
     # ─── Commandes ─────────────────────────────────────────────────────────
 
@@ -405,6 +412,9 @@ class Api:
             }
             if state == "error":
                 status.update(errorCode="1", errorMessage=job.error or "")
+            if job.kind == "torrent":  # ce qu'AriaNg lit pour afficher un torrent
+                status.update(bittorrent={"info": {"name": job.filename or ""}}, infoHash=job.infoHash or "",
+                              numSeeders=str(job.sources or 0), uploadSpeed=str(int(job.upload or 0)))
         return {key: value for key, value in status.items() if keys is None or key in keys}
 
 

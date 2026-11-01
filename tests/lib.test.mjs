@@ -5,7 +5,7 @@ import { detectMedia, totalSize } from '../extension/lib/media.js';
 import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
-import { PRESETS, isStreamUrl, directFilename, httpJob, videoJob } from '../extension/lib/jobs.js';
+import { PRESETS, isStreamUrl, directFilename, httpJob, isTorrent, torrentJob, videoJob } from '../extension/lib/jobs.js';
 import { MAX_LINKS, formatEntry, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
 import { addMedia, getMedia } from '../extension/lib/store.js';
@@ -333,4 +333,16 @@ test("jobs: l'adresse de départ part avec le téléchargement, s'il y a eu des 
   assert.equal('startUrl' in (await httpJob(start, { startUrl: start })), false, 'pas de redirection');
   assert.equal('startUrl' in (await httpJob(start)), false);
   delete globalThis.chrome;
+});
+
+test('jobs : un torrent, lien magnet ou .torrent lu avec les cookies du site', async () => {
+  globalThis.chrome = { cookies: { getAll: async () => [{ name: 'membre', value: '42' }] } };
+  const magnet = await torrentJob('magnet:?xt=urn:btih:' + 'ab'.repeat(20), { source: 'magnet' });
+  assert.equal(magnet.kind, 'torrent');
+  assert.equal('cookies' in magnet, false, 'un lien magnet ne va à aucun site');
+  assert.equal((await torrentJob('https://tracker.example/t/1.torrent')).cookies, 'membre=42');
+  delete globalThis.chrome;
+  assert.equal(isTorrent('Debian.TORRENT'), true);
+  assert.equal(isTorrent('fichier.bin', 'application/x-bittorrent'), true);
+  assert.equal(isTorrent('torrent.zip', 'application/zip'), false);
 });

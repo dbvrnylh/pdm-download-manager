@@ -48,6 +48,17 @@ jobs:
           echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/ffmpeg/ffmpeg" -hide_banner -version
           python -m pip install --quiet yt-dlp
+      - name: Install aria2c
+        # Pour les tests des torrents (un essaim local : un tracker, un aria2c qui partage).
+        # Le miroir APT d'Ubuntu bloque parfois (voir ffmpeg plus haut) : sans aria2c, ces
+        # tests s'ignorent, et le reste passe quand même.
+        if: matrix.media
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -qq
+          sudo apt-get install -y -qq --no-install-recommends aria2
+          aria2c --version | head -1
       - name: Run engine, daemon and yt-dlp tests
         run: python -m unittest discover -s tests -v
 

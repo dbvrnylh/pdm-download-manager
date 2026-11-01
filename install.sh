@@ -142,6 +142,11 @@ if command -v ffmpeg >/dev/null; then
 else
   warn "ffmpeg absent : pas de fusion audio + vidéo ni de MP3 → sudo apt install ffmpeg"
 fi
+if command -v aria2c >/dev/null; then
+  ok "aria2c (torrents et liens magnet)"
+else
+  warn "aria2c absent : pas de torrents ni de liens magnet → sudo apt install aria2"
+fi
 if command -v deno >/dev/null || command -v node >/dev/null; then
   ok "moteur JavaScript ($(command -v deno >/dev/null && echo deno || echo node))"
 else

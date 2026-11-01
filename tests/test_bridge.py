@@ -4,9 +4,11 @@ On se met à la place de Chrome : on lance pdm-host, on lui parle avec des
 messages préfixés par leur longueur, puis on le tue comme le fait Chrome.
 """
 
+import base64
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -322,6 +324,63 @@ esac
             job = jobs[name]
             self.assertEqual((job["status"], job["speedLimit"]), ("completed", 1024 * 1024))
             self.assertEqual(hashlib.sha256(Path(job["path"]).read_bytes()).hexdigest(), digest)
+
+    @unittest.skipUnless(shutil.which("aria2c"), "aria2c absent : sudo apt install aria2")
+    def test_a_torrent_taken_from_the_browser_and_aria2c_leaving_with_the_daemon(self):
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+        seeds = Path(tempfile.mkdtemp(prefix="pdm-seed-", dir=os.environ.get("PDM_TEST_TMP")))
+        content = os.urandom(800_000)
+        (seeds / "pris.bin").write_bytes(content)
+        fx.FILES["pris.torrent"], infohash = fx.make_torrent(self.base + "/announce", "pris.bin", content)
+        fx.VERSION["pris.torrent"] = 1
+        seeder = fx.Seeder(seeds, fx.FILES["pris.torrent"])
+        self.addCleanup(seeder.stop)
+
+        # Comme la prise de contrôle : lu tout de suite ; un faux .torrent est refusé, et Chrome le garde.
+        fake = chrome.request({"type": "add", "probe": True, "job": {
+            "kind": "torrent", "url": self.base + "/range/list-a.bin", "source": "intercept"}})
+        self.assertFalse(fake["ok"])
+        self.assertIn("pas un fichier .torrent", fake["error"])
+        added = chrome.request({"type": "add", "probe": True, "job": {
+            "kind": "torrent", "url": self.base + "/range/pris.torrent", "source": "intercept",
+            "filename": "pris.torrent"}})
+        self.assertTrue(added["ok"], added)
+        self.assertEqual((added["job"]["filename"], added["job"]["infoHash"]), ("pris.bin", infohash))
+        deadline = time.time() + 40
+        while time.time() < deadline:
+            job = next(j for j in chrome.request({"type": "list"})["jobs"] if j["id"] == added["job"]["id"])
+            if job["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.2)
+        self.assertEqual(job["status"], "completed", job.get("error"))
+        self.assertEqual(Path(job["path"]).read_bytes(), content)
+
+        def aria2c():  # celui de ce démon (sa configuration est dans son dossier de données)
+            out = subprocess.run(["pgrep", "-f", f"{self.env['PDM_DATA_DIR']}/aria2.conf"], capture_output=True,
+                                 text=True).stdout
+            return out.split()
+
+        # Un torrent lent, en cours quand le démon s'arrête : aria2c ne doit pas lui survivre.
+        slow = os.urandom(2 * 1024 * 1024)
+        (seeds / "lent.bin").write_bytes(slow)
+        metainfo, _ = fx.make_torrent(self.base + "/announce", "lent.bin", slow)
+        slow_seeder = fx.Seeder(seeds, metainfo, upload_limit="64K")
+        self.addCleanup(slow_seeder.stop)
+        added = chrome.request({"type": "add", "job": {"torrent": base64.b64encode(metainfo).decode()}})
+        self.assertTrue(added["ok"], added)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            job = next(j for j in chrome.request({"type": "list"})["jobs"] if j["id"] == added["job"]["id"])
+            if job["downloaded"]:
+                break
+            time.sleep(0.2)
+        self.assertTrue(aria2c(), "aria2c tourne pour le torrent en cours")
+        chrome.request({"type": "shutdown"})
+        deadline = time.time() + 15
+        while (aria2c() or self._daemon_pid()) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertEqual(aria2c(), [], "aria2c part avec le démon")
 
     def test_the_managers_commands_reach_the_engine(self):
         chrome = self.connect()

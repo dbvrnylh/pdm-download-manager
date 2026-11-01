@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
+from urllib.parse import quote
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +37,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import aria2, checksum, daemon, finish, httpdl, metalink, paths, rpc, util  # noqa: E402
+from pdm_engine import aria2, checksum, daemon, finish, httpdl, metalink, paths, rpc, torrent, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine import engine as engine_mod  # noqa: E402
 from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
@@ -1601,6 +1602,185 @@ class FinishTest(unittest.TestCase):
             finish.extract(path)
         self.assertIn("pas assez de place", str(caught.exception))
         self.assertEqual([p.name for p in self.dir.iterdir()], ["gros.zip"])
+
+
+HERMETIC = ["--enable-dht=false", "--enable-dht6=false", "--bt-enable-lpd=false", "--enable-peer-exchange=false"]
+
+
+@unittest.skipUnless(shutil.which("aria2c"), "aria2c absent : sudo apt install aria2")
+class TorrentTest(unittest.TestCase):
+    """Torrents et liens magnet (torrent.py), contre un vrai essaim local : un tracker, un aria2c qui partage."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = fx.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        cls.tracker = cls.base + "/announce"
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(self.root / "data")
+        (self.root / "data").mkdir()
+        self.downloads = self.root / "dl"
+        self.config = Config(self.root / "data" / "config.json")
+        self.config.update({"downloadDir": str(self.downloads), "notify": False})
+        quiet = unittest.mock.patch.object(torrent, "DISCOVERY", HERMETIC)  # personne d'autre que l'essaim local
+        quiet.start()
+        self.addCleanup(quiet.stop)
+        self.events = []
+        tools = Tools(self.config)
+        tools.ready.set()
+        self.engine = Engine(self.config, tools, self.events.append)
+        self.engine.start()
+        self.addCleanup(self.engine.aria2.stop)
+
+    def seed(self, name, files, upload_limit=None):
+        """Partage ce contenu (octets, ou {chemin : octets} pour un dossier) ; renvoie (.torrent, empreinte)."""
+        directory = Path(tempfile.mkdtemp(dir=self.root))
+        for path, content in ({name: files} if isinstance(files, bytes) else
+                              {f"{name}/{path}": content for path, content in files.items()}).items():
+            (directory / path).parent.mkdir(parents=True, exist_ok=True)
+            (directory / path).write_bytes(content)
+        data, infohash = fx.make_torrent(self.tracker, name, files)
+        seeder = fx.Seeder(directory, data, upload_limit)
+        self.addCleanup(seeder.stop)
+        return data, infohash
+
+    def wait(self, job, states, timeout=40):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if job.status in states and job.id not in self.engine.runners:
+                return job
+            time.sleep(0.05)
+        self.fail(f"toujours {job.status} ({job.error})")
+
+    def until(self, condition, timeout=20):
+        deadline = time.time() + timeout
+        while not condition() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(condition())
+
+    def test_a_torrent_link_is_downloaded_from_its_peers(self):
+        data = os.urandom(3 * 1024 * 1024 + 4321)
+        fx.FILES["film.torrent"], infohash = self.seed("film.bin", data, upload_limit="1M")  # le temps de le voir
+        fx.VERSION["film.torrent"] = 1
+        job = self.wait(self.engine.add({"url": self.base + "/range/film.torrent", "kind": "torrent"}),
+                        {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(Path(job.path), self.downloads / "Torrents" / "film.bin")
+        self.assertEqual(Path(job.path).read_bytes(), data)
+        self.assertEqual(job.infoHash, infohash)
+        self.assertEqual([p.name for p in (self.downloads / "Torrents").iterdir()], ["film.bin"],
+                         "son dossier caché est parti")
+        self.assertEqual(os.stat(torrent.stored(job.id)).st_mode & 0o777, 0o600, "le .torrent, gardé pour reprendre")
+        running = [e["job"] for e in self.events if e["type"] == "job" and e["job"]["status"] == "downloading"]
+        self.assertTrue(any(j["sources"] for j in running), "ses pairs complets se voient")
+        self.until(lambda: not self.engine.aria2.running)  # plus aucun torrent : aria2c s'arrête
+
+    def test_a_magnet_link_brings_a_whole_folder(self):
+        files = {"lisez-moi.txt": b"bonjour\n", "images/a.bin": os.urandom(700_000),
+                 "images/b.bin": os.urandom(900_000)}
+        _, infohash = self.seed("collection", files)
+        tracker = quote(self.tracker, safe="")
+        job = self.engine.add({"url": f"magnet:?xt=urn:btih:{infohash}&dn=collection&tr={tracker}"})
+        self.assertEqual((job.kind, job.filename, job.infoHash), ("torrent", "collection", infohash))
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        folder = self.downloads / "Torrents" / "collection"
+        self.assertEqual(Path(job.path), folder)
+        for path, content in files.items():
+            self.assertEqual((folder / path).read_bytes(), content, path)
+
+    def test_a_paused_torrent_resumes_from_what_it_received_and_a_canceled_one_leaves_nothing(self):
+        data = os.urandom(4 * 1024 * 1024)
+        metainfo, _ = self.seed("lent.bin", data, upload_limit="512K")
+        job = self.engine.add({"torrent": base64.b64encode(metainfo).decode()})
+        self.until(lambda: job.downloaded > 1536 * 1024)
+        self.engine.pause(job.id)
+        job = self.wait(job, {"paused"})
+        partial = job.downloaded
+        staging = self.downloads / "Torrents" / f"{torrent.STAGING}{job.id}"
+        self.assertTrue((staging / "lent.bin.aria2").exists(), "ce qui est reçu est gardé, avec son contrôle")
+        resumed = len(self.events)
+        self.engine.resume(job.id)
+        time.sleep(1.5)  # à 512 Ko/s, repartir de zéro ne dépasserait pas ~0,8 Mo
+        seen = [e["job"]["downloaded"] for e in self.events[resumed:]
+                if e["type"] == "job" and e["job"]["id"] == job.id]
+        self.assertGreaterEqual(max(seen), partial, "reprise, pas recommencement")
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual(Path(job.path).read_bytes(), data)
+
+        metainfo, _ = self.seed("abandon.bin", os.urandom(4 * 1024 * 1024), upload_limit="256K")
+        other = self.engine.add({"torrent": base64.b64encode(metainfo).decode()})
+        self.until(lambda: other.downloaded > 0)
+        self.engine.cancel(other.id)
+        self.wait(other, {"canceled"})
+        self.assertEqual([p.name for p in (self.downloads / "Torrents").iterdir()], ["lent.bin"], "rien de laissé")
+
+    def test_the_api_adds_torrents_like_aria2(self):
+        metainfo, infohash = self.seed("api.bin", os.urandom(600_000))
+        api = rpc.Api(self.engine, self.config)
+        api.secret = "s"
+        g = api.dispatch("aria2.addTorrent", ["token:s", base64.b64encode(metainfo).decode()])
+        status = api.dispatch("aria2.tellStatus", ["token:s", g, ["bittorrent", "infoHash"]])
+        self.assertEqual((status["bittorrent"]["info"]["name"], status["infoHash"]), ("api.bin", infohash))
+        magnet = api.dispatch("aria2.addUri", ["token:s", [f"magnet:?xt=urn:btih:{'ab' * 20}"], {"pause": "true"}])
+        self.assertEqual(api.dispatch("aria2.tellStatus", ["token:s", magnet, ["infoHash"]]), {"infoHash": "ab" * 20})
+        with self.assertRaises(rpc.RpcError):
+            api.dispatch("aria2.addTorrent", ["token:s", base64.b64encode(b"pas un torrent").decode()])
+
+    def test_aria2c_keeps_its_secret_out_of_sight(self):
+        self.engine.aria2.acquire()
+        try:
+            aria2c = self.engine.aria2
+            self.assertNotIn(aria2c.secret, Path(f"/proc/{aria2c.proc.pid}/cmdline").read_text(), "ps le montrerait")
+            self.assertEqual(os.stat(paths.data_dir() / "aria2.conf").st_mode & 0o777, 0o600)
+            with self.assertRaises(torrent.Aria2Error):
+                aria2c.secret, real = "faux", aria2c.secret
+                try:
+                    aria2c.call("aria2.getVersion")
+                finally:
+                    aria2c.secret = real
+            self.assertIn("version", aria2c.call("aria2.getVersion"))
+        finally:
+            self.engine.aria2.release()
+        self.assertFalse(self.engine.aria2.running)
+
+
+class TorrentFileTest(unittest.TestCase):
+    """Ce qui arrive d'internet avant aria2c : liens magnet et fichiers .torrent, lus avec méfiance."""
+
+    def test_torrent_files_and_magnet_links_are_read(self):
+        single, infohash = fx.make_torrent("http://t.example/announce", "f.bin", b"x" * 1000)
+        self.assertEqual(torrent.parse_torrent(single), {"infohash": infohash, "name": "f.bin", "length": 1000,
+                                                          "trackers": ["http://t.example/announce"]})
+        folder, _ = fx.make_torrent("http://t.example/announce", "d", {"a": b"1" * 10, "b/c": b"2" * 5})
+        self.assertEqual(torrent.parse_torrent(folder)["length"], 15)
+        self.assertEqual(torrent.magnet_hash(f"magnet:?xt=urn:btih:{infohash.upper()}&dn=f"), infohash)
+        base32 = base64.b32encode(bytes.fromhex(infohash)).decode()
+        self.assertEqual(torrent.magnet_hash(f"magnet:?dn=f&xt=urn:btih:{base32}"), infohash)
+
+    def test_hostile_or_broken_input_is_refused(self):
+        single, _ = fx.make_torrent("http://t.example/announce", "f.bin", b"x" * 1000)
+        for data in (b"", b"pas un torrent", single[:-5], single + b"x", b"l" * 10000 + b"e" * 10000,
+                     b"d4:infoi1ee", b"d4:info99999:xe", fx.bencode({"info": {"length": 1}})):
+            with self.subTest(data=data[:20]), self.assertRaises(ValueError):
+                torrent.parse_torrent(data)
+        for url in ("magnet:?dn=sans-empreinte", "magnet:?xt=urn:btih:1234", "magnet:?xt=urn:sha1:" + "a" * 40):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                torrent.magnet_hash(url)
+        for name in ("..", "a/b", "a\\b", "", "x\0"):
+            self.assertFalse(torrent._safe(name), name)
+
+    def test_without_aria2c_a_torrent_is_refused_at_once(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(root)  # une liste vide, pas celle du test d'avant
+        config = Config(root / "config.json")
+        engine = Engine(config, Tools(config), lambda event: None)
+        with unittest.mock.patch.object(torrent, "find", return_value=None), self.assertRaises(ValueError) as caught:
+            engine.add({"url": "magnet:?xt=urn:btih:" + "ab" * 20})
+        self.assertIn("aria2c absent", str(caught.exception))  # l'extension laisse alors faire le navigateur
+        self.assertEqual(engine.jobs, {})
 
 
 class ConfigTest(unittest.TestCase):

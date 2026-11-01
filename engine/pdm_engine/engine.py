@@ -6,6 +6,7 @@ d'acquisition, toujours le même pour éviter les interblocages :
 save_lock → lock → verrou du téléchargement.
 """
 
+import base64
 import json
 import logging
 import os
@@ -15,14 +16,15 @@ import subprocess
 import threading
 import time
 import uuid
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
-from . import aria2, checksum, finish, httpdl, metalink, paths
+from . import aria2, checksum, finish, httpdl, metalink, paths, torrent
 from .config import LIMITS, MAX_SPEED, MIN_SPEED, QUALITIES
 from .hosts import Hosts
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
 from .limiter import Limiter
 from .rpc import gid
+from .torrent import TorrentDownload
 from .util import filename_from_url, human_size, sanitize_filename, unique_path, write_json_atomic
 from .ytdlp import YtdlpDownload, cleanup_files
 
@@ -49,6 +51,7 @@ PERSISTED = {
     "metalink": None,  # adresse de son document Metalink (.meta4) : les sommes de ses morceaux
     # Adresse d'où le navigateur est parti, avant les redirections qui ont mené à `url`.
     "startUrl": None,
+    "infoHash": None,  # l'empreinte d'un torrent (hexadécimal), qui le désigne pour tous ses pairs
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
 HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl"}
@@ -92,7 +95,8 @@ class Job:
         self.speed = 0.0
         self.eta = None
         self.connections = 0
-        self.sources = 0  # serveurs qui envoient le fichier en ce moment (miroirs compris)
+        self.sources = 0  # serveurs qui envoient le fichier (miroirs compris) ; d'un torrent, ses pairs complets
+        self.upload = 0.0  # octets/s envoyés aux autres pairs (un torrent)
         self.stage = None
         self.sample = None
         # Segments affichés : ceux reçus. `segments`, sauvegardé, ne garde que ceux
@@ -105,7 +109,7 @@ class Job:
     def public(self):
         data = {k: v for k, v in self.to_dict().items() if k not in HIDDEN}
         data.update(speed=self.speed, eta=self.eta, connections=self.connections, sources=self.sources,
-                    stage=self.stage)
+                    stage=self.stage, upload=self.upload)
         if self.status not in ("downloading", "paused"):
             data["segments"] = []
         elif self.bar is not None:
@@ -140,8 +144,9 @@ class Engine:
         # pour chaque yt-dlp (processus à part, qui ne peut pas y puiser).
         self.limiter = Limiter(self._http_rate)
         self.hosts = Hosts()  # connexions ouvertes chez chaque site, et la limite de chacun
-        self.ytdlp_shares = {}  # id → part donnée (octets/s)
+        self.ytdlp_shares = {}  # id → part donnée (octets/s) à un programme à part : yt-dlp, aria2c
         self.ytdlp_reserved = 0  # leur total, lu sans verrou par le seau
+        self.aria2 = torrent.Aria2()  # lancé au premier torrent, arrêté quand aucun ne tourne
         self.now = time.localtime  # horloge de la plage horaire (remplacée dans les tests)
         self.window_open = None  # état de la plage au dernier coup d'œil
         self._load()
@@ -191,6 +196,36 @@ class Engine:
                     log.info("liste des téléchargements de nouveau sauvegardée")
                 self.save_error = None
 
+    def _torrent_spec(self, spec, url):
+        """Un torrent demandé ? → (son .torrent, ou None ; ce qu'on en sait) ; (None, None) : pas un torrent.
+
+        Trois formes : un .torrent donné (en base64 : addTorrent d'aria2), un lien magnet,
+        ou l'adresse d'un .torrent (« kind » : « torrent »), lue au démarrage avec les
+        cookies du site. Rien n'est accepté sans aria2c : l'extension laisse alors faire Chrome.
+        """
+        data = spec.get("torrent")
+        if data is None and not url.lower().startswith("magnet:") and spec.get("kind") != "torrent":
+            return None, None
+        if not torrent.find():
+            raise ValueError("aria2c absent : pour les torrents et les liens magnet, installe aria2 "
+                             "(sudo apt install aria2)")
+        if data is not None:
+            try:
+                raw = base64.b64decode(data, validate=True) if isinstance(data, str) else b""
+            except ValueError:
+                raw = b""
+            if not raw or len(raw) > torrent.MAX_TORRENT:
+                raise ValueError("fichier .torrent invalide")
+            info = torrent.parse_torrent(raw)
+            trackers = "".join(f"&tr={quote(tracker, safe='')}" for tracker in info["trackers"])
+            return raw, dict(info, url=f"magnet:?xt=urn:btih:{info['infohash']}&dn={quote(info['name'])}{trackers}")
+        if url.lower().startswith("magnet:"):
+            name = parse_qs(urlsplit(url).query).get("dn", [None])[0]
+            return None, {"url": url, "infohash": torrent.magnet_hash(url), "name": name, "length": None}
+        if not re.match(r"^https?://", url, re.I):
+            raise ValueError("adresse invalide (http ou https uniquement)")
+        return None, {"url": url, "infohash": None, "name": None, "length": None}
+
     def job_page(self, after=None):
         """Une page de la liste : (téléchargements, curseur de la page suivante, ou None : c'était la dernière).
 
@@ -227,7 +262,10 @@ class Engine:
 
     def add(self, spec, probe=False):
         url = (spec.get("url") or "").strip()
-        if not re.match(r"^https?://", url, re.I):
+        metainfo, info = self._torrent_spec(spec, url)  # un torrent : son .torrent, s'il est donné
+        if info:
+            url = info["url"]
+        elif not url.lower().startswith("magnet:") and not re.match(r"^https?://", url, re.I):
             raise ValueError("adresse invalide (http ou https uniquement)")
         if spec.get("options"):
             # Les options d'aria2 d'une liste importée (voir aria2.parse_list) : ce qu'elles
@@ -236,9 +274,11 @@ class Engine:
             spec = {**spec, **fields}
         if len(url) > MAX_URL or len(spec.get("referer") or "") > MAX_URL:
             raise ValueError(f"adresse de plus de {MAX_URL // 1024} Ko")
-        kind = spec.get("kind") or "http"
-        if kind not in ("http", "ytdlp"):
+        kind = "torrent" if info is not None else spec.get("kind") or "http"
+        if kind not in ("http", "ytdlp", "torrent"):
             raise ValueError("type de téléchargement inconnu")
+        if kind != "torrent" and url.lower().startswith("magnet:"):
+            raise ValueError("un lien magnet est un torrent")
         preset = spec.get("preset")
         if kind == "ytdlp":
             # Rien de précisé (bouton, liste, gestionnaire, terminal) : la qualité
@@ -255,7 +295,7 @@ class Engine:
             id=spec.get("id"), kind=kind, url=url, referer=spec.get("referer"),
             startUrl=start if kind == "http" and start != url else None,
             cookies=spec.get("cookies") or None, userAgent=spec.get("userAgent"),
-            headers=clean_headers(spec.get("headers")) if kind == "http" else None,
+            headers=clean_headers(spec.get("headers")) if kind in ("http", "torrent") else None,
             checksums=checksum.clean(spec.get("checksums")) if kind == "http" else [],
             mirrors=given, givenMirrors=given,
             source=spec.get("source") or "manual", mime=spec.get("mime"),
@@ -264,6 +304,10 @@ class Engine:
             createdAt=time.time(), scheduled=bool(spec.get("scheduled")),
             status="paused" if spec.get("paused") else "queued",  # en pause dès l'ajout : rien ne démarre
         )
+        if info:  # ce que l'on sait du torrent avant de le demander à ses pairs
+            name = info.get("name")
+            job.infoHash, job.size = info["infohash"], info.get("length")
+            job.filename = job.filename or (sanitize_filename(name) if name else None)
         for key, value in job_options({k: spec[k] for k in ("maxConnections", "speedLimit") if k in spec}).items():
             setattr(job, key, value)
         position = spec.get("position")
@@ -279,6 +323,12 @@ class Engine:
             job.filename = job.filename or first.filename
             job.size = first.size
             job.mime = first.mime or job.mime
+        elif probe and kind == "torrent" and metainfo is None and not url.lower().startswith("magnet:"):
+            # Un .torrent pris au navigateur : lu tout de suite, pour que Chrome le garde si ça échoue.
+            metainfo = torrent.fetch(job)
+            known = torrent.parse_torrent(metainfo)
+            job.infoHash, job.size = known["infohash"], known["length"]
+            job.filename = sanitize_filename(known["name"])
 
         with self.lock:
             if job.id in self.cancelled:
@@ -289,11 +339,15 @@ class Engine:
             if kind == "ytdlp":
                 job.category = "audio" if job.preset == "audio" else "video"
                 job.filename = job.filename or job.title or url
+            elif kind == "torrent":
+                job.category = "other"  # un torrent mêle souvent vidéos, textes et images : le sien, Torrents/
             else:
                 job.category = self.config.category_for(job.filename or filename_from_url(url), job.mime or "")[0]
             self.jobs[job.id] = job
             moved = self._place(job, position) if position is not None else []
             self.dirty = True
+        if metainfo is not None:
+            torrent.keep(job.id, metainfo)
         self._publish(job)
         for other in moved:
             if other is not job:
@@ -399,8 +453,9 @@ class Engine:
         """Change les connexions ou la vitesse maximale d'un téléchargement ; renvoie le téléchargement.
 
         Un fichier en cours les prend aussitôt : ses connexions en plus s'ouvrent, celles en
-        trop s'arrêtent entre deux morceaux, et sa limite vaut dès la lecture suivante. Une
-        vidéo (yt-dlp, un programme à part) les prendra à son prochain départ.
+        trop s'arrêtent entre deux morceaux, et sa limite vaut dès la lecture suivante. Un
+        torrent prend aussitôt sa vitesse (aria2c la change en route) ; une vidéo (yt-dlp, un
+        programme à part) les prendra à son prochain départ.
         """
         options = job_options(changes)
         with self.lock:
@@ -410,6 +465,10 @@ class Engine:
             for key, value in options.items():
                 setattr(job, key, value)
             self.dirty = True
+            runner = self.runners.get(job_id)
+            share = self.ytdlp_shares.get(job_id)
+        if isinstance(runner, TorrentDownload) and "speedLimit" in options:
+            runner.limit(min(rate for rate in (job.speedLimit, share) if rate) if job.speedLimit or share else 0)
         self._publish(job)
         return job
 
@@ -504,6 +563,7 @@ class Engine:
                 except OSError:
                     pass
             self.dirty = True
+        torrent.forget(job_id)  # son .torrent gardé, s'il en avait un
         self.emit({"type": "removed", "id": job_id})
         self.save()
 
@@ -514,6 +574,7 @@ class Engine:
                 del self.jobs[job_id]
             self.dirty = True
         for job_id in done:
+            torrent.forget(job_id)
             self.emit({"type": "removed", "id": job_id})
         self.save()
 
@@ -608,8 +669,11 @@ class Engine:
             self._publish(job)
 
     def _start(self, job, first):
-        if job.kind == "ytdlp":
-            runner = YtdlpDownload(job, self.config, self.tools)
+        if job.kind in ("ytdlp", "torrent"):  # un programme à part, qui ne puise pas dans le seau
+            if job.kind == "ytdlp":
+                runner = YtdlpDownload(job, self.config, self.tools)
+            else:
+                runner = TorrentDownload(job, self.config, self.aria2, self._torrent_dir())
             limit = self.config["speedLimit"]
             rates = [job.speedLimit] if job.speedLimit else []  # la sienne, s'il en a une
             if limit:
@@ -628,6 +692,11 @@ class Engine:
         job.status, job.error, job.sample, job.speed = "downloading", None, None, 0.0
         self.dirty = True
         threading.Thread(target=self._run, args=(job, runner), daemon=True, name=f"job-{job.id}").start()
+
+    def _torrent_dir(self):
+        """Le dossier des torrents : Torrents/ dans celui de PDM, s'il range par catégorie."""
+        base = self.config.download_dir()
+        return base / torrent.FOLDER if self.config["categorize"] else base
 
     def _run(self, job, runner):
         try:
@@ -651,7 +720,7 @@ class Engine:
                 runner.cleanup()
                 self._reset(job)
             job.status, job.error = outcome, error
-            job.speed, job.eta, job.connections, job.sources, job.stage = 0.0, None, 0, 0, None
+            job.speed, job.eta, job.connections, job.sources, job.stage, job.upload = 0.0, None, 0, 0, None, 0.0
             if outcome == "completed":
                 job.completedAt = time.time()
                 job.segments = []
@@ -786,6 +855,7 @@ class Engine:
         job.connections = progress.get("connections", 0)
         job.sources = progress.get("sources", 0)
         job.stage = progress.get("stage")
+        job.upload = progress.get("upload", 0.0)
 
     # ─── Utilitaires ───────────────────────────────────────────────────────
 
@@ -812,13 +882,14 @@ class Engine:
     def _reset(job):
         job.segments, job.bar, job.downloaded = [], None, 0
         job.sha256 = job.verified = None
-        if job.kind == "http":
+        if job.kind in ("http", "torrent"):
             job.path = None
 
-    @staticmethod
-    def _delete_partial(job):
+    def _delete_partial(self, job):
         if job.kind == "ytdlp":
             cleanup_files(job)
+        elif job.kind == "torrent":  # son dossier caché, rien d'autre (voir torrent.py)
+            shutil.rmtree(self._torrent_dir() / f"{torrent.STAGING}{job.id}", ignore_errors=True)
         elif job.path:
             try:
                 os.unlink(job.path + PART_SUFFIX)

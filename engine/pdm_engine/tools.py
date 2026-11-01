@@ -137,6 +137,7 @@ class Tools:
             "ffmpeg": bool(self.ffmpeg),
             "jsRuntime": "deno" if self.deno else ("node" if self.node else None),
             "folderPicker": bool(self.zenity or self.kdialog),
+            "aria2": bool(shutil.which("aria2c")),  # torrents et liens magnet (voir torrent.py)
         }
 
     def choose_folder(self, start):

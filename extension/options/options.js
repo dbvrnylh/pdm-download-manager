@@ -206,6 +206,10 @@ function renderTools(tools) {
     ],
     ['ffmpeg', tools.ffmpeg, 'installé', 'absent : pas de fusion audio + vidéo (qualité limitée) ni de MP3. sudo apt install ffmpeg'],
     ['JavaScript', tools.jsRuntime, tools.jsRuntime, 'aucun (deno ou node) : YouTube peut proposer moins de formats.'],
+    // Un moteur plus ancien ne le dit pas : la ligne n'apparaît pas.
+    ...('aria2' in tools
+      ? [['aria2c', tools.aria2, 'installé : torrents et liens magnet', 'absent : pas de torrents. sudo apt install aria2']]
+      : []),
   ];
   document.getElementById('tools').replaceChildren(
     ...rows.map(([name, ok, good, bad]) => {

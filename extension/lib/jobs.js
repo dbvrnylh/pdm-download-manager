@@ -56,6 +56,18 @@ export async function httpJob(
   };
 }
 
+// Torrent : un lien magnet, ou l'adresse d'un .torrent, que le moteur lit avec
+// les cookies du site (un tracker privé ne le donne qu'à ses membres).
+export async function torrentJob(url, { referer, source, headers, filename } = {}) {
+  const job = { id: newJobId(), kind: 'torrent', url, referer, source, filename };
+  if (/^magnet:/i.test(url)) return job;
+  return { ...job, ...(headers ? { headers } : { cookies: await cookieHeader(url) }), userAgent: navigator.userAgent };
+}
+
+export function isTorrent(name, mime) {
+  return /\.torrent$/i.test(name ?? '') || mime === 'application/x-bittorrent';
+}
+
 // Tâche yt-dlp.
 // - Flux brut (.m3u8/.mpd) : le titre de la page sert de nom, et on transmet
 //   Referer, cookies et User-Agent, que le CDN vérifie souvent.
