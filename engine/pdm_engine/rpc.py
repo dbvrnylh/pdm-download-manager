@@ -59,20 +59,22 @@ OUTBOX = 256  # trames en attente vers un client WebSocket : au-delà, il ne lit
 STATUS = {"queued": "waiting", "downloading": "active", "paused": "paused", "completed": "complete",
           "failed": "error", "canceled": "removed"}
 STOPPED = ("complete", "error", "removed")
+# Options d'aria2 propres à un téléchargement, que PDM suit (voir _job_options).
+JOB_OPTIONS = {"split", "max-connection-per-server", "max-download-limit"}
 # L'état où entre un téléchargement → la notification d'aria2 qui l'annonce.
 EVENTS = {"active": "aria2.onDownloadStart", "paused": "aria2.onDownloadPause", "removed": "aria2.onDownloadStop",
           "complete": "aria2.onDownloadComplete", "error": "aria2.onDownloadError"}
 # Options d'aria2 qui règlent la façon de télécharger, que PDM décide seul (connexions,
 # reprise, renommage, vérification) : acceptées et ignorées, plutôt que de refuser le lien.
-IGNORED = {"split", "max-connection-per-server", "min-split-size", "continue", "max-tries", "retry-wait",
+IGNORED = {"min-split-size", "continue", "max-tries", "retry-wait",
            "timeout", "connect-timeout", "lowest-speed-limit", "allow-overwrite", "auto-file-renaming",
            "remote-time", "check-integrity", "follow-metalink", "metalink-preferred-protocol"}
 # Les méthodes d'aria2 que PDM connaît (les autres : « méthode inconnue »).
 METHODS = ("addUri", "remove", "forceRemove", "pause", "forcePause", "pauseAll", "forcePauseAll", "unpause",
-           "unpauseAll", "tellStatus", "getUris", "getFiles", "getPeers", "tellActive", "tellWaiting",
-           "tellStopped", "getOption", "getGlobalOption", "changeGlobalOption", "getGlobalStat",
-           "removeDownloadResult", "purgeDownloadResult", "getVersion", "getSessionInfo", "saveSession",
-           "shutdown", "forceShutdown")
+           "unpauseAll", "changePosition", "changeOption", "tellStatus", "getUris", "getFiles", "getPeers",
+           "tellActive", "tellWaiting", "tellStopped", "getOption", "getGlobalOption", "changeGlobalOption",
+           "getGlobalStat", "removeDownloadResult", "purgeDownloadResult", "getVersion", "getSessionInfo",
+           "saveSession", "shutdown", "forceShutdown")
 
 
 class RpcError(Exception):
@@ -223,11 +225,11 @@ class Api:
     def addUri(self, uris, options=None, position=None):
         """Ajoute un fichier. Plusieurs adresses : les miroirs du même fichier.
 
-        `position` (place dans la file) est ignoré : la file de PDM n'a pas encore d'ordre.
+        `position` : sa place dans la file d'attente (0 : le prochain à partir) ; sans elle, au bout.
         """
         if not isinstance(uris, list) or not uris or not all(isinstance(uri, str) for uri in uris):
             raise RpcError("uris : une liste d'adresses", -32602)
-        spec = {"url": uris[0], "mirrors": uris[1:], "source": "rpc"}
+        spec = {"url": uris[0], "mirrors": uris[1:], "source": "rpc", "position": position}
         for key, value in _options(options).items():
             if key == "out":
                 spec["filename"] = self._out(value)
@@ -243,8 +245,11 @@ class Api:
                 spec["checksums"] = [dict(checksum.parse(value), source="user")]
             elif key == "pause":
                 spec["paused"] = value == "true"  # en pause dès l'ajout
+            elif key in JOB_OPTIONS:
+                continue  # plus bas, ensemble
             elif key not in IGNORED:
                 raise RpcError(f"option non prise en charge : {key}")
+        spec.update(_job_options(options))
         return gid(self.engine.add(spec).id)
 
     @staticmethod
@@ -294,6 +299,22 @@ class Api:
     def unpauseAll(self):
         for job in self._jobs(("paused",)):
             self.engine.resume(job.id)
+        return "OK"
+
+    def changePosition(self, g, pos, how):
+        """Déplace un téléchargement dans la file d'attente ; rend sa nouvelle place (un nombre, comme aria2)."""
+        hows = {"POS_SET": "set", "POS_CUR": "cur", "POS_END": "end"}
+        if how not in hows or not isinstance(pos, int) or isinstance(pos, bool):
+            raise RpcError("changePosition : une place (entier) et POS_SET, POS_CUR ou POS_END", -32602)
+        return self.engine.move(self._job(g).id, pos, hows[how])
+
+    def changeOption(self, g, options):
+        """Les connexions et la vitesse maximale d'un téléchargement, même en cours."""
+        unknown = set(_options(options)) - JOB_OPTIONS
+        if unknown:
+            raise RpcError(f"option non prise en charge par changeOption : {', '.join(sorted(unknown))} "
+                           f"(seulement {', '.join(sorted(JOB_OPTIONS))})")
+        self.engine.set_options(self._job(g).id, _job_options(options))
         return "OK"
 
     def removeDownloadResult(self, g):
@@ -357,7 +378,7 @@ class Api:
         return [self._status(job, keys) for job in self._jobs(("active",))]
 
     def tellWaiting(self, offset, num, keys=None):
-        return [self._status(job, keys) for job in _page(self._jobs(("waiting", "paused")), offset, num)]
+        return [self._status(job, keys) for job in _page(self.engine.queue(), offset, num)]  # dans l'ordre de la file
 
     def tellStopped(self, offset, num, keys=None):
         return [self._status(job, keys) for job in _page(self._jobs(STOPPED), offset, num)]
@@ -381,6 +402,9 @@ class Api:
     def getOption(self, g):
         job = self._job(g)
         options = self.getGlobalOption()
+        if job.maxConnections:
+            options["split"] = options["max-connection-per-server"] = str(job.maxConnections)
+        options["max-download-limit"] = str(job.speedLimit or 0)
         options["dir"] = os.path.dirname(job.path) if job.path else options["dir"]
         if job.filename:
             options["out"] = job.filename
@@ -440,6 +464,23 @@ def _options(options):
             for k, v in options.items()):
         raise RpcError("options : des chaînes de caractères", -32602)
     return options
+
+
+def _job_options(options):
+    """split, max-connection-per-server, max-download-limit → maxConnections, speedLimit (vérifiés par le moteur).
+
+    Avec les deux premiers, aria2 ouvre au plus le plus petit : PDM aussi.
+    """
+    options = _options(options)
+    result = {}
+    counts = [options[key] for key in ("split", "max-connection-per-server") if key in options]
+    if counts:
+        if not all(value.isdigit() for value in counts):
+            raise RpcError("split, max-connection-per-server : des nombres entiers")
+        result["maxConnections"] = min(map(int, counts))
+    if "max-download-limit" in options:
+        result["speedLimit"] = _speed(options["max-download-limit"])
+    return result
 
 
 def _header(line):

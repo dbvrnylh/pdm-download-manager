@@ -18,8 +18,7 @@ import uuid
 from urllib.parse import quote
 
 from . import checksum, httpdl, metalink, paths
-from .config import QUALITIES
-from .config import MIN_SPEED
+from .config import LIMITS, MAX_SPEED, MIN_SPEED, QUALITIES
 from .hosts import Hosts
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
 from .limiter import Limiter
@@ -34,6 +33,9 @@ PERSISTED = {
     "category": "other", "mime": None, "preset": None, "status": "queued", "error": None,
     "size": None, "downloaded": 0, "resumable": False, "validator": None, "segments": [],
     "createdAt": 0, "completedAt": None, "scheduled": False, "headers": None,
+    "order": None,  # rang dans la file d'attente, une fois déplacé ; None : sa date d'ajout (voir queue_key)
+    # Réglages propres à ce téléchargement (voir job_options) ; None : les réglages généraux.
+    "maxConnections": None, "speedLimit": None,
     # Intégrité : sommes attendues (voir checksum.py), SHA-256 du fichier terminé,
     # et résultat de la dernière comparaison (None : rien à quoi comparer).
     "checksums": [], "sha256": None, "verified": None,
@@ -48,6 +50,29 @@ PERSISTED = {
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
 HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl"}
 MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
+WAITING = ("queued", "paused")  # la file d'attente : en pause, un téléchargement y garde sa place
+
+
+def job_options(raw):
+    """Connexions et vitesse maximale d'un seul téléchargement, vérifiées. None ou 0 : les réglages généraux."""
+    if not isinstance(raw, dict) or set(raw) - {"maxConnections", "speedLimit"}:
+        raise ValueError("options d'un téléchargement : maxConnections et speedLimit seulement")
+    options = {}
+    for key, value in raw.items():
+        if value in (None, 0):
+            options[key] = None
+            continue
+        low, high = LIMITS["connections"] if key == "maxConnections" else (MIN_SPEED, MAX_SPEED)
+        if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+            what = "connexions" if key == "maxConnections" else "vitesse maximale (octets/s)"
+            raise ValueError(f"{what} : entre {low} et {high}")
+        options[key] = value
+    return options
+
+
+def queue_key(job):
+    """Rang dans la file : sa date d'ajout, jusqu'à ce qu'on le déplace (voir Engine._place)."""
+    return job.order if job.order is not None else job.createdAt
 
 
 class Job:
@@ -179,6 +204,11 @@ class Engine:
             createdAt=time.time(), scheduled=bool(spec.get("scheduled")),
             status="paused" if spec.get("paused") else "queued",  # en pause dès l'ajout : rien ne démarre
         )
+        for key, value in job_options({k: spec[k] for k in ("maxConnections", "speedLimit") if k in spec}).items():
+            setattr(job, key, value)
+        position = spec.get("position")
+        if position is not None and (not isinstance(position, int) or isinstance(position, bool) or position < 0):
+            raise ValueError("place dans la file : un entier positif")
         with self.lock:
             if job.id in self.jobs:
                 raise ValueError("identifiant déjà utilisé")
@@ -202,8 +232,12 @@ class Engine:
             else:
                 job.category = self.config.category_for(job.filename or filename_from_url(url), job.mime or "")[0]
             self.jobs[job.id] = job
+            moved = self._place(job, position) if position is not None else []
             self.dirty = True
         self._publish(job)
+        for other in moved:
+            if other is not job:
+                self._publish(other)
         self.schedule({job.id: first} if first else None)
         return job
 
@@ -254,6 +288,70 @@ class Engine:
         else:
             self._publish(job)
             self.schedule()  # rendu immédiat : il démarre s'il y a de la place
+
+    def queue(self):
+        """La file d'attente (en attente ou en pause), dans l'ordre où elle partira."""
+        with self.lock:
+            return sorted((job for job in self.jobs.values() if job.status in WAITING), key=queue_key)
+
+    def move(self, job_id, position, how="set"):
+        """Change la place d'un téléchargement de la file ; renvoie la nouvelle (0 : le prochain à partir).
+
+        how : « set » depuis le début, « cur » depuis sa place, « end » depuis la fin (0 : le
+        dernier), comme changePosition d'aria2. Une place hors de la file est ramenée à son bout.
+        """
+        if not isinstance(position, int) or isinstance(position, bool) or how not in ("set", "cur", "end"):
+            raise ValueError("place dans la file : un entier, depuis le début, sa place ou la fin")
+        with self.lock:
+            job = self._get(job_id)
+            if job.status not in WAITING:
+                raise ValueError("ce téléchargement n'est pas dans la file d'attente")
+            queue = self.queue()
+            here = queue.index(job)
+            target = {"set": position, "cur": here + position, "end": len(queue) - 1 + position}[how]
+            target = max(0, min(target, len(queue) - 1))
+            moved = self._place(job, target)
+            self.dirty = True
+        for other in moved:
+            self._publish(other)
+        return target  # sans rien démarrer : s'il y avait de la place, toute la file serait partie
+
+    def _place(self, job, index):
+        """Range `job` à cette place de la file. Renvoie ceux dont le rang a changé.
+
+        Les rangs de la file sont redistribués entre ses membres, dans le nouvel ordre :
+        ce qui n'en fait pas partie (en cours, ajouté ensuite) garde le sien, sa date
+        d'ajout, et s'y range comme avant. Un téléchargement interrompu par un arrêt
+        repart ainsi avant ceux ajoutés après lui, déplacés ou non.
+        """
+        queue = self.queue()
+        ranks = sorted(map(queue_key, queue))
+        queue.remove(job)
+        queue.insert(min(index, len(queue)), job)
+        changed = []
+        for rank, other in zip(ranks, queue):
+            if queue_key(other) != rank:
+                other.order = rank
+                changed.append(other)
+        return changed
+
+    def set_options(self, job_id, changes):
+        """Change les connexions ou la vitesse maximale d'un téléchargement ; renvoie le téléchargement.
+
+        Un fichier en cours les prend aussitôt : ses connexions en plus s'ouvrent, celles en
+        trop s'arrêtent entre deux morceaux, et sa limite vaut dès la lecture suivante. Une
+        vidéo (yt-dlp, un programme à part) les prendra à son prochain départ.
+        """
+        options = job_options(changes)
+        with self.lock:
+            job = self._get(job_id)
+            if job.status == "completed":
+                raise ValueError("ce téléchargement est déjà terminé")
+            for key, value in options.items():
+                setattr(job, key, value)
+            self.dirty = True
+        self._publish(job)
+        return job
 
     def window_is_open(self):
         return in_window(self.now(), self.config["windowStart"], self.config["windowEnd"])
@@ -383,7 +481,7 @@ class Engine:
             # Hors de la plage horaire, les programmés attendent ; les autres passent.
             window = self.window_is_open()
             waiting = sorted((j for j in self.jobs.values() if j.status == "queued" and (window or not j.scheduled)),
-                             key=lambda j: j.createdAt)
+                             key=queue_key)
             for job in waiting:
                 if active >= self.config["maxParallel"]:
                     break
@@ -399,11 +497,14 @@ class Engine:
         if job.kind == "ytdlp":
             runner = YtdlpDownload(job, self.config, self.tools)
             limit = self.config["speedLimit"]
+            rates = [job.speedLimit] if job.speedLimit else []  # la sienne, s'il en a une
             if limit:
                 # Sa part : la limite divisée par les téléchargements actifs (lui compris),
                 # retirée du seau du moteur HTTP. Approximatif, mais le total ne dépasse pas.
                 active = 1 + sum(1 for j in self.jobs.values() if j.status == "downloading")
-                runner.limit_rate = max(limit // active, MIN_SPEED)
+                rates.append(max(limit // active, MIN_SPEED))
+            runner.limit_rate = min(rates) if rates else None
+            if limit:
                 self.ytdlp_shares[job.id] = runner.limit_rate
                 self.ytdlp_reserved += runner.limit_rate
         else:

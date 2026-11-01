@@ -825,6 +825,81 @@ class EngineTest(unittest.TestCase):
         names = sorted(Path(self.wait(j.id, {"completed"}).path).name for j in jobs)
         self.assertEqual(names, ["mid (1).bin", "mid (2).bin", "mid.bin"])
 
+    def test_the_queue_can_be_reordered_and_keeps_its_order(self):
+        self.config.update({"maxParallel": 1})
+        slow = self.add("/crawl/mid.bin")  # la seule place : les suivants attendent
+        a, b, c = (self.add("/range/small.zip", filename=f"{name}.zip") for name in "abc")
+        paused = self.add("/range/small.zip", filename="p.zip", paused=True)
+        names = lambda queue: [job.filename for job in queue]  # noqa: E731
+        self.assertEqual(names(self.engine.queue()), ["a.zip", "b.zip", "c.zip", "p.zip"])
+        self.assertEqual(self.engine.move(c.id, 0), 0)
+        self.assertEqual(self.engine.move(paused.id, -1, "cur"), 2, "en pause, il garde une place")
+        self.assertEqual(self.engine.move(a.id, 0, "end"), 3)
+        self.assertEqual(self.engine.move(b.id, 99), 3, "au-delà de la file : à son bout")
+        self.assertEqual(names(self.engine.queue()), ["c.zip", "p.zip", "a.zip", "b.zip"])
+        self.add("/range/small.zip", filename="d.zip", position=1)
+        self.add("/range/small.zip", filename="e.zip")
+        self.assertEqual(names(self.engine.queue()), ["c.zip", "d.zip", "p.zip", "a.zip", "b.zip", "e.zip"])
+        with self.assertRaises(ValueError):
+            self.engine.move(slow.id, 0)  # en cours : plus dans la file
+        published = {e["job"]["id"] for e in self.events if e["type"] == "job" and e["job"]["order"] is not None}
+        self.assertIn(c.id, published, "l'interface apprend les nouveaux rangs")
+        # Sauvegardé ; et un téléchargement interrompu par un arrêt repart avant ceux ajoutés après lui.
+        self.engine.save()
+        restarted = Engine(self.config, Tools(self.config), lambda event: None)
+        self.assertEqual(restarted.queue()[0].id, slow.id)
+        self.assertEqual(names(restarted.queue())[1:], names(self.engine.queue()))
+        # La file part dans son ordre (celui en pause attend).
+        self.events.clear()
+        self.engine.cancel(slow.id)
+        last = self.engine.queue()[-1]
+        self.wait(last.id, {"completed"})
+        started = []
+        for event in self.events:
+            if event["type"] == "job" and event["job"]["status"] == "downloading":
+                name = event["job"]["filename"]
+                started += [] if name in started else [name]
+        self.assertEqual(started, ["c.zip", "d.zip", "a.zip", "b.zip", "e.zip"])
+        self.assertEqual(self.engine.jobs[paused.id].status, "paused")
+
+    def until_connections(self, job, count, timeout=10):
+        deadline = time.time() + timeout
+        while job.connections != count and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(job.connections, count)
+
+    def test_the_connections_of_one_download_change_while_it_runs(self):
+        job = self.add("/crawl/big.bin", maxConnections=2)  # 64 Ko/s par connexion : il dure
+        self.until_connections(job, 2)
+        self.engine.set_options(job.id, {"maxConnections": 6})
+        self.until_connections(job, 6)  # ouvertes en route
+        self.engine.set_options(job.id, {"maxConnections": 1})
+        self.until_connections(job, 1)  # celles en trop lâchent leur morceau, sans attendre sa fin
+        self.config.update({"connections": 3})
+        self.engine.set_options(job.id, {"maxConnections": None})
+        self.until_connections(job, 3)  # rendu au réglage général
+        self.engine.cancel(job.id)
+        self.wait(job.id, {"canceled"})
+
+    def test_a_download_can_have_its_own_speed_limit(self):
+        job = self.add("/range/big.bin", speedLimit=1024 * 1024)  # 1 Mo/s, au lieu d'environ 16
+        started = time.time()
+        time.sleep(2)
+        rate = job.downloaded / (time.time() - started)
+        self.assertLess(rate, 1.4 * 1024 * 1024)
+        self.assertGreater(rate, 0.5 * 1024 * 1024)
+        published = [e["job"] for e in self.events if e["type"] == "job" and e["job"]["id"] == job.id]
+        self.assertEqual(published[0]["speedLimit"], 1024 * 1024, "l'interface le voit")
+        self.engine.set_options(job.id, {"speedLimit": None})  # levée en route
+        job = self.wait(job.id, {"completed"}, timeout=15)
+        self.assertEqual(sha(job.path), self.hashes["big.bin"])
+        with self.assertRaises(ValueError):
+            self.engine.set_options(job.id, {"speedLimit": 2 * 1024 * 1024})  # déjà terminé
+        other = self.add("/range/small.zip", paused=True)
+        for bad in ({"speedLimit": 10}, {"maxConnections": 99}, {"maxConnections": "4"}, {"filename": "x"}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.engine.set_options(other.id, bad)
+
     def test_cookies_follow_same_host_redirect_only(self):
         job = self.engine.add({"url": self.base + "/redirect/cookies", "cookies": "session=secret"})
         same = Path(self.wait(job.id, {"completed"}).path).read_text()
@@ -1064,7 +1139,8 @@ class RpcTest(unittest.TestCase):
             ([url], {"out": "../.bashrc"}, "un nom de fichier"),
             ([url], {"dir": "/tmp"}, "PDM range les fichiers"),
             ([url], {"header": "X-A: b\r\nX-Injecté: 1"}, "en-tête"),
-            ([url], {"max-download-limit": "1M"}, "option non prise en charge"),
+            ([url], {"max-upload-limit": "1M"}, "option non prise en charge"),
+            ([url], {"split": "99"}, "connexions"),
             ([url], {"checksum": "sha-256=zz"}, "illisible"),
             ([url], {"out": 42}, "options"),
             (["file:///etc/passwd"], {}, "http ou https"),
@@ -1078,6 +1154,38 @@ class RpcTest(unittest.TestCase):
         self.assertEqual(self.engine.jobs, {}, "aucun appel refusé n'a laissé de téléchargement")
         g = self.call("aria2.addUri", [url], {"dir": str(self.downloads), "pause": "true"})  # le dossier de PDM : oui
         self.assertEqual(self.call("aria2.tellStatus", g, ["status"]), {"status": "paused"})
+
+    def test_the_queue_order_is_aria2s(self):
+        gids = [self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {"pause": "true", "out": f"{i}.bin"})
+                for i in range(3)]
+        first = self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {"pause": "true"}, 0)
+        order = lambda: [s["gid"] for s in self.call("aria2.tellWaiting", 0, 10, ["gid"])]  # noqa: E731
+        self.assertEqual(order(), [first, *gids], "addUri à la place 0 : en tête")
+        self.assertEqual(self.call("aria2.changePosition", gids[2], 0, "POS_SET"), 0)  # un nombre, comme aria2
+        self.assertEqual(self.call("aria2.changePosition", first, 1, "POS_CUR"), 2)
+        self.assertEqual(self.call("aria2.changePosition", gids[0], 0, "POS_END"), 3)
+        self.assertEqual(order(), [gids[2], first, gids[1], gids[0]])
+        for params in ((gids[0], 0, "POS_X"), (gids[0], "1", "POS_SET")):
+            with self.subTest(params=params), self.assertRaises(rpc.RpcError) as caught:
+                self.call("aria2.changePosition", *params)
+            self.assertEqual(caught.exception.code, -32602)
+        with self.assertRaises(rpc.RpcError):
+            self.call("aria2.addUri", [self.base + "/range/rpc.bin"], {}, -1)
+
+    def test_per_download_options_like_aria2(self):
+        g = self.call("aria2.addUri", [self.base + "/range/rpc.bin"],
+                      {"pause": "true", "split": "4", "max-connection-per-server": "2", "max-download-limit": "512K"})
+        options = self.call("aria2.getOption", g)
+        self.assertEqual((options["split"], options["max-download-limit"]), ("2", str(512 * 1024)),
+                         "le plus petit des deux, comme aria2")
+        self.assertEqual(self.call("aria2.changeOption", g, {"split": "6", "max-download-limit": "0"}), "OK")
+        options = self.call("aria2.getOption", g)
+        self.assertEqual((options["split"], options["max-download-limit"]), ("6", "0"))
+        for bad, message in (({"out": "x.bin"}, "changeOption"), ({"split": "99"}, "connexions"),
+                             ({"max-download-limit": "1K"}, "vitesse"), ({"split": "six"}, "entiers")):
+            with self.subTest(bad=bad), self.assertRaises(rpc.RpcError) as caught:
+                self.call("aria2.changeOption", g, bad)
+            self.assertIn(message, str(caught.exception))
 
     def test_global_options_are_the_settings(self):
         self.assertEqual(self.call("aria2.changeGlobalOption", {"max-concurrent-downloads": "2", "split": "4",

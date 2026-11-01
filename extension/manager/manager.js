@@ -25,6 +25,7 @@ const RECONNECT_MS = 5000;
 const MAX_LIST_BYTES = 1024 * 1024; // une liste de liens, pas un fichier quelconque
 const MAX_SHOWN_PROBLEMS = 5;
 const VERIFY_TIMEOUT = 3_600_000; // relire un très gros fichier sur un disque lent prend du temps
+const MIB = 1024 * 1024;
 
 // Sommes de contrôle (voir engine/pdm_engine/checksum.py) : nom et provenance, en clair.
 const SUM_LABELS = { 'sha-512': 'SHA-512', 'sha-256': 'SHA-256', 'sha-1': 'SHA-1', md5: 'MD5' };
@@ -104,6 +105,11 @@ const verifyInput = document.getElementById('verify-input');
 const verifyResult = document.getElementById('verify-result');
 const verifySubmit = document.getElementById('verify-submit');
 let verifiedId = null; // téléchargement affiché dans la fenêtre « Vérifier »
+const optionsDialog = document.getElementById('options-dialog');
+const optionsConnections = document.getElementById('options-connections');
+const optionsSpeed = document.getElementById('options-speed');
+const optionsResult = document.getElementById('options-result');
+let optionsId = null; // téléchargement affiché dans la fenêtre « Options »
 let copiedSum = null; // SHA-256 pris par « Copier », tant que la page garde la main
 
 // ─── Modèle : de chaque source vers une « entrée » commune ─────────────────
@@ -133,6 +139,11 @@ function fromEngine(job) {
     checksums: job.checksums ?? [],
     verified: job.verified,
     startedAt: job.createdAt * 1000,
+    // La file d'attente du moteur (en attente ou en pause), et le rang de chacun (voir queue_key).
+    inQueue: job.status === 'queued' || job.status === 'paused',
+    order: job.order ?? job.createdAt,
+    hasOptions: 'speedLimit' in job, // moteur assez récent pour des options par téléchargement
+    speedLimit: job.speedLimit,
   };
 }
 
@@ -221,6 +232,7 @@ function render() {
   const group = STATUS_GROUPS[view.status];
   const byStatus = group ? entries.filter((e) => group.includes(e.status)) : entries;
   const visible = view.category === 'all' ? byStatus : byStatus.filter((e) => e.category.id === view.category);
+  if (view.status === 'active') visible.sort(queueOrder);
   updateChips(byStatus);
 
   // Mise à jour « par clé » : chaque téléchargement garde sa ligne d'une
@@ -247,6 +259,12 @@ function render() {
   renderSummary(entries);
 }
 
+// « En cours » : ce qui télécharge, puis la file d'attente dans l'ordre où elle partira.
+function queueOrder(a, b) {
+  if (a.inQueue !== b.inQueue) return a.inQueue ? 1 : -1;
+  return a.inQueue ? a.order - b.order : b.startedAt - a.startedAt;
+}
+
 function createRow() {
   const li = el('li', 'download');
   const tag = el('span', 'tag');
@@ -263,6 +281,9 @@ function createRow() {
 }
 
 function updateRow(row, entry) {
+  row.entry = entry;
+  row.li.dataset.key = entry.key;
+  row.li.draggable = view.status === 'active' && entry.inQueue; // voir « File d'attente »
   row.li.dataset.status = entry.status;
   row.li.dataset.source = entry.source;
   row.li.dataset.integrity = entry.verified === false ? 'bad' : '';
@@ -328,6 +349,7 @@ function describe(entry) {
       if (entry.connections > 1) parts.push(`${entry.connections} connexions`);
       else if (entry.kind === 'ytdlp' && entry.connections === 1) parts.push('1 connexion');
       if (entry.sources > 1) parts.push(`${entry.sources} serveurs`); // miroirs pris en même temps
+      if (entry.speedLimit) parts.push(`limité à ${formatSpeed(entry.speedLimit)}`);
       return parts.join(' · ');
     }
     case 'paused': {
@@ -371,6 +393,71 @@ function hostOf(url) {
   }
 }
 
+// ─── File d'attente : glisser-déposer ───────────────────────────────────────
+
+// Dans la vue « En cours », une ligne en attente se glisse à une autre place de
+// la file. La place envoyée au moteur est celle dans toute la file, même quand
+// un filtre de catégorie en cache une partie.
+let dragged = null; // entrée déplacée, le temps du glisser
+
+function entryOf(node) {
+  const li = node?.closest?.('li.download');
+  return li ? { li, entry: rows.get(li.dataset.key)?.entry } : {};
+}
+
+function dropTarget(event) {
+  const { li, entry } = entryOf(event.target);
+  if (!dragged || !entry?.inQueue || entry.key === dragged.key) return null;
+  const box = li.getBoundingClientRect();
+  return { li, entry, after: event.clientY > box.top + box.height / 2 };
+}
+
+function clearDropMarks() {
+  for (const li of listEl.querySelectorAll('.drop-before, .drop-after')) li.classList.remove('drop-before', 'drop-after');
+}
+
+function endDrag() {
+  dragged = null;
+  clearDropMarks();
+  for (const li of listEl.querySelectorAll('.dragging')) li.classList.remove('dragging');
+}
+
+listEl.addEventListener('dragstart', (event) => {
+  const { li, entry } = entryOf(event.target);
+  if (!entry?.inQueue || !li.draggable) return;
+  dragged = entry;
+  li.classList.add('dragging');
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', entry.filename);
+});
+
+listEl.addEventListener('dragover', (event) => {
+  const target = dropTarget(event);
+  clearDropMarks();
+  if (!target) return;
+  event.preventDefault(); // autorise le dépôt ici
+  event.dataTransfer.dropEffect = 'move';
+  target.li.classList.add(target.after ? 'drop-after' : 'drop-before');
+});
+
+listEl.addEventListener('drop', async (event) => {
+  const target = dropTarget(event);
+  if (!target) return;
+  event.preventDefault();
+  const { id, key } = dragged;
+  const queue = [...engineJobs.values()].map(fromEngine).filter((e) => e.inQueue && e.key !== key);
+  queue.sort((a, b) => a.order - b.order);
+  const position = queue.findIndex((e) => e.key === target.entry.key) + (target.after ? 1 : 0);
+  endDrag();
+  try {
+    await engine.request({ type: 'move', id, position });
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
+listEl.addEventListener('dragend', endDrag);
+
 // ─── Actions ───────────────────────────────────────────────────────────────
 
 function actionsFor(entry) {
@@ -388,12 +475,13 @@ function engineActions(entry) {
         ? button('Maintenant', send('program', { scheduled: false }))
         : button('Plus tard', send('program', { scheduled: true }))]
     : [];
+  const options = entry.hasOptions ? [button('Options…', () => openOptions(id))] : [];
   switch (entry.status) {
     case 'queued':
     case 'active':
-      return [button('Pause', send('pause')), ...later, cancel];
+      return [button('Pause', send('pause')), ...later, ...options, cancel];
     case 'paused':
-      return [button('Reprendre', send('resume'), 'primary'), ...later, cancel];
+      return [button('Reprendre', send('resume'), 'primary'), ...later, ...options, cancel];
     case 'complete':
       return [
         button('Ouvrir', send('open'), 'primary'),
@@ -556,6 +644,7 @@ engine.on((event) => {
     setTimeout(connectEngine, RECONNECT_MS);
   }
   if (verifyDialog.open) renderVerify();
+  if (optionsDialog.open) renderOptions();
   scheduleRender();
 });
 
@@ -794,6 +883,72 @@ importDialog.addEventListener('cancel', (event) => {
 });
 
 // ─── Vérification d'un fichier terminé ─────────────────────────────────────
+
+// ─── Options d'un téléchargement ───────────────────────────────────────────
+
+function openOptions(id) {
+  const job = engineJobs.get(id);
+  if (!job) return;
+  optionsId = id;
+  optionsConnections.value = job.maxConnections ?? '';
+  optionsConnections.placeholder = String(engine.info?.config.connections ?? '');
+  optionsSpeed.value = job.speedLimit ? Math.round((job.speedLimit / MIB) * 100) / 100 : '';
+  optionsResult.textContent = '';
+  renderOptions();
+  optionsDialog.showModal();
+}
+
+// La fenêtre suit le téléchargement : son nom, sa place dans la file.
+function renderOptions() {
+  const job = engineJobs.get(optionsId);
+  if (!job || job.status === 'completed') {
+    optionsDialog.close(); // retiré, ou fini entre-temps
+    return;
+  }
+  document.getElementById('options-name').textContent = job.filename || job.url;
+  document.getElementById('options-connections-hint').textContent =
+    `Vide : le réglage général (${engine.info?.config.connections ?? '?'}).`;
+  document.getElementById('options-video').hidden = job.kind !== 'ytdlp';
+  const queue = [...engineJobs.values()].map(fromEngine).filter((e) => e.inQueue);
+  queue.sort((a, b) => a.order - b.order);
+  const place = queue.findIndex((e) => e.id === optionsId);
+  document.getElementById('options-queue').hidden = place < 0; // en cours : plus dans la file
+  document.getElementById('options-place').textContent =
+    place === 0 ? `Le prochain à partir (sur ${queue.length} en attente).` : `${place + 1}e sur ${queue.length} en attente.`;
+  document.getElementById('options-first').disabled = place === 0;
+  document.getElementById('options-last').disabled = place === queue.length - 1;
+}
+
+async function moveTo(position, how) {
+  try {
+    await engine.request({ type: 'move', id: optionsId, position, how });
+  } catch (err) {
+    optionsResult.textContent = err.message;
+    optionsResult.dataset.state = 'bad';
+  }
+}
+
+document.getElementById('options-first').addEventListener('click', () => moveTo(0, 'set'));
+document.getElementById('options-last').addEventListener('click', () => moveTo(0, 'end'));
+
+document.getElementById('options-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const speed = Number(optionsSpeed.value);
+  const set = {
+    maxConnections: optionsConnections.value ? Number(optionsConnections.value) : null,
+    speedLimit: speed > 0 ? Math.round(speed * MIB) : null,
+  };
+  try {
+    await engine.request({ type: 'options', id: optionsId, set });
+    optionsResult.textContent = 'Enregistré.';
+    optionsResult.dataset.state = 'ok';
+  } catch (err) {
+    optionsResult.textContent = err.message;
+    optionsResult.dataset.state = 'bad';
+  }
+});
+
+document.getElementById('options-close').addEventListener('click', () => optionsDialog.close());
 
 function openVerify(id) {
   verifiedId = id;

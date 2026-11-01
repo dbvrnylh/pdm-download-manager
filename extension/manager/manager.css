@@ -123,6 +123,31 @@ main {
   justify-self: start;
 }
 
+/* File d'attente (vue « En cours ») : une ligne en attente se glisse à une autre place. */
+.download[draggable='true'] {
+  position: relative;
+  cursor: grab;
+}
+
+.download[draggable='true']::before {
+  content: '⠿';
+  position: absolute;
+  left: -14px;
+  color: var(--muted);
+}
+
+.download.dragging {
+  opacity: 0.4;
+}
+
+.download.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.download.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 .download .body {
   min-width: 0;
 }
@@ -416,6 +441,61 @@ code {
 
 .verify-result[data-state='bad'] {
   color: var(--danger);
+}
+
+/* Fenêtre « Options » d'un téléchargement : ses connexions, sa vitesse, sa place dans la file. */
+.options-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.options-grid label {
+  display: grid;
+  align-content: start;
+}
+
+.options-grid .verify-label {
+  margin-top: 0;
+}
+
+.options-grid input {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.options-grid small,
+.options-note {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.options-queue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.options-queue span {
+  flex: 1;
+  color: var(--muted);
+}
+
+.options-queue[hidden] {
+  display: none;
+}
+
+@media (max-width: 560px) {
+  .options-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .download[data-integrity='bad'] .meta {

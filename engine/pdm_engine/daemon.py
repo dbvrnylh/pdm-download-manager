@@ -188,6 +188,10 @@ class Daemon:
             elif kind == "program":
                 self.engine.program(message["id"], bool(message.get("scheduled", True)))
                 reply()
+            elif kind == "options":
+                reply(job=self.engine.set_options(message["id"], message.get("set") or {}).public())
+            elif kind == "move":
+                reply(position=self.engine.move(message["id"], message.get("position"), message.get("how", "set")))
             elif kind in ("pause", "resume", "retry", "cancel"):
                 getattr(self.engine, kind)(message["id"])
                 reply()

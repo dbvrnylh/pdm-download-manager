@@ -126,6 +126,36 @@
       </form>
     </dialog>
 
+    <dialog id="options-dialog" aria-labelledby="options-title">
+      <form id="options-form">
+        <h2 id="options-title">Options du téléchargement</h2>
+        <p id="options-name" class="verify-name"></p>
+        <div class="options-grid">
+          <label>
+            <span class="verify-label">Connexions</span>
+            <input id="options-connections" type="number" min="1" max="32" />
+            <small id="options-connections-hint"></small>
+          </label>
+          <label>
+            <span class="verify-label">Vitesse maximale (Mo/s)</span>
+            <input id="options-speed" type="number" min="0" step="any" placeholder="pas de limite propre" />
+            <small>Pour ce fichier seulement ; la limite générale compte aussi.</small>
+          </label>
+        </div>
+        <p id="options-video" class="options-note" hidden>Pour une vidéo, elles comptent à son prochain départ.</p>
+        <div id="options-queue" class="options-queue">
+          <span id="options-place"></span>
+          <button type="button" id="options-first">En premier</button>
+          <button type="button" id="options-last">En dernier</button>
+        </div>
+        <p id="options-result" class="verify-result" role="status"></p>
+        <div class="dialog-actions">
+          <button type="button" id="options-close">Fermer</button>
+          <button type="submit" class="primary">Enregistrer</button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="manager.js"></script>
   </body>
 </html>

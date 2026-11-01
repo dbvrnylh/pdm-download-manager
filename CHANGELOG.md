@@ -6,6 +6,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- The queue has an order, and it is yours: in the manager's **En cours** view, waiting downloads are listed in
+  the order they will start and are dragged to another place (also **En premier** / **En dernier** in their
+  **Options…**). A move hands the queue's ranks out again among its members, so a download interrupted by a
+  restart still starts before the ones added after it. Through the API: `changePosition` (`POS_SET`, `POS_CUR`,
+  `POS_END`), the place of an `addUri`, and `tellWaiting` in queue order.
+- Each download can have its own number of connections and maximum speed (**Options…** in the manager,
+  `changeOption` through the API, `split`, `max-connection-per-server` and `max-download-limit` in `addUri`). A
+  running file takes them at once: connections are opened on the way, extra ones leave their piece to the others
+  without waiting for its end, and its own token bucket applies next to the global one. A video takes them at its
+  next start. Changing the global number of connections now also reaches running files.
 - An aria2-compatible JSON-RPC API, so tools written for aria2 (AriaNg, scripts, extensions that send their links
   to aria2) can drive PDM. `pdm-host rpc on` turns it on at `http://127.0.0.1:6800/jsonrpc` (aria2's port;
   `--port` to move it) and prints its secret. It covers adding (`addUri`, several addresses being mirrors of the
@@ -15,7 +25,7 @@ versions follow [Semantic Versioning](https://semver.org/).
   not the world-readable `config.json`), because unlike the daemon's socket a local port is open to every account
   of the machine. The `Host` header must name 127.0.0.1 or localhost (against DNS rebinding), web pages are refused
   unless their origin is allowed (`--allow`), and aria2's JSONP over GET is not offered. While the API is on, the
-  engine does not quit when idle. Not yet: queue order and per-download options.
+  engine does not quit when idle.
 - The aria2-compatible API over WebSocket too (`ws://127.0.0.1:6800/jsonrpc`), with aria2's notifications: a
   download that starts, pauses, stops, completes or fails is announced at once (`aria2.onDownloadStart`…), so
   AriaNg no longer has to ask for every download's state each second. A page can only connect if its origin is

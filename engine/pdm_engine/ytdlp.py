@@ -191,8 +191,12 @@ class YtdlpDownload:
                 "stage": self.stage,
                 # Fichier classique (YouTube…) : une connexion, déjà à pleine vitesse.
                 # Flux en fragments (HLS/DASH) : --concurrent-fragments en parallèle.
-                "connections": min(self.config["connections"], 16) if self.fragmented and not self.limit_rate else 1,
+                "connections": self.fragments() if self.fragmented and not self.limit_rate else 1,
             }
+
+    def fragments(self):
+        """Fragments téléchargés à la fois : les connexions du téléchargement, sinon le réglage général."""
+        return min(self.job.maxConnections or self.config["connections"], 16)
 
     def cleanup(self):
         cleanup_files(self.job)
@@ -383,7 +387,7 @@ class YtdlpDownload:
             "-P", f"temp:{self._work_dir(base)}",
             "-o", template,
             # Vitesse limitée : un fragment à la fois, sinon chacun aurait sa propre limite.
-            "--concurrent-fragments", "1" if self.limit_rate else str(min(self.config["connections"], 16)),
+            "--concurrent-fragments", "1" if self.limit_rate else str(self.fragments()),
             "-f", selector,
         ]
         if self.limit_rate:

@@ -39,6 +39,7 @@ from urllib.parse import urljoin, urlparse
 
 from . import checksum, metalink
 from .hosts import Hosts
+from .limiter import Limiter
 from .util import (
     ensure_extension,
     extension_of,
@@ -466,6 +467,8 @@ class HttpDownload:
         self.job = job
         self.config = config
         self.limiter = limiter  # limite de vitesse globale (limiter.Limiter), partagée
+        # Et celle de ce seul téléchargement, s'il en a une : relue à chaque lecture.
+        self.limiters = [lim for lim in (limiter, Limiter(lambda: job.speedLimit or 0)) if lim is not None]
         self.hosts = hosts or Hosts()  # places chez chaque site (hosts.Hosts), partagées
         self.site = urlparse(job.url).hostname or ""
         self.origin = Source(None, self.site)
@@ -494,6 +497,11 @@ class HttpDownload:
         self.pieces = None  # sommes de ses morceaux, lues dans son document Metalink
         self.spans = []  # (début, fin exclue, adresse) : qui a envoyé quels octets (voir _repair)
         self.repairs = 0  # tours de réparation déjà faits
+        self.workers = []  # connexions lancées par _download, y compris en route (voir _add_workers)
+        self.running = 0  # celles qui tournent encore
+        self.wanted = 0  # le nombre voulu au dernier coup d'œil
+        self.joined = False  # _download a fini de les attendre : plus aucune à lancer
+        self.parallel = False  # plusieurs connexions possibles (fichier repris par morceaux, de taille connue)
 
     # ─── Pilotage par le moteur ────────────────────────────────────────────
 
@@ -759,42 +767,110 @@ class HttpDownload:
                 # passeraient la main (la segmentation dynamique ajoute ce qu'il faut).
                 # Avec des miroirs, les autres serveurs prennent le reste.
                 limit = self.hosts.limit(self.site) if len(self.sources) == 1 else None
-                connections = self.config["connections"] if limit is None else min(self.config["connections"], limit)
+                connections = self._connections() if limit is None else min(self._connections(), limit)
                 self.segments = plan_segments(self.size, connections)
             else:
                 end = None if self.size is None else self.size - 1
                 self.segments = [] if self.size == 0 else [Segment(0, end, 0)]
             self.saved = [s.to_list() for s in self.segments]  # rien de reçu : rien à promettre
 
+    def _connections(self):
+        """Connexions voulues : celles du téléchargement, sinon le réglage général. Relu en route."""
+        return self.job.maxConnections or self.config["connections"]
+
     def _download(self, first):
         job = self.job
-        workers = self.config["connections"] if job.resumable and self.size is not None else 1
-        threads = []
+        self.parallel = job.resumable and self.size is not None  # sinon : une seule connexion, toujours
+        with self.lock:
+            self.workers, self.running, self.joined = [], 0, False
+            self.wanted = self._connections() if self.parallel else 1
         if first is not None and self.segments:
             # La réponse de la sonde sert de première connexion : pas de requête perdue.
             # Elle garde la place prise pour la sonde chez le serveur.
             self.segments[0].active = True
-            threads.append(threading.Thread(target=self._worker, args=(self.segments[0], first.resp)))
+            self._launch(1, self.segments[0], first.resp)
             first.resp = None
-        while len(threads) < workers:
-            threads.append(threading.Thread(target=self._worker, args=(None, None)))
-        for thread in threads:
-            thread.daemon = True
-            thread.start()
+        self._launch(self.wanted - len(self.workers))
         done = threading.Event()
         helpers = [threading.Thread(target=target, args=(done,), daemon=True) for target in (self._watch, self._hash)]
         for helper in helpers:
             helper.start()
-        for thread in threads:
+        joined = 0
+        while True:  # y compris celles lancées en route
+            with self.lock:
+                if joined == len(self.workers):
+                    self.joined = True
+                    break
+                thread = self.workers[joined]
             thread.join()
+            joined += 1
         done.set()
         for helper in helpers:
             helper.join()
+
+    def _launch(self, count, seg=None, resp=None):
+        with self.lock:
+            if self.joined or count <= 0:
+                return
+            threads = [threading.Thread(target=self._worker, args=(seg, resp), daemon=True) for _ in range(count)]
+            self.workers += threads
+            self.running += count
+        for thread in threads:
+            thread.start()
+
+    def _add_workers(self):
+        """Le nombre de connexions voulu a augmenté en route (réglage changé) : on en ouvre d'autres.
+
+        Seulement quand il augmente : en fin de fichier, les connexions sans rien à
+        prendre s'arrêtent, et en relancer à chaque coup d'œil ne servirait à rien.
+        Quand il baisse, celles en trop s'arrêtent d'elles-mêmes (voir _surplus).
+        """
+        if not self.parallel:
+            return
+        wanted = self._connections()
+        with self.lock:
+            more = wanted - max(self.wanted, self.running) if wanted > self.wanted else 0
+            self.wanted = wanted
+        self._launch(more)
+
+    def _shed(self):
+        """Le nombre voulu a baissé : les connexions en trop lâchent leur morceau, sans attendre sa fin.
+
+        Un morceau peut durer tout le fichier. Comme pour un changement de serveur
+        (voir _rebalance), la suivante qui se libère le reprend là où il en était.
+        """
+        if not self.parallel:
+            return
+        with self.lock:
+            # Celles qui partent déjà ne comptent plus : sinon chaque coup d'œil en ferait partir d'autres.
+            extra = self.running - self._connections() - sum(1 for seg in self.segments if seg.moving)
+            live = [seg for seg in self.segments if seg.resp is not None and not seg.moving and not seg.kicked]
+            now = time.monotonic()
+            leaving = sorted(live, key=lambda seg: seg.rate(now) or 0)[:max(extra, 0)]  # les plus lentes
+            for seg in leaving:
+                seg.moving = True
+            responses = [seg.resp for seg in leaving]
+        for resp in responses:
+            hang_up(resp)  # sa lecture échoue, _fetch rend le morceau, et _surplus la fait partir
+
+    def _surplus(self):
+        """Une connexion de trop (le nombre voulu a baissé) ? Elle s'en va, comptée tout de suite."""
+        with self.lock:
+            if self.running > (self._connections() if self.parallel else 1):
+                self.running -= 1
+                return True
+        return False
+
+    def _limited(self):
+        """Une limite de vitesse en vigueur : les connexions sont lentes exprès."""
+        return any(limiter.rate() for limiter in self.limiters)
 
     def _watch(self, done):
         # À part des connexions : fdatasync peut attendre le disque plusieurs secondes.
         synced = time.monotonic()
         while not done.wait(WATCH_EVERY):
+            self._add_workers()
+            self._shed()
             self._kick_slow()
             self._rebalance()
             if time.monotonic() - synced >= SYNC_EVERY:
@@ -845,7 +921,7 @@ class HttpDownload:
         possible. Une connexion qui ne reçoit plus rien est rouverte après STALL, sans
         attendre le délai réseau.
         """
-        if not self.job.resumable or (self.limiter and self.limiter.rate()):
+        if not self.job.resumable or self._limited():
             return  # sous une limite de vitesse, les connexions sont lentes exprès
         now = time.monotonic()
         with self.lock:
@@ -885,7 +961,7 @@ class HttpDownload:
         durer, ou vers un serveur nettement plus rapide par connexion (FASTER),
         qui a de la place. Celle qui part est sur le serveur le plus lent.
         """
-        if len(self.sources) < 2 or (self.limiter and self.limiter.rate()):
+        if len(self.sources) < 2 or self._limited():
             return
         with self.lock:
             live = [s for s in self.segments if s.resp is not None and not s.kicked and s.remaining() > 2 * CHUNK]
@@ -1037,6 +1113,7 @@ class HttpDownload:
         # La première connexion (la sonde, `resp`) a déjà sa place chez le serveur.
         source, blind = (self.origin if resp is not None else None), False
         served = set()  # serveurs qui ont déjà accepté cette connexion : plus à l'aveugle chez eux
+        left = False  # partie en trop : déjà décomptée (voir _surplus)
         try:
             while not self.stop_event.is_set():
                 if source is None:
@@ -1063,14 +1140,19 @@ class HttpDownload:
                 with self.lock:
                     seg.active = False
                 seg = None
+                if self._surplus():  # entre deux segments : rien de laissé en plan
+                    left = True
+                    return
         except Exception as e:  # une erreur fatale arrête toutes les connexions
             if not self.stop_event.is_set():
                 self.error = e
                 self.stop_event.set()
         finally:
-            if seg is not None:
-                with self.lock:
+            with self.lock:
+                if seg is not None:
                     seg.active = False
+                if not left:
+                    self.running -= 1
             self._release(resp)
             if source is not None:
                 self._give_back(source)
@@ -1227,10 +1309,12 @@ class HttpDownload:
                 self.downloaded += limit
                 if seg.end is not None and seg.pos > seg.end:
                     return True
-            # Limite de vitesse : attendre son tour avant de lire la suite. Hors du
-            # verrou (les autres connexions continuent), interrompu par une pause.
-            if self.limiter:
-                self.stop_event.wait(self.limiter.take(limit))
+            # Limite de vitesse (générale, et celle du fichier) : attendre son tour avant
+            # de lire la suite. Hors du verrou (les autres connexions continuent),
+            # interrompu par une pause.
+            wait = max([limiter.take(limit) for limiter in self.limiters])
+            if wait:
+                self.stop_event.wait(wait)
 
     def _write(self, data, position):
         # pwrite peut écrire moins que demandé (disque presque plein…) : on

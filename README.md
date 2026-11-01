@@ -45,6 +45,8 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   presets (best, 1080p, 720p, 480p, MP3). HLS/DASH streams are merged into a single MP4.
 - **Organized.** Files are sorted into `Videos/`, `Musique/`, `Documents/`, `Archives/`, `Programmes/`,
   `Images/` and `Generique/` for the rest, by extension; each category's extensions and folder name can be edited. Download queue, desktop notifications, right-click "Télécharger avec PDM".
+- **Your queue, your way.** Drag waiting downloads into the order they should start, and give one download its
+  own number of connections or speed limit, even while it runs.
 - **Speaks aria2.** AriaNg, aria2 scripts and the extensions that send their links to aria2 can drive PDM through
   the same JSON-RPC API: local only, with a secret, and off until you turn it on.
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
@@ -99,6 +101,8 @@ Keep the repository where it is: the browser loads the extension from it.
 | Download a list of links | Manager → **Importer une liste…**, or `pdm-host add --file links.txt`. See [below](#downloading-a-list-of-links). |
 | Download later (at night) | Manager → **Plus tard** on a download, or the **Plus tard** box when importing a list, or `pdm-host add --later URL`. It only progresses during the time window of **Réglages**; the rest starts right away. |
 | Verify a file | Nothing to do when the page shows its checksum next to the link: PDM picks it up on click and checks the file. Otherwise, Manager → **Vérifier…** on a finished download → paste the site's checksum (SHA-256, SHA-512, SHA-1 or MD5). Not the one PDM shows: compared with itself, a file always matches, and PDM refuses it. |
+| Change the order of the queue | Manager → **En cours** → drag a waiting download to its place. Or **Options…** on it → **En premier** / **En dernier**. |
+| Limit one download, or give it more connections | Manager → **Options…** on it: connections and maximum speed for this file only, applied at once while it runs (a video: from its next start). |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 | Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
@@ -199,14 +203,16 @@ curl -s http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":1,"method":"aria
 - Over WebSocket (`ws://127.0.0.1:6800/jsonrpc`), the same calls, plus aria2's notifications: `onDownloadStart`,
   `onDownloadPause`, `onDownloadStop`, `onDownloadComplete` and `onDownloadError`, sent the moment a download
   changes state, so a tool no longer asks for the state of every download each second.
-- What works: adding (`addUri`, with `out`, `header`, `referer`, `user-agent`, `checksum`, `pause`; several
-  addresses are mirrors of the same file, used when a checksum can verify it), following (`tellStatus`,
-  `tellActive`, `tellWaiting`, `tellStopped`, `getGlobalStat`, `getFiles`, `getUris`), pausing, resuming and
-  removing, one by one or all at once, the global settings (`changeGlobalOption`: simultaneous downloads,
+- What works: adding (`addUri`, with `out`, `header`, `referer`, `user-agent`, `checksum`, `pause`, `split`,
+  `max-connection-per-server`, `max-download-limit`, and a place in the queue; several addresses are mirrors of
+  the same file, used when a checksum can verify it), following (`tellStatus`, `tellActive`, `tellWaiting` in
+  queue order, `tellStopped`, `getGlobalStat`, `getFiles`, `getUris`, `getOption`), pausing, resuming and
+  removing, one by one or all at once, the queue order (`changePosition`), one download's connections and speed
+  (`changeOption`, even while it runs), the global settings (`changeGlobalOption`: simultaneous downloads,
   connections, speed limit, folder), `system.multicall` and batches.
-- Not yet: the queue order (`changePosition`) and per-download options (`changeOption`). Files always go to PDM's folder, sorted by category: `dir` is only
-  accepted when it names that folder. Options about how to download (`split`, `max-connection-per-server`…) are
-  accepted and left to PDM.
+- Files always go to PDM's folder, sorted by category: `dir` is only accepted when it names that folder. Other
+  options about how to download (`min-split-size`, `max-tries`…) are accepted and left to PDM. Not offered:
+  torrents and Metalink files (`addTorrent`, `addMetalink`), `changeUri`.
 
 ## How it works
 
