@@ -323,10 +323,12 @@ def hang_up(resp):
 
     close() seul ne réveille pas une lecture bloquée (serveur qui n'envoie plus
     rien) : la socket reste ouverte jusqu'au délai réseau, 30 s. shutdown() la
-    réveille aussitôt.
+    réveille aussitôt : celui de la socket TCP, pas celui de SSLSocket, qui retire
+    d'abord son chiffrement. La lecture qui suivait lisait alors la socket brute,
+    et ce sont des octets chiffrés qui étaient écrits dans le fichier.
     """
     try:
-        resp.fp.raw._sock.shutdown(socket.SHUT_RDWR)  # SocketIO de http.client
+        socket.socket.shutdown(resp.fp.raw._sock, socket.SHUT_RDWR)  # SocketIO de http.client
     except (AttributeError, OSError):
         pass  # déjà fermée, ou lue jusqu'au bout
     try:

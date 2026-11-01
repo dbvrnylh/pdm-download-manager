@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -170,6 +171,24 @@ class EngineTest(unittest.TestCase):
         self.engine.pause(job.id)
         self.wait(job.id, {"paused"})
         self.assertLess(time.time() - started, 2, "la pause n'attend pas le délai réseau")
+
+    def test_a_connection_cut_on_purpose_never_reads_the_raw_tls_bytes(self):
+        # SSLSocket.shutdown retirait son chiffrement avant de couper : la lecture suivante
+        # rendait les octets chiffrés en attente dans la socket, écrits dans le fichier
+        # (une fois sur dix environ, sur une connexion coupée en plein envoi).
+        ours, theirs = socket.socketpair()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+        tls = context.wrap_socket(ours, do_handshake_on_connect=False)
+        self.addCleanup(tls.close)
+        self.addCleanup(theirs.close)
+        theirs.sendall(b"\x17\x03\x03 un enregistrement TLS")  # en attente de déchiffrement
+        httpdl.hang_up(SimpleNamespace(fp=SimpleNamespace(raw=SimpleNamespace(_sock=tls)), close=lambda: None))
+        try:
+            data = tls.recv(1024)
+        except (ssl.SSLError, OSError, ValueError):
+            data = b""  # ce que _fetch attrape : connexion perdue, rien d'écrit
+        self.assertEqual(data, b"")
 
     def test_file_changed_on_server_restarts(self):
         fx.make_file("changing.bin", 24 * 1024 * 1024, seed="v1")
