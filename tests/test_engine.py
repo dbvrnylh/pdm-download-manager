@@ -882,6 +882,7 @@ class EngineTlsTest(EngineTest):
         # Le même serveur, mais signé par une autorité que personne ne connaît.
         _, *tls = fx.tls_files(Path(tempfile.mkdtemp(dir=TMP)))
         server = fx.start(tls=tls)
+        self.addCleanup(server.server_close)  # après shutdown : les nettoyages se font à rebours
         self.addCleanup(server.shutdown)
         job = self.engine.add({"url": f"https://127.0.0.1:{server.server_port}/range/small.zip"})
         job = self.wait(job.id, {"completed", "failed"})
