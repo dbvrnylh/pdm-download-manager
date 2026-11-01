@@ -159,6 +159,10 @@
           </label>
         </div>
         <p id="options-video" class="options-note" hidden>Pour une vidéo, elles comptent à son prochain départ.</p>
+        <div id="options-files" class="options-queue" hidden>
+          <span id="options-files-text"></span>
+          <button type="button" id="options-files-open">Choisir les fichiers…</button>
+        </div>
         <div id="options-queue" class="options-queue">
           <span id="options-place"></span>
           <button type="button" id="options-first">En premier</button>
@@ -168,6 +172,24 @@
         <div class="dialog-actions">
           <button type="button" id="options-close">Fermer</button>
           <button type="submit" class="primary">Enregistrer</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="files-dialog" aria-labelledby="files-title">
+      <form id="files-form">
+        <h2 id="files-title">Fichiers du torrent</h2>
+        <p id="files-name" class="verify-name"></p>
+        <div class="files-tools">
+          <input id="files-filter" type="search" placeholder="Filtrer : .mkv, saison 2…" aria-label="Filtrer les fichiers" />
+          <button type="button" id="files-all">Tout cocher</button>
+          <button type="button" id="files-none">Tout décocher</button>
+        </div>
+        <ul id="files-list" class="files-list"></ul>
+        <p id="files-summary" class="verify-result" role="status"></p>
+        <div class="dialog-actions">
+          <button type="button" id="files-close">Fermer</button>
+          <button type="submit" id="files-submit" class="primary">Télécharger la sélection</button>
         </div>
       </form>
     </dialog>

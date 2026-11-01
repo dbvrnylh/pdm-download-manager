@@ -39,7 +39,7 @@ import threading
 import time
 import uuid
 
-from . import aria2, paths
+from . import aria2, paths, torrent
 from .httpdl import DownloadError
 from .util import write_json_atomic
 
@@ -270,11 +270,16 @@ class Api:
 
     def changeOption(self, g, options):
         """Les connexions et la vitesse maximale d'un téléchargement, même en cours."""
-        unknown = set(aria2.check(options)) - aria2.JOB_OPTIONS
+        allowed = aria2.JOB_OPTIONS | {"select-file"}
+        unknown = set(aria2.check(options)) - allowed
         if unknown:
             raise RpcError(f"option non prise en charge par changeOption : {', '.join(sorted(unknown))} "
-                           f"(seulement {', '.join(sorted(aria2.JOB_OPTIONS))})")
-        self.engine.set_options(self._job(g).id, aria2.job_options(options))
+                           f"(seulement {', '.join(sorted(allowed))})")
+        job = self._job(g)
+        if "select-file" in options:  # les fichiers voulus d'un torrent
+            self.engine.choose(job.id, aria2.select_file(options["select-file"]))
+        if set(options) & aria2.JOB_OPTIONS:
+            self.engine.set_options(job.id, aria2.job_options(options))
         return "OK"
 
     def removeDownloadResult(self, g):
@@ -328,7 +333,15 @@ class Api:
         return self._uris(self._job(g))
 
     def getFiles(self, g):
-        return self._status(self._job(g), ["files"])["files"]
+        job = self._job(g)
+        if job.kind == "torrent" and torrent.files_of(job.id) is not None:  # chacun de ses fichiers
+            done = job.status == "completed"
+            base = os.path.dirname(job.path) if job.path else str(self.config.download_dir())
+            return [{"index": str(f["index"]), "path": os.path.join(base, f["path"]), "length": str(f["length"]),
+                     "completedLength": str(f["length"] if done and f["selected"] else 0),
+                     "selected": "true" if f["selected"] else "false", "uris": []}
+                    for f in self.engine.torrent_files(job.id)]
+        return self._status(job, ["files"])["files"]
 
     def getPeers(self, g):
         self._job(g)

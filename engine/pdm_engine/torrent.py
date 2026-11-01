@@ -41,6 +41,7 @@ log = logging.getLogger("pdm")
 POLL = 0.5  # s entre deux relevés de l'état d'un torrent
 START_WAIT = 10  # s pour qu'aria2c réponde, une fois lancé
 MAX_TORRENT = 10 * 1024 * 1024  # octets d'un fichier .torrent : ceux de dizaines de milliers de fichiers y tiennent
+MAX_CHOICE = 5000  # fichiers d'un torrent à choisir un par un : leur liste tient dans un message vers Chrome
 FOLDER = "Torrents"  # dossier des torrents dans celui de PDM, quand il range par catégorie
 STAGING = ".pdm-torrent-"  # préfixe du dossier caché où un torrent s'écrit, jusqu'à sa fin
 # Trouver des pairs sans tracker (DHT), et par ceux déjà trouvés (PEX). Coupés dans les tests.
@@ -67,7 +68,10 @@ def magnet_hash(url):
 
 
 def parse_torrent(data):
-    """Un fichier .torrent → {infohash, name, length, trackers} ; ValueError s'il est illisible.
+    """Un fichier .torrent → {infohash, name, length, trackers, files} ; ValueError s'il est illisible.
+
+    `files` : [chemin, taille] de chacun, dans l'ordre du torrent, celui des numéros
+    d'aria2 (select-file) ; le chemin commence par le nom du torrent.
 
     Il vient d'internet : lu sans jamais suivre une longueur au-delà des données, ni
     descendre sans fin dans des listes imbriquées.
@@ -82,20 +86,27 @@ def parse_torrent(data):
     name = info.get(b"name.utf-8") or info.get(b"name")
     if not isinstance(name, bytes) or not name:
         raise ValueError("fichier .torrent sans nom")
+    name = name.decode(errors="replace")
     if isinstance(info.get(b"length"), int):
-        length = info[b"length"]
+        files = [[name, info[b"length"]]]
+    elif isinstance(info.get(b"files"), list) and info[b"files"]:
+        files = []
+        for entry in info[b"files"]:  # tous, même les fichiers de bourrage : les numéros sont ceux d'aria2
+            if not isinstance(entry, dict) or not isinstance(entry.get(b"length"), int):
+                raise ValueError("fichier .torrent illisible")
+            parts = entry.get(b"path.utf-8") or entry.get(b"path")
+            if not isinstance(parts, list) or not parts or not all(isinstance(part, bytes) for part in parts):
+                raise ValueError("fichier .torrent illisible")
+            files.append(["/".join([name, *(part.decode(errors="replace") for part in parts)]), entry[b"length"]])
     else:
-        files = info.get(b"files")
-        if not isinstance(files, list):
-            raise ValueError("fichier .torrent sans fichiers")
-        length = sum(f.get(b"length", 0) for f in files if isinstance(f, dict) and isinstance(f.get(b"length"), int))
+        raise ValueError("fichier .torrent sans fichiers")
     start, stop = spans[b"info"]
     trackers = [t.decode(errors="replace") for t in [top.get(b"announce")] if isinstance(t, bytes)]
     for tier in top.get(b"announce-list") or []:
         if isinstance(tier, list):
             trackers += [t.decode(errors="replace") for t in tier if isinstance(t, bytes)]
-    return {"infohash": hashlib.sha1(data[start:stop]).hexdigest(), "name": name.decode(errors="replace"),
-            "length": length, "trackers": list(dict.fromkeys(trackers))}
+    return {"infohash": hashlib.sha1(data[start:stop]).hexdigest(), "name": name,
+            "length": sum(size for _, size in files), "trackers": list(dict.fromkeys(trackers)), "files": files}
 
 
 def _decode(data, i, depth):
@@ -161,11 +172,38 @@ def keep(job_id, data):
         f.write(data)
 
 
-def forget(job_id):
+def keep_files(job_id, files):
+    """La liste des fichiers d'un lien magnet, reçue de ses pairs : elle sert au choix, même aria2c arrêté."""
+    path = stored(job_id).with_suffix(".files.json")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(files, f, ensure_ascii=False)
+
+
+def files_of(job_id):
+    """[chemin, taille] de chaque fichier du torrent, ou None : sa description n'est pas encore reçue."""
+    path = stored(job_id)
+    if path.exists():
+        return parse_torrent(path.read_bytes())["files"]
     try:
-        os.unlink(stored(job_id))
-    except OSError:
-        pass
+        with open(path.with_suffix(".files.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def select_text(selection, count):
+    """La sélection au format d'aria2 (select-file) : « 1,3,5 » ; None : tous."""
+    return ",".join(map(str, selection)) if selection else f"1-{count}"
+
+
+def forget(job_id):
+    for path in (stored(job_id), stored(job_id).with_suffix(".files.json")):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 # ─── aria2c ────────────────────────────────────────────────────────────────
@@ -288,8 +326,9 @@ def _free_port():
 class TorrentDownload:
     """Un torrent ou un lien magnet, téléchargé par aria2c. Même interface que HttpDownload."""
 
-    def __init__(self, job, config, aria2, directory):
+    def __init__(self, job, config, aria2, directory, ask=False):
         self.job = job
+        self.ask = ask  # plusieurs fichiers, et personne n'a encore choisi lesquels : s'arrêter pour demander
         self.config = config
         self.aria2 = aria2
         self.directory = Path(directory)  # le dossier des torrents
@@ -310,6 +349,14 @@ class TorrentDownload:
     def progress(self):
         with self.lock:
             return dict(self.state)
+
+    def select(self, selection, count):
+        """Change les fichiers voulus, même en cours (aria2c reprend avec la nouvelle sélection)."""
+        if self.gid:
+            try:
+                self.aria2.call("aria2.changeOption", self.gid, {"select-file": select_text(selection, count)})
+            except Aria2Error:
+                pass  # au pire, au prochain départ
 
     def limit(self, rate):
         """Change sa vitesse maximale, même en cours (0 : aucune)."""
@@ -343,15 +390,32 @@ class TorrentDownload:
         options = {"dir": str(self.staging), "max-download-limit": str(self.limit_rate or 0)}
         metainfo = self._metainfo()
         if metainfo is not None:
+            files = parse_torrent(metainfo)["files"]
+            self.job.fileCount = len(files)
+            if self._waits_for_choice(files):
+                return "paused"
+            if self.job.selection:
+                options["select-file"] = select_text(self.job.selection, len(files))
             self.gid = self.aria2.call("aria2.addTorrent", base64.b64encode(metainfo).decode(), [], options)
         else:
-            self.gid = self.aria2.call("aria2.addUri", [self.job.url], options)
+            # La description reçue, aria2c attend (pause-metadata) : le temps de lire la liste des fichiers.
+            self.gid = self.aria2.call("aria2.addUri", [self.job.url], dict(options, **{"pause-metadata": "true"}))
         metadata = metainfo is None  # un lien magnet commence par chercher la description du torrent
         while not self.stop_event.wait(POLL):
             status = self.aria2.call("aria2.tellStatus", self.gid, KEYS)
-            if status.get("followedBy"):  # description reçue : le vrai téléchargement la suit
+            if status.get("followedBy"):  # description reçue : le vrai téléchargement la suit, en pause
                 self._forget()
                 self.gid, metadata = status["followedBy"][0], False
+                files = [[os.path.relpath(f["path"], self.staging), int(f["length"])]
+                         for f in self.aria2.call("aria2.getFiles", self.gid)]
+                keep_files(self.job.id, files)
+                self.job.fileCount = len(files)
+                if self._waits_for_choice(files):
+                    return "paused"
+                if self.job.selection:
+                    self.aria2.call("aria2.changeOption", self.gid,
+                                    {"select-file": select_text(self.job.selection, len(files))})
+                self.aria2.call("aria2.unpause", self.gid)
                 continue
             self._read(status, metadata)
             if status["status"] == "complete":
@@ -362,6 +426,13 @@ class TorrentDownload:
             if status["status"] == "removed":
                 raise DownloadError("arrêté par aria2c")
         return self.stop_reason
+
+    def _waits_for_choice(self, files):
+        """Plusieurs fichiers, et personne n'a choisi : il attend en pause qu'on choisisse (voir Engine.choose)."""
+        if not self.ask or len(files) < 2 or self.job.selection:
+            return False
+        self.job.choosing = True
+        return True
 
     def _metainfo(self):
         """Le .torrent : gardé par le moteur, sinon téléchargé (une fois) ; None pour un lien magnet."""
@@ -404,10 +475,34 @@ class TorrentDownload:
         source = self.staging / name
         if not source.exists():
             raise DownloadError(f"contenu du torrent introuvable une fois fini ({name})")
+        self._drop_unchosen()
         target = unique_path(self.directory, name)
         os.replace(source, target)
         shutil.rmtree(self.staging, ignore_errors=True)  # reste : le fichier de contrôle .aria2
         self.job.filename, self.job.path = target.name, str(target)
+
+    def _drop_unchosen(self):
+        """Les fichiers non choisis qu'aria2c a quand même créés (des morceaux à cheval) : inutiles, ils partent.
+
+        Seulement dans son dossier caché, avant que le contenu en sorte ; puis les dossiers restés vides.
+        """
+        if not self.job.selection:
+            return
+        try:
+            unchosen = [f["path"] for f in self.aria2.call("aria2.getFiles", self.gid) if f.get("selected") == "false"]
+        except Aria2Error:
+            return
+        staging = os.path.realpath(self.staging)
+        for path in unchosen:
+            real = os.path.realpath(path)
+            if real.startswith(staging + os.sep) and os.path.isfile(real):
+                os.unlink(real)
+        for directory, _, _ in sorted(os.walk(staging), key=lambda entry: -len(entry[0])):
+            if directory != staging:
+                try:
+                    os.rmdir(directory)  # seulement s'il est vide
+                except OSError:
+                    pass
 
     def _forget(self):
         """aria2c oublie ce téléchargement (fini, arrêté ou annulé) ; ses fichiers restent."""

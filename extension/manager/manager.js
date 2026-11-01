@@ -120,6 +120,13 @@ const optionsConnections = document.getElementById('options-connections');
 const optionsSpeed = document.getElementById('options-speed');
 const optionsResult = document.getElementById('options-result');
 let optionsId = null; // téléchargement affiché dans la fenêtre « Options »
+const filesDialog = document.getElementById('files-dialog');
+const filesFilter = document.getElementById('files-filter');
+const filesSummary = document.getElementById('files-summary');
+const filesSubmit = document.getElementById('files-submit');
+let filesId = null; // torrent affiché dans la fenêtre « Fichiers »
+let filesList = []; // [{ index, path, length, selected }] : ses fichiers, cochés comme dans la fenêtre
+const askedFiles = new Set(); // torrents dont la fenêtre « Fichiers » s'est déjà ouverte seule
 let copiedSum = null; // SHA-256 pris par « Copier », tant que la page garde la main
 
 // ─── Modèle : de chaque source vers une « entrée » commune ─────────────────
@@ -157,6 +164,10 @@ function fromEngine(job) {
     extracted: job.extracted,
     afterError: job.afterError,
     upload: job.upload ?? 0,
+    // Les fichiers d'un torrent : combien, combien voulus, et s'il attend qu'on choisisse.
+    fileCount: job.fileCount ?? 0,
+    chosenCount: job.chosenCount ?? job.fileCount ?? 0,
+    choosing: Boolean(job.choosing),
   };
 }
 
@@ -312,7 +323,7 @@ function updateRow(row, entry) {
   row.meta.title = row.meta.textContent; // en entier, quand la ligne est coupée (message d'erreur)
 
   // Les boutons ne dépendent que de l'état : on ne les recrée que s'il change.
-  const key = `${entry.status}:${entry.canResume}:${entry.scheduled}`;
+  const key = `${entry.status}:${entry.canResume}:${entry.scheduled}:${entry.choosing}`;
   if (row.actionsKey !== key) {
     row.actions.replaceChildren(...actionsFor(entry));
     row.actionsKey = key;
@@ -363,6 +374,7 @@ function describe(entry) {
       if (entry.speed > 0) parts.push(formatSpeed(entry.speed));
       if (entry.eta > 0) parts.push(`reste ${formatDuration(entry.eta)}`);
       if (entry.kind === 'torrent') {
+        if (entry.chosenCount < entry.fileCount) parts.push(`${entry.chosenCount} fichiers sur ${entry.fileCount}`);
         // Les pairs reliés, dont ceux qui ont tout (« sources ») ; et ce qu'il leur envoie.
         if (entry.connections) parts.push(`${plural(entry.connections, 'pair')} (${entry.sources} complets)`);
         if (entry.upload > 0) parts.push(`↑ ${formatSpeed(entry.upload)}`);
@@ -373,6 +385,7 @@ function describe(entry) {
       return parts.join(' · ');
     }
     case 'paused': {
+      if (entry.choosing) return `À toi de choisir ses fichiers · ${plural(entry.fileCount, 'fichier')} · ${total}`;
       const restart = entry.source === 'engine' && entry.kind === 'http' && !entry.resumable;
       return `En pause · ${done} / ${total}${restart ? ' · reprendra depuis le début' : ''}`;
     }
@@ -504,6 +517,10 @@ function engineActions(entry) {
     case 'active':
       return [button('Pause', send('pause')), ...later, ...options, cancel];
     case 'paused':
+      if (entry.choosing) {
+        // « Tout télécharger » : reprendre sans choisir, c'est tout prendre (voir Engine.resume).
+        return [button('Choisir les fichiers…', () => openFiles(id), 'primary'), button('Tout télécharger', send('resume')), cancel];
+      }
       return [button('Reprendre', send('resume'), 'primary'), ...later, ...options, cancel];
     case 'complete':
       return [
@@ -639,6 +656,7 @@ async function connectEngine() {
     engineJobs.clear();
     removedJobs.clear();
     for (const job of info.jobs) engineJobs.set(job.id, job);
+    for (const job of info.jobs) askFiles(job, false); // arrivé à l'instant (la fenêtre s'ouvre pour lui)
     showPower(info.power);
     setEngineState('ok');
     loadJobs(info.next).catch((err) => showError(`Liste incomplète : ${err.message}`));
@@ -722,7 +740,10 @@ document.getElementById('power-cancel').addEventListener('click', () => setWhenD
 
 engine.on((event) => {
   if (event.type === 'power') showPower(event.power, event.error);
-  if (event.type === 'job') engineJobs.set(event.job.id, event.job);
+  if (event.type === 'job') {
+    engineJobs.set(event.job.id, event.job);
+    askFiles(event.job);
+  }
   else if (event.type === 'removed') {
     engineJobs.delete(event.id);
     removedJobs.add(event.id);
@@ -733,6 +754,8 @@ engine.on((event) => {
   }
   if (verifyDialog.open) renderVerify();
   if (optionsDialog.open) renderOptions();
+  // Pas de nouveau rendu de la liste à chaque progression : on y perdrait le défilement.
+  if (filesDialog.open && ['completed', undefined].includes(engineJobs.get(filesId)?.status)) filesDialog.close();
   scheduleRender();
 });
 
@@ -1015,6 +1038,13 @@ function renderOptions() {
     `Vide : le réglage général (${engine.info?.config.connections ?? '?'}).`;
   document.getElementById('options-video').hidden = job.kind !== 'ytdlp';
   optionsConnections.closest('label').hidden = job.kind === 'torrent'; // ses pairs, c'est aria2c qui les choisit
+  const several = job.kind === 'torrent' && job.fileCount > 1;
+  document.getElementById('options-files').hidden = !several;
+  if (several) {
+    const chosen = job.chosenCount ?? job.fileCount;
+    document.getElementById('options-files-text').textContent =
+      chosen < job.fileCount ? `${chosen} fichiers voulus sur ${job.fileCount}.` : `Tous ses ${job.fileCount} fichiers.`;
+  }
   const queue = [...engineJobs.values()].map(fromEngine).filter((e) => e.inQueue);
   queue.sort((a, b) => a.order - b.order);
   const place = queue.findIndex((e) => e.id === optionsId);
@@ -1055,6 +1085,113 @@ document.getElementById('options-form').addEventListener('submit', async (event)
 });
 
 document.getElementById('options-close').addEventListener('click', () => optionsDialog.close());
+document.getElementById('options-files-open').addEventListener('click', () => {
+  const id = optionsId;
+  optionsDialog.close();
+  openFiles(id);
+});
+
+// ─── Fichiers d'un torrent ─────────────────────────────────────────────────
+
+// Un torrent de plusieurs fichiers attend qu'on choisisse lesquels (réglage « Demander quels
+// fichiers télécharger ») ; la fenêtre sert aussi à changer d'avis en cours de route.
+async function openFiles(id) {
+  filesId = id;
+  filesList = [];
+  filesFilter.value = '';
+  renderFiles();
+  filesSummary.textContent = 'Lecture de la liste…';
+  filesDialog.showModal();
+  try {
+    const reply = await engine.request({ type: 'torrent-files', id });
+    if (filesId !== id) return; // une autre fenêtre entre-temps
+    filesList = reply.files;
+    renderFiles();
+  } catch (err) {
+    filesSummary.textContent = err.message;
+    filesSummary.dataset.state = 'bad';
+  }
+}
+
+// Ouvre la fenêtre seule pour un torrent qui vient de se mettre à attendre, une fois, sans
+// en couvrir une autre. `fresh` : vu au chargement de la page, seulement s'il vient d'arriver.
+function askFiles(job, fresh = true) {
+  if (!job.choosing || askedFiles.has(job.id)) return;
+  askedFiles.add(job.id);
+  const recent = Date.now() / 1000 - job.createdAt < 120;
+  const busy = [importDialog, verifyDialog, optionsDialog, filesDialog].some((dialog) => dialog.open);
+  if ((fresh || recent) && !busy) openFiles(job.id);
+}
+
+function renderFiles() {
+  const job = engineJobs.get(filesId);
+  if (!job || job.status === 'completed') {
+    filesDialog.close(); // retiré, ou fini entre-temps
+    return;
+  }
+  document.getElementById('files-name').textContent = job.filename || job.url;
+  const filter = filesFilter.value.trim().toLowerCase();
+  // Dans le dossier du torrent : son nom en tête de chaque chemin n'apprend rien.
+  const shown = (path) => (path.includes('/') ? path.slice(path.indexOf('/') + 1) : path);
+  document.getElementById('files-list').replaceChildren(
+    ...visibleFiles(filter).map((file) => {
+      const box = el('input');
+      box.type = 'checkbox';
+      box.checked = file.selected;
+      box.addEventListener('change', () => {
+        file.selected = box.checked;
+        updateFilesSummary();
+      });
+      const label = el('label');
+      label.append(box, el('span', 'path', shown(file.path)), el('span', 'size', formatBytes(file.length)));
+      const li = el('li');
+      li.append(label);
+      return li;
+    }),
+  );
+  filesSubmit.textContent = job.choosing ? 'Télécharger la sélection' : 'Enregistrer';
+  updateFilesSummary();
+}
+
+function visibleFiles(filter = filesFilter.value.trim().toLowerCase()) {
+  return filter ? filesList.filter((file) => file.path.toLowerCase().includes(filter)) : filesList;
+}
+
+function updateFilesSummary() {
+  if (!filesList.length) return;
+  const chosen = filesList.filter((file) => file.selected);
+  const size = chosen.reduce((sum, file) => sum + file.length, 0);
+  filesSummary.textContent = `${plural(chosen.length, 'fichier choisi', 'fichiers choisis')} sur ${filesList.length} · ${formatBytes(size)}`;
+  filesSummary.dataset.state = '';
+  filesSubmit.disabled = chosen.length === 0;
+}
+
+filesFilter.addEventListener('input', () => renderFiles());
+
+// Tout cocher ou décocher : ce que le filtre laisse voir (par exemple, tous les .mkv).
+for (const [buttonId, selected] of [
+  ['files-all', true],
+  ['files-none', false],
+]) {
+  document.getElementById(buttonId).addEventListener('click', () => {
+    for (const file of visibleFiles()) file.selected = selected;
+    renderFiles();
+  });
+}
+
+document.getElementById('files-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const files = filesList.filter((file) => file.selected).map((file) => file.index);
+  try {
+    await engine.request({ type: 'choose', id: filesId, files });
+    filesDialog.close();
+  } catch (err) {
+    filesSummary.textContent = err.message;
+    filesSummary.dataset.state = 'bad';
+  }
+});
+
+document.getElementById('files-close').addEventListener('click', () => filesDialog.close());
 
 function openVerify(id) {
   verifiedId = id;

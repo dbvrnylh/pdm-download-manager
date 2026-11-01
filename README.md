@@ -214,13 +214,20 @@ sudo apt install aria2
   Without aria2, or with **Prendre le contrôle des téléchargements** off, links go to your system as before.
 - Files go to `Torrents/` in PDM's folder (a whole folder for a multi-file torrent). Until it is complete, a
   torrent is written in a hidden folder of its own (`.pdm-torrent-…`): cancel it and only that folder goes.
+- **Choose its files.** A torrent of several files waits for your choice: the **Fichiers du torrent** window
+  opens with the list (a filter, `.mkv` or `saison 2`, then **Tout cocher** / **Tout décocher** on what it
+  shows), or **Tout télécharger**. A magnet link first gets the torrent's description from its peers, then
+  waits. Change your mind later in **Options…** → **Choisir les fichiers…**, even while it downloads; the
+  pieces of unchosen files that BitTorrent writes anyway are removed at the end. Turn the question off in
+  **Réglages** (**Demander quels fichiers télécharger**); torrents added by a script (API, terminal) never wait.
 - Pause and resume keep what was received, even across a restart. **Options…** sets its maximum speed, at once.
 - PDM starts `aria2c` itself, only while a torrent runs, and stops it after. It listens on `127.0.0.1` only,
   with a random secret given through a file only you can read, never on the command line (`ps` shows that to
   every account).
 - **Sharing:** while it downloads, a torrent sends pieces to other peers, as BitTorrent works. Once complete,
   PDM stops sharing it.
-- Through the [JSON-RPC API](#the-aria2-compatible-api): `addUri` with a magnet link, and `addTorrent`.
+- Through the [JSON-RPC API](#the-aria2-compatible-api): `addUri` with a magnet link, `addTorrent`, `select-file`
+  (in both, and in `changeOption`) and `getFiles`, as in aria2.
 
 ### The aria2-compatible API
 

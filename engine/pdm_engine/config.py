@@ -30,6 +30,7 @@ DEFAULTS = {
     "rpcOrigins": [],  # pages web autorisées à l'appeler (AriaNg…) : aucune par défaut
     "extract": False,  # extraire les archives .zip et .tar terminées, dans un dossier à côté (voir finish.py)
     "onComplete": None,  # programme lancé à la fin de chaque téléchargement, comme --on-download-complete d'aria2
+    "torrentAsk": True,  # un torrent de plusieurs fichiers attend qu'on choisisse lesquels (voir Engine.choose)
 }
 
 LIMITS = {"connections": (1, 32), "maxParallel": (1, 10), "rpcPort": (1024, 65535)}

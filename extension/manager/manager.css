@@ -526,7 +526,62 @@ code {
   display: none;
 }
 
+/* Fenêtre « Fichiers du torrent » : une case par fichier, filtrables. */
+.files-tools {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.files-tools input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.files-list {
+  max-height: min(50vh, 420px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.files-list label {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.files-list li:first-child label {
+  border-top: none;
+}
+
+.files-list .path {
+  overflow-wrap: anywhere;
+}
+
+.files-list .size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 560px) {
+  .files-tools {
+    flex-wrap: wrap;
+  }
+
   .options-grid {
     grid-template-columns: 1fr;
   }

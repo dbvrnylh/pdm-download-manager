@@ -191,6 +191,11 @@ class Daemon:
             elif kind == "program":
                 self.engine.program(message["id"], bool(message.get("scheduled", True)))
                 reply()
+            elif kind == "torrent-files":
+                reply(files=self.engine.torrent_files(message["id"]))
+            elif kind == "choose":
+                self.engine.choose(message["id"], message.get("files"))
+                reply()
             elif kind == "when-done":
                 self.engine.when_done(message.get("action"))
                 reply(power=self.engine.power_state())

@@ -49,6 +49,7 @@ const fields = {
   notify: document.getElementById('notify'),
   autoResume: document.getElementById('auto-resume'),
   extract: document.getElementById('extract'),
+  torrentAsk: document.getElementById('torrent-ask'),
   onComplete: document.getElementById('on-complete'),
   videoQuality: document.getElementById('video-quality'),
   languages: document.getElementById('languages'),
@@ -122,6 +123,8 @@ function fillForm(config) {
   fields.extract.closest('label').hidden = !hasFinish;
   fields.onComplete.closest('label').hidden = !hasFinish;
   fields.extract.checked = Boolean(config.extract);
+  fields.torrentAsk.closest('label').hidden = !('torrentAsk' in config); // moteur plus ancien
+  fields.torrentAsk.checked = config.torrentAsk !== false;
   fields.onComplete.value = config.onComplete ?? '';
   // Un moteur plus ancien (install.sh pas relancé) ne connaît pas ces réglages :
   // on les cache, sinon il refuserait tout l'enregistrement.
@@ -231,6 +234,7 @@ form.addEventListener('submit', async (event) => {
     autoResume: fields.autoResume.checked,
   };
   if (!fields.videoQuality.closest('label').hidden) changes.videoQuality = fields.videoQuality.value;
+  if (!fields.torrentAsk.closest('label').hidden) changes.torrentAsk = fields.torrentAsk.checked;
   if (!fields.extract.closest('label').hidden) {
     changes.extract = fields.extract.checked;
     changes.onComplete = fields.onComplete.value.trim() || null;

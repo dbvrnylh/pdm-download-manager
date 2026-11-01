@@ -52,9 +52,13 @@ PERSISTED = {
     # Adresse d'où le navigateur est parti, avant les redirections qui ont mené à `url`.
     "startUrl": None,
     "infoHash": None,  # l'empreinte d'un torrent (hexadécimal), qui le désigne pour tous ses pairs
+    # Les fichiers d'un torrent : combien il en a, les numéros voulus (None : tous), et s'il attend
+    # qu'on les choisisse (None : pas encore demandé ; False : choisi, ou rien à choisir).
+    "fileCount": None, "selection": None, "choosing": None,
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
-HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl"}
+HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl",
+          "selection"}  # des milliers de numéros, parfois : l'interface ne reçoit que leur nombre
 # Un message du programme natif vers Chrome est limité à 1 Mo : la liste part par pages
 # (voir job_page), de cette taille en JSON au plus, la marge allant à l'enveloppe du message.
 PAGE_BYTES = 512 * 1024
@@ -109,7 +113,8 @@ class Job:
     def public(self):
         data = {k: v for k, v in self.to_dict().items() if k not in HIDDEN}
         data.update(speed=self.speed, eta=self.eta, connections=self.connections, sources=self.sources,
-                    stage=self.stage, upload=self.upload)
+                    stage=self.stage, upload=self.upload,
+                    chosenCount=len(self.selection) if self.selection else self.fileCount)
         if self.status not in ("downloading", "paused"):
             data["segments"] = []
         elif self.bar is not None:
@@ -308,6 +313,7 @@ class Engine:
             name = info.get("name")
             job.infoHash, job.size = info["infohash"], info.get("length")
             job.filename = job.filename or (sanitize_filename(name) if name else None)
+            job.selection = _selection(spec.get("selection"), len(info["files"]) if "files" in info else None)
         for key, value in job_options({k: spec[k] for k in ("maxConnections", "speedLimit") if k in spec}).items():
             setattr(job, key, value)
         position = spec.get("position")
@@ -329,6 +335,12 @@ class Engine:
             known = torrent.parse_torrent(metainfo)
             job.infoHash, job.size = known["infohash"], known["length"]
             job.filename = sanitize_filename(known["name"])
+            info["files"] = known["files"]
+        if kind == "torrent" and "files" in info:
+            # Plusieurs fichiers, et à demander : il attend en pause, sans même lancer aria2c.
+            job.fileCount = len(info["files"])
+            if self._asks(job) and job.fileCount > 1 and job.status == "queued":
+                job.status, job.choosing = "paused", True
 
         with self.lock:
             if job.id in self.cancelled:
@@ -377,6 +389,8 @@ class Engine:
                 raise ValueError("ce téléchargement est déjà terminé")
             if job.status == "canceled":
                 self._reset(job)
+            if job.choosing:  # repris sans choisir : tous ses fichiers
+                job.choosing = False
             job.status, job.error = "queued", None
             self.dirty = True
         self._publish(job)
@@ -471,6 +485,44 @@ class Engine:
             runner.limit(min(rate for rate in (job.speedLimit, share) if rate) if job.speedLimit or share else 0)
         self._publish(job)
         return job
+
+    def torrent_files(self, job_id):
+        """Les fichiers d'un torrent, pour les choisir : [{index, path, length, selected}]."""
+        with self.lock:
+            job = self._get(job_id)
+            if job.kind != "torrent":
+                raise ValueError("ce n'est pas un torrent")
+            selection = set(job.selection or ())
+        files = torrent.files_of(job_id)
+        if files is None:
+            raise ValueError("description du torrent pas encore reçue de ses pairs : patiente un instant")
+        if len(files) > torrent.MAX_CHOICE:
+            raise ValueError(f"{len(files)} fichiers : trop pour les choisir un par un ici "
+                             f"(au plus {torrent.MAX_CHOICE})")
+        return [{"index": i, "path": path, "length": length, "selected": not selection or i in selection}
+                for i, (path, length) in enumerate(files, 1)]
+
+    def choose(self, job_id, indexes):
+        """Les fichiers voulus d'un torrent (numéros, à partir de 1). Un torrent qui attendait ce choix part ;
+        un torrent en cours change de sélection aussitôt."""
+        files = torrent.files_of(job_id)
+        if files is None:
+            raise ValueError("description du torrent pas encore reçue de ses pairs : patiente un instant")
+        selection = _selection(indexes, len(files))
+        with self.lock:
+            job = self._get(job_id)
+            if job.status == "completed":
+                raise ValueError("ce téléchargement est déjà terminé")
+            waiting = job.choosing
+            job.selection, job.choosing, job.fileCount = selection, False, len(files)
+            runner = self.runners.get(job_id)
+            self.dirty = True
+        if isinstance(runner, TorrentDownload):
+            runner.select(selection, len(files))
+        if waiting and job.status == "paused":
+            self.resume(job_id)
+        else:
+            self._publish(job)
 
     def when_done(self, action):
         """Veille (« suspend ») ou extinction (« poweroff ») quand tout sera fini, une fois ; None : rien.
@@ -673,7 +725,7 @@ class Engine:
             if job.kind == "ytdlp":
                 runner = YtdlpDownload(job, self.config, self.tools)
             else:
-                runner = TorrentDownload(job, self.config, self.aria2, self._torrent_dir())
+                runner = TorrentDownload(job, self.config, self.aria2, self._torrent_dir(), ask=self._asks(job))
             limit = self.config["speedLimit"]
             rates = [job.speedLimit] if job.speedLimit else []  # la sienne, s'il en a une
             if limit:
@@ -692,6 +744,12 @@ class Engine:
         job.status, job.error, job.sample, job.speed = "downloading", None, None, 0.0
         self.dirty = True
         threading.Thread(target=self._run, args=(job, runner), daemon=True, name=f"job-{job.id}").start()
+
+    def _asks(self, job):
+        """Demander quels fichiers d'un torrent télécharger ? Une fois, et seulement à quelqu'un devant
+        l'extension : un script (API, terminal) attend tout, ou dit lui-même lesquels (select-file)."""
+        return (self.config["torrentAsk"] and job.choosing is None and not job.selection
+                and job.source not in ("rpc", "cli", "list"))
 
     def _torrent_dir(self):
         """Le dossier des torrents : Torrents/ dans celui de PDM, s'il range par catégorie."""
@@ -924,6 +982,19 @@ class Engine:
         exe = shutil.which("notify-send")
         if exe:
             _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
+
+
+def _selection(indexes, count):
+    """Des numéros de fichiers d'un torrent, vérifiés → triés, ou None : tous (ou rien de demandé)."""
+    if indexes is None:
+        return None
+    if (not isinstance(indexes, list) or not indexes
+            or not all(isinstance(i, int) and not isinstance(i, bool) for i in indexes)):
+        raise ValueError("fichiers du torrent : une liste de numéros, au moins un")
+    if count is not None and not all(1 <= i <= count for i in indexes):
+        raise ValueError(f"fichiers du torrent : des numéros de 1 à {count}")
+    chosen = sorted(set(indexes))
+    return None if count is not None and len(chosen) == count else chosen
 
 
 def _mirrors(raw, url):

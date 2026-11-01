@@ -1678,6 +1678,7 @@ class TorrentTest(unittest.TestCase):
         self.until(lambda: not self.engine.aria2.running)  # plus aucun torrent : aria2c s'arrête
 
     def test_a_magnet_link_brings_a_whole_folder(self):
+        self.config.update({"torrentAsk": False})  # sans demander lesquels : tous ses fichiers
         files = {"lisez-moi.txt": b"bonjour\n", "images/a.bin": os.urandom(700_000),
                  "images/b.bin": os.urandom(900_000)}
         _, infohash = self.seed("collection", files)
@@ -1728,6 +1729,76 @@ class TorrentTest(unittest.TestCase):
         self.assertEqual(api.dispatch("aria2.tellStatus", ["token:s", magnet, ["infoHash"]]), {"infoHash": "ab" * 20})
         with self.assertRaises(rpc.RpcError):
             api.dispatch("aria2.addTorrent", ["token:s", base64.b64encode(b"pas un torrent").decode()])
+
+    def collection(self, upload_limit=None):
+        """Un torrent de trois fichiers, partagé : (.torrent, empreinte, fichiers)."""
+        files = {"a.bin": os.urandom(300_000), "sous/b.bin": os.urandom(500_000), "c.bin": os.urandom(400_000)}
+        metainfo, infohash = self.seed("coll", files, upload_limit)
+        return metainfo, infohash, files
+
+    def test_a_magnet_waits_for_the_files_to_be_chosen(self):
+        _, infohash, files = self.collection()
+        job = self.engine.add({"url": f"magnet:?xt=urn:btih:{infohash}&tr={quote(self.tracker, safe='')}",
+                               "source": "magnet"})
+        job = self.wait(job, {"paused", "failed"})
+        self.assertEqual((job.status, job.choosing, job.fileCount), ("paused", True, 3), job.error)
+        self.until(lambda: not self.engine.aria2.running)  # en attente du choix : aria2c n'a rien à faire
+        listed = self.engine.torrent_files(job.id)
+        self.assertEqual([(f["index"], f["path"], f["length"], f["selected"]) for f in listed],
+                         [(1, "coll/a.bin", 300_000, True), (2, "coll/sous/b.bin", 500_000, True),
+                          (3, "coll/c.bin", 400_000, True)])
+        self.engine.choose(job.id, [2])
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        folder = Path(job.path)
+        self.assertEqual((folder / "sous/b.bin").read_bytes(), files["sous/b.bin"])
+        self.assertEqual(sorted(str(p.relative_to(folder)) for p in folder.rglob("*")), ["sous", "sous/b.bin"],
+                         "les morceaux à cheval des autres fichiers ne restent pas")
+        self.assertEqual(self.engine.jobs[job.id].public()["chosenCount"], 1)
+
+    def test_a_torrent_file_waits_without_starting_and_resume_takes_everything(self):
+        metainfo, _, files = self.collection()
+        job = self.engine.add({"torrent": base64.b64encode(metainfo).decode(), "source": "manual"})
+        self.assertEqual((job.status, job.choosing, job.fileCount), ("paused", True, 3))
+        self.assertFalse(self.engine.aria2.running, "rien de lancé avant le choix")
+        self.engine.resume(job.id)  # repris sans choisir : tout
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        for path, content in files.items():
+            self.assertEqual((Path(job.path) / path).read_bytes(), content)
+        # Sans le réglage, ou depuis un script : rien n'attend.
+        self.config.update({"torrentAsk": False})
+        other = self.engine.add({"torrent": base64.b64encode(self.collection()[0]).decode(), "source": "manual"})
+        self.assertEqual(other.choosing, None)
+        self.assertNotEqual(other.status, "paused")
+
+    def test_the_choice_can_change_while_it_downloads(self):
+        metainfo, _, files = self.collection(upload_limit="256K")
+        job = self.engine.add({"torrent": base64.b64encode(metainfo).decode(), "source": "rpc"})  # un script : tout
+        self.until(lambda: job.downloaded > 0)
+        self.engine.choose(job.id, [1])
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        folder = Path(job.path)
+        self.assertEqual((folder / "a.bin").read_bytes(), files["a.bin"])
+        self.assertEqual([p.name for p in folder.rglob("*")], ["a.bin"])
+        for bad in ([], [0], [4], ["1"], None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.engine.choose(job.id, bad) if bad is not None else self.engine.choose(job.id, [1])  # terminé
+
+    def test_the_api_chooses_files_like_aria2(self):
+        metainfo, _, _ = self.collection()
+        api = rpc.Api(self.engine, self.config)
+        api.secret = "s"
+        g = api.dispatch("aria2.addTorrent", ["token:s", base64.b64encode(metainfo).decode(), [],
+                                              {"select-file": "1,3", "pause": "true"}])
+        listed = api.dispatch("aria2.getFiles", ["token:s", g])
+        self.assertEqual([(f["index"], f["selected"]) for f in listed], [("1", "true"), ("2", "false"), ("3", "true")])
+        self.assertEqual(api.dispatch("aria2.changeOption", ["token:s", g, {"select-file": "2"}]), "OK")
+        self.assertEqual([f["selected"] for f in api.dispatch("aria2.getFiles", ["token:s", g])],
+                         ["false", "true", "false"])
+        with self.assertRaises(rpc.RpcError):
+            api.dispatch("aria2.changeOption", ["token:s", g, {"select-file": "9"}])
 
     def test_aria2c_keeps_its_secret_out_of_sight(self):
         self.engine.aria2.acquire()

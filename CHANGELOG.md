@@ -6,6 +6,15 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Choosing the files of a torrent. One of several files waits for the choice (setting **Demander quels fichiers
+  télécharger**, on by default; never for the API or the terminal): a `.torrent` waits as soon as it is added,
+  without even starting aria2c; a magnet link first gets the description from its peers (aria2's
+  `pause-metadata`), PDM keeps the list of files, and it waits too. The manager opens **Fichiers du torrent**
+  by itself for a torrent that just started waiting: a filter, tick or untick what it shows, the size chosen;
+  **Tout télécharger** takes everything. The choice can change while it downloads (aria2c carries on with the
+  new one). The pieces of unchosen files that BitTorrent writes anyway (pieces straddling two files) are
+  removed before the content leaves its hidden folder. API: `select-file` in `addUri`, `addTorrent` and
+  `changeOption`, and `getFiles` lists a torrent's files with their `selected` state.
 - Torrents and magnet links, through aria2 (`sudo apt install aria2`). A magnet link clicked in the browser, a
   `.torrent` link taken over, one pasted in the manager or given to `pdm-host add`, or `addUri` / `addTorrent`
   through the JSON-RPC API: the engine starts `aria2c` only while a torrent runs, on 127.0.0.1 with a random

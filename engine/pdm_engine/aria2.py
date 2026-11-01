@@ -62,6 +62,8 @@ def to_spec(options, download_dir, strict=True):
             spec["checksums"] = [dict(checksum.parse(value), source="user")]
         elif key == "pause":
             spec["paused"] = value == "true"  # en pause dès l'ajout
+        elif key == "select-file":
+            spec["selection"] = select_file(value)
         elif key not in JOB_OPTIONS and key not in IGNORED:
             if strict:
                 raise ValueError(f"option non prise en charge : {key}")
@@ -85,6 +87,20 @@ def job_options(options):
     if "max-download-limit" in options:
         result["speedLimit"] = speed(options["max-download-limit"])
     return result
+
+
+def select_file(value):
+    """« 1,3-5 » (les fichiers voulus d'un torrent, comme aria2) → [1, 3, 4, 5]."""
+    chosen = []
+    for part in str(value).split(","):
+        match = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*)?", part)
+        if not match:
+            raise ValueError(f"select-file illisible : {value!r} (par exemple 1,3-5)")
+        first, last = int(match.group(1)), int(match.group(2) or match.group(1))
+        if not 1 <= first <= last or last - first > 100_000:
+            raise ValueError(f"select-file : des numéros à partir de 1, en ordre ({value!r})")
+        chosen += range(first, last + 1)
+    return chosen
 
 
 def speed(value):
