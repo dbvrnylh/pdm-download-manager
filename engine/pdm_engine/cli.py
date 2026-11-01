@@ -36,6 +36,17 @@ def _request(message):
     return _Connection().request(message)
 
 
+def _all_jobs(connection):
+    """Toute la liste, page après page (voir Engine.job_page)."""
+    jobs, after = [], None
+    while True:
+        reply = connection.request({"type": "list", **({"after": after} if after else {})})
+        jobs += reply["jobs"]
+        after = reply.get("next")
+        if not after:
+            return jobs
+
+
 ADD_USAGE = ("Usage : pdm-host add [--video] [--quality best|1080|720|480|audio] [--later] "
              "(ADRESSE [--checksum sha-256=SOMME] | --file liens.txt)")
 
@@ -101,7 +112,7 @@ def _add_list(source, kind, quality, later):
     # Même lien, même type et, pour une vidéo, même qualité : une page refusée en
     # fichier peut revenir avec --video, et une vidéo en 480p après la 720p.
     wanted = (quality or engine.request({"type": "config"})["config"]["videoQuality"]) if kind == "ytdlp" else None
-    known = {job["url"] for job in engine.request({"type": "list"})["jobs"]
+    known = {job["url"] for job in _all_jobs(engine)
              if job["kind"] == kind and (kind == "http" or (job.get("preset") or "best") == wanted)}
     fresh = [url for url in urls if url not in known]
     if len(fresh) > MAX_LINKS:
@@ -214,7 +225,7 @@ def main(args):
         source = {"pdm": " (copie PDM)", "system": " (système)", "config": ""}.get(tools.get("ytdlpSource"), "")
         print(f"  yt-dlp : {tools['ytdlp'] or 'absent'}{source} · ffmpeg : {'oui' if tools['ffmpeg'] else 'non'}"
               f" · JavaScript : {tools['jsRuntime'] or 'aucun'}")
-        for job in reply["jobs"][-10:]:
+        for job in reversed(reply["jobs"][:10]):  # les 10 derniers, le plus récent en bas
             print(f"  [{job['status']:<11}] {job['filename'] or job['url']}")
     elif command == "add":
         url, source, kind, quality, later, expected = _parse_add(args[1:])

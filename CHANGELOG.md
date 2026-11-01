@@ -172,6 +172,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   the TLS fingerprint still refuse the engine, and Chrome keeps those downloads.
 
 ### Changed
+- The manager shows every download, not only the last 300. A message from the engine to Chrome is capped at
+  1 MB, so the engine sends its list page by page (512 KB of JSON at most, newest first); the manager loads
+  them all after the first, and shows 200 rows at a time with **Afficher plus**. The cursor of a page is the
+  last download sent, not a rank, so a download that finishes, moves in the queue or is removed between two
+  pages shifts nothing and nothing is skipped. The terminal reads all the pages too, and an import can hold
+  1000 links instead of 200. Should a message still outgrow 1 MB, the bridge sends an error in its place
+  rather than letting Chrome cut the channel, and an address over 64 KB is refused.
 - The space of a file is reserved on the disk before it downloads (`fallocate`), instead of a sparse
   file that grew as the connections wrote: no more "disque plein" halfway through because another
   program took the space meanwhile, and a file in one piece rather than fragments laid in the order of 8

@@ -164,8 +164,8 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("Ligne 6 ignorée : seuls les liens http:// et https:// sont acceptés", first.stdout)
         self.assertIn("2 ajouté(s) · 1 doublon(s) · 1 ligne(s) ignorée(s)", first.stdout)
 
-        jobs = chrome.request({"type": "list"})["jobs"]
-        self.assertEqual([j["url"].rsplit("/", 1)[1] for j in jobs], ["list-b.bin", "list-a.bin"])
+        jobs = chrome.request({"type": "list"})["jobs"]  # du plus récent au plus ancien
+        self.assertEqual([j["url"].rsplit("/", 1)[1] for j in jobs], ["list-a.bin", "list-b.bin"])
         self.assertEqual({j["source"] for j in jobs}, {"list"})
 
         # La même liste une seconde fois (ici par l'entrée standard) : rien de nouveau.
@@ -181,7 +181,8 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("1 ajouté(s)", cli(str(page)).stdout)
         self.assertIn("0 ajouté(s) · 1 déjà dans la liste", cli(str(page)).stdout)
         self.assertIn("1 ajouté(s)", cli(str(page), "--video").stdout)
-        kinds = [j["kind"] for j in chrome.request({"type": "list"})["jobs"] if j["url"].endswith("/html")]
+        jobs = chrome.request({"type": "list"})["jobs"][::-1]  # dans l'ordre d'ajout
+        kinds = [j["kind"] for j in jobs if j["url"].endswith("/html")]
         self.assertEqual(kinds, ["http", "ytdlp"])
 
         missing = cli(str(links) + ".absent")
@@ -296,6 +297,42 @@ esac
         self.assertFalse(refused["ok"])
         self.assertIn("rien à attendre", refused["error"])
         self.assertEqual(chrome.request({"type": "hello"})["power"], {"action": None, "at": None})
+
+    def test_thousands_of_downloads_reach_chrome_page_by_page(self):
+        chrome = self.connect()
+        sizes = []
+        read = chrome.read
+
+        def measured():  # la taille de chaque message, telle que Chrome la reçoit
+            message = read()
+            sizes.append(len(json.dumps(message, ensure_ascii=False).encode()))
+            return message
+
+        chrome.read = measured
+        pad = "x" * 2000  # des adresses longues : bien plus d'1 Mo pour toute la liste
+        urls = [f"{self.base}/range/list-a.bin?n={n}&pad={pad}" for n in range(1500)]
+        for url in urls:
+            self.assertTrue(chrome.request({"type": "add", "job": {"url": url, "paused": True}})["ok"])
+        chrome.events.clear()
+        sizes.clear()
+        hello = chrome.request({"type": "hello"})
+        seen, pages, after = [j["url"] for j in hello["jobs"]], 1, hello["next"]
+        self.assertIsNotNone(after, "plus d'une page")
+        while after:
+            reply = chrome.request({"type": "list", "after": after})
+            seen += [j["url"] for j in reply["jobs"]]
+            pages, after = pages + 1, reply["next"]
+        self.assertEqual(seen, urls[::-1], "tout, une seule fois, du plus récent au plus ancien")
+        self.assertGreater(pages, 4)
+        self.assertLess(max(sizes), 1024 * 1024, "chaque message sous la limite de Chrome")
+
+        # Le terminal parcourt aussi toutes les pages : le plus ancien est reconnu.
+        links = self.downloads.parent / "liens.txt"
+        links.parent.mkdir(parents=True, exist_ok=True)
+        links.write_text(urls[0] + "\n" + self.base + "/range/list-b.bin\n")
+        done = subprocess.run([str(HOST), "add", "--file", str(links)], capture_output=True, text=True,
+                              env=self.env, timeout=60)
+        self.assertIn("1 ajouté(s) · 1 déjà dans la liste", done.stdout, done.stderr)
 
     def test_errors_are_replies_not_crashes(self):
         chrome = self.connect()

@@ -244,6 +244,17 @@ main {
   color: var(--muted);
 }
 
+/* Les lignes suivantes, par tranches : des milliers d'un coup alourdiraient la page. */
+.more {
+  margin: 0;
+  padding: 16px 0;
+  text-align: center;
+}
+
+.more[hidden] {
+  display: none;
+}
+
 footer {
   padding: 8px 16px;
   border-top: 1px solid var(--border);

@@ -52,7 +52,11 @@ PERSISTED = {
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
 HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl"}
-MAX_PUBLIC_JOBS = 300  # un message natif vers Chrome est limité à 1 Mo
+# Un message du programme natif vers Chrome est limité à 1 Mo : la liste part par pages
+# (voir job_page), de cette taille en JSON au plus, la marge allant à l'enveloppe du message.
+PAGE_BYTES = 512 * 1024
+PAGE_JOBS = 1000  # préparés sous le verrou pour une page, avant de la couper à PAGE_BYTES
+MAX_URL = 64 * 1024  # adresse ou page d'origine : bien au-delà des vraies, bien en deçà d'un message
 WAITING = ("queued", "paused")  # la file d'attente : en pause, un téléchargement y garde sa place
 
 
@@ -187,10 +191,33 @@ class Engine:
                     log.info("liste des téléchargements de nouveau sauvegardée")
                 self.save_error = None
 
-    def public_jobs(self):
+    def job_page(self, after=None):
+        """Une page de la liste : (téléchargements, curseur de la page suivante, ou None : c'était la dernière).
+
+        Du plus récent au plus ancien. Le curseur est le dernier envoyé (date d'ajout, id),
+        pas un rang : ce qui finit, change de place dans la file ou disparaît entre deux
+        pages ne décale rien, et rien n'est sauté. Ce qui est ajouté entre-temps, plus récent,
+        arrive par les événements.
+        """
+        if after is not None:
+            if (not isinstance(after, list) or len(after) != 2 or not isinstance(after[0], (int, float))
+                    or isinstance(after[0], bool) or not isinstance(after[1], str)):
+                raise ValueError("curseur de la liste invalide")
+            after = (after[0], after[1])
         with self.lock:
-            jobs = list(self.jobs.values())[-MAX_PUBLIC_JOBS:]
-            return [job.public() for job in jobs]
+            jobs = sorted(self.jobs.values(), key=lambda job: (job.createdAt, job.id), reverse=True)
+            if after is not None:
+                jobs = [job for job in jobs if (job.createdAt, job.id) < after]
+            candidates = [job.public() for job in jobs[:PAGE_JOBS]]
+        page, size = [], 0
+        for data in candidates:  # mesurés hors du verrou : json.dumps n'est pas gratuit
+            cost = len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode())
+            if page and size + cost > PAGE_BYTES:
+                break
+            page.append(data)
+            size += cost
+        more = len(page) < len(jobs)
+        return page, [page[-1]["createdAt"], page[-1]["id"]] if more else None
 
     def has_work(self):
         with self.lock:
@@ -202,6 +229,8 @@ class Engine:
         url = (spec.get("url") or "").strip()
         if not re.match(r"^https?://", url, re.I):
             raise ValueError("adresse invalide (http ou https uniquement)")
+        if len(url) > MAX_URL or len(spec.get("referer") or "") > MAX_URL:
+            raise ValueError(f"adresse de plus de {MAX_URL // 1024} Ko")
         kind = spec.get("kind") or "http"
         if kind not in ("http", "ytdlp"):
             raise ValueError("type de téléchargement inconnu")

@@ -177,8 +177,10 @@ class Daemon:
 
         try:
             if kind == "hello":
+                # La première page de la liste ; « next » : la suite, à demander par « list ».
+                jobs, more = self.engine.job_page()
                 reply(version=VERSION, config=self.config.snapshot(), tools=self.tools.info(),
-                      jobs=self.engine.public_jobs(), power=self.engine.power_state())
+                      jobs=jobs, next=more, power=self.engine.power_state())
             elif kind == "add":
                 if message.get("probe"):
                     # La sonde prend du temps (réseau) : on ne bloque pas ce client.
@@ -227,7 +229,8 @@ class Daemon:
                 if changes:
                     self.broadcast({"type": "config", "config": config, "tools": self.tools.info()})
             elif kind == "list":
-                reply(jobs=self.engine.public_jobs())
+                jobs, more = self.engine.job_page(message.get("after"))
+                reply(jobs=jobs, next=more)
             elif kind == "rpc":
                 # État de l'API JSON-RPC ; « renew » : un nouveau secret ; « secret » : le
                 # donner, pour le copier depuis la page Réglages. Ce canal n'est ouvert qu'à

@@ -5,9 +5,9 @@
 // synchronisées) : lignes vides et commentaires (#) ignorés, liens http(s)
 // seulement, un seul par ligne, doublons comptés une fois.
 
-// Le moteur ne renvoie que ses 300 derniers téléchargements au gestionnaire
-// (MAX_PUBLIC_JOBS) : au-delà, le début de la liste sortirait de la vue.
-export const MAX_LINKS = 200;
+// Par import : de quoi remplir une nuit de téléchargements, sans qu'une erreur de
+// fichier (un journal collé à la place de la liste) ne remplisse la file de milliers.
+export const MAX_LINKS = 1000;
 
 // Renvoie { urls, invalid: [{ line, text, reason }], duplicates }.
 // Les liens gardent l'ordre de la liste : c'est l'ordre de la file d'attente.

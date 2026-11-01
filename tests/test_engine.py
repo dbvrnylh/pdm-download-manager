@@ -40,6 +40,7 @@ from pdm_engine import checksum, daemon, finish, httpdl, metalink, paths, rpc, u
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine import engine as engine_mod  # noqa: E402
 from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
+from pdm_engine.host import fit_for_chrome  # noqa: E402
 from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
 from pdm_engine.limiter import Limiter  # noqa: E402
 from pdm_engine.tools import Tools  # noqa: E402
@@ -974,6 +975,32 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(calls, ["suspend"])
         states = [e["power"] for e in self.events if e["type"] == "power"]
         self.assertIn({"action": "poweroff", "at": None}, states, "l'interface suit l'état")
+
+    def test_the_list_goes_out_page_by_page_and_nothing_is_skipped(self):
+        pad = "x" * 2000
+        jobs = [self.add(f"/range/small.zip?n={n}&pad={pad}", paused=True) for n in range(600)]
+        newest_first = [job.id for job in reversed(jobs)]
+        size = lambda page: len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode())  # noqa: E731
+        page, after = self.engine.job_page()
+        seen = [data["id"] for data in page]
+        self.assertLessEqual(size(page), engine_mod.PAGE_BYTES)  # compact, comme le démon l'envoie
+        self.assertEqual(seen, newest_first[:len(seen)])
+        # Entre deux pages, la liste change : un retiré, un repris, un déplacé, un nouveau.
+        gone = jobs[10]
+        self.engine.remove(gone.id)
+        self.engine.resume(jobs[0].id)
+        self.engine.move(jobs[1].id, 0)
+        self.add("/range/small.zip?nouveau", paused=True)
+        while after:
+            page, after = self.engine.job_page(after)
+            self.assertLessEqual(size(page), engine_mod.PAGE_BYTES)
+            seen += [data["id"] for data in page]
+        self.assertEqual(seen, [i for i in newest_first if i != gone.id], "rien de sauté, rien en double")
+        for bad in ("12", [1.0], [1.0, 2], ["a", "b"], [True, "x"]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.engine.job_page(bad)
+        with self.assertRaises(ValueError):
+            self.add("/range/small.zip?" + "x" * engine_mod.MAX_URL)  # jamais plus gros qu'un message
 
     def test_a_failed_save_does_not_stop_the_engine(self):
         full = OSError(errno.ENOSPC, "No space left on device")
@@ -2025,6 +2052,15 @@ class MetalinkTest(unittest.TestCase):
 
 
 class UtilTest(unittest.TestCase):
+    def test_a_message_too_big_for_chrome_never_cuts_the_channel(self):
+        small = b'{"type":"job"}'
+        self.assertIs(fit_for_chrome(small), small)
+        big = json.dumps({"type": "reply", "reqId": 7, "ok": True, "jobs": ["x" * (1 << 20)]}).encode()
+        error = json.loads(fit_for_chrome(big))
+        self.assertEqual((error["reqId"], error["ok"]), (7, False), "la requête a sa réponse : une erreur")
+        self.assertIn("trop grosse", error["error"])
+        self.assertIsNone(fit_for_chrome(json.dumps({"type": "job", "job": "x" * (1 << 20)}).encode()))
+
     def test_sanitize_and_limits(self):
         self.assertEqual(util.sanitize_filename("a/b:c*?.mp4"), "a_b_c__.mp4")
         long = util.sanitize_filename("é" * 300 + ".mp4")

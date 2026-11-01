@@ -172,8 +172,8 @@ Good to know:
   (a web page instead of a file): nothing is saved, import it again as **Vidéo de la page**.
 - From the manager, PDM forwards each site's cookies (members-only files…). From the terminal it has no access
   to the browser: no cookies.
-- At most 200 links per import and 1 MB for the file: split a longer list. The manager only shows the last 300
-  downloads; beyond that, the start of the list would scroll out of view.
+- At most 1000 links per import and 1 MB for the file: split a longer list. The manager shows every download,
+  200 rows at a time (**Afficher plus** below the list).
 - The engine must be installed: without it there is no queue, and Chrome would start everything at once.
 
 ### The aria2-compatible API

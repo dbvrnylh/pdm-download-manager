@@ -20,6 +20,7 @@ from . import paths
 from .daemon import unix_address
 
 LAUNCHER = Path(__file__).resolve().parent.parent / "pdm-host"
+TO_CHROME_MAX = 1024 * 1024  # octets par message du programme natif vers Chrome : au-delà, il coupe le canal
 
 
 def read_message(stream):
@@ -34,6 +35,26 @@ def read_message(stream):
 def write_message(stream, data):
     stream.write(struct.pack("=I", len(data)) + data)
     stream.flush()
+
+
+def fit_for_chrome(data):
+    """Le message tel quel ; trop gros pour Chrome, une réponse d'erreur à sa place, ou None (rien).
+
+    Chrome coupe le canal sur un message de plus d'1 Mo : l'extension perdrait le
+    moteur, et la requête attendrait sa réponse jusqu'au délai. Le moteur découpe ce
+    qui peut grossir (voir Engine.job_page) ; ceci reste le filet.
+    """
+    if len(data) <= TO_CHROME_MAX:
+        return data
+    try:
+        message = json.loads(data)
+    except ValueError:
+        message = None
+    if isinstance(message, dict) and message.get("type") == "reply":
+        error = {"type": "reply", "reqId": message.get("reqId"), "ok": False,
+                 "error": f"réponse du moteur trop grosse pour Chrome ({len(data) // 1024} Ko)"}
+        return json.dumps(error).encode()
+    return None  # un événement : perdu, plutôt que la connexion
 
 
 def _try_connect():
@@ -101,6 +122,8 @@ def main():
     threading.Thread(target=chrome_to_daemon, daemon=True).start()
     try:
         for line in sock.makefile("rb"):
-            write_message(stdout, line.rstrip(b"\n"))
+            data = fit_for_chrome(line.rstrip(b"\n"))
+            if data is not None:
+                write_message(stdout, data)
     except (OSError, ValueError):
         pass

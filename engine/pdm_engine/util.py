@@ -92,7 +92,7 @@ def sanitize_filename(name, fallback="telechargement"):
     return _truncate_bytes(base, MAX_NAME_BYTES - len(ext.encode("utf-8"))).rstrip(". ") + ext
 
 
-MAX_LINKS = 200  # par import, comme extension/lib/linklist.js
+MAX_LINKS = 1000  # par import, comme extension/lib/linklist.js
 
 
 def parse_link_list(text):

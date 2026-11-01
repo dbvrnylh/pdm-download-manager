@@ -22,6 +22,7 @@ const REFRESH_MS = 1000;
 const SAMPLE_MS = 500;
 const HISTORY_LIMIT = 200;
 const RECONNECT_MS = 5000;
+const SHOWN_STEP = 200; // lignes affichées d'un coup ; « Afficher plus » montre les suivantes
 const MAX_LIST_BYTES = 1024 * 1024; // une liste de liens, pas un fichier quelconque
 const MAX_SHOWN_PROBLEMS = 5;
 const VERIFY_TIMEOUT = 3_600_000; // relire un très gros fichier sur un disque lent prend du temps
@@ -81,11 +82,16 @@ const samples = new Map(); // id Chrome → dernière mesure { bytes, time, spee
 
 const engine = new EngineClient();
 const engineJobs = new Map(); // id → tâche du moteur
+const removedJobs = new Set(); // retirés pendant le chargement des pages : une page plus ancienne ne les ramène pas
+let loadingJobs = false; // pages de la liste encore en route (voir loadJobs)
+let shown = SHOWN_STEP; // lignes affichées dans la vue en cours
 let engineState = 'connecting';
 let chromeItems = [];
 
 const listEl = document.getElementById('downloads');
 const emptyEl = document.getElementById('empty');
+const moreEl = document.getElementById('more');
+const moreButton = document.getElementById('show-more');
 const errorEl = document.getElementById('error');
 const summaryEl = document.getElementById('summary');
 const bannerEl = document.getElementById('engine-banner');
@@ -245,7 +251,7 @@ function render() {
   // seconde à l'autre. Tout reconstruire ferait clignoter la page et perdre
   // un clic en cours.
   const seen = new Set();
-  visible.forEach((entry, index) => {
+  visible.slice(0, shown).forEach((entry, index) => {
     seen.add(entry.key);
     let row = rows.get(entry.key);
     if (!row) {
@@ -262,6 +268,9 @@ function render() {
     }
   }
   emptyEl.hidden = visible.length > 0;
+  const rest = visible.length - shown;
+  moreEl.hidden = rest <= 0;
+  moreButton.textContent = `Afficher ${Math.min(rest, SHOWN_STEP)} de plus (${rest} autres)`;
   renderSummary(entries);
 }
 
@@ -574,6 +583,7 @@ function createChips() {
     node.append(count);
     node.addEventListener('click', () => {
       view.category = filter.id;
+      shown = SHOWN_STEP;
       render();
     });
     chips.set(filter.id, { node, count });
@@ -620,14 +630,36 @@ async function connectEngine() {
   try {
     const info = await engine.connect();
     engineJobs.clear();
+    removedJobs.clear();
     for (const job of info.jobs) engineJobs.set(job.id, job);
     showPower(info.power);
     setEngineState('ok');
+    loadJobs(info.next).catch((err) => showError(`Liste incomplète : ${err.message}`));
   } catch (err) {
     setEngineState('missing', err.message);
     setTimeout(connectEngine, RECONNECT_MS);
   }
   scheduleRender();
+}
+
+// Le moteur envoie sa liste par pages, du plus récent au plus ancien : un message vers
+// Chrome est limité à 1 Mo. La première vient avec « hello », les suivantes d'ici, jusqu'au
+// bout. Une page ne remplace jamais ce qu'un événement a déjà apporté : il est plus récent.
+async function loadJobs(next) {
+  loadingJobs = Boolean(next);
+  try {
+    while (next) {
+      const reply = await engine.request({ type: 'list', after: next });
+      for (const job of reply.jobs) {
+        if (!engineJobs.has(job.id) && !removedJobs.has(job.id)) engineJobs.set(job.id, job);
+      }
+      next = reply.next;
+      scheduleRender();
+    }
+  } finally {
+    loadingJobs = false;
+    if (importDialog.open && !importing) renderImportPreview();
+  }
 }
 
 function setEngineState(state, message = '') {
@@ -684,7 +716,10 @@ document.getElementById('power-cancel').addEventListener('click', () => setWhenD
 engine.on((event) => {
   if (event.type === 'power') showPower(event.power, event.error);
   if (event.type === 'job') engineJobs.set(event.job.id, event.job);
-  else if (event.type === 'removed') engineJobs.delete(event.id);
+  else if (event.type === 'removed') {
+    engineJobs.delete(event.id);
+    removedJobs.add(event.id);
+  }
   else if (event.type === 'disconnected') {
     setEngineState('missing', event.error);
     setTimeout(connectEngine, RECONNECT_MS);
@@ -729,6 +764,12 @@ setInterval(refreshChrome, REFRESH_MS);
 
 document.getElementById('status-filter').addEventListener('change', (event) => {
   view.status = event.target.value;
+  shown = SHOWN_STEP;
+  render();
+});
+
+moreButton.addEventListener('click', () => {
+  shown += SHOWN_STEP;
   render();
 });
 
@@ -789,6 +830,7 @@ function importPlan() {
 
 function importBlocker(plan) {
   if (engineState !== 'ok') return 'Le moteur PDM est nécessaire : c’est lui qui gère la file d’attente.';
+  if (loadingJobs) return 'Chargement de la liste des téléchargements… (pour repérer les liens déjà ajoutés)';
   if (plan.fresh.length > MAX_LINKS) return `${MAX_LINKS} liens au maximum par import : découpe ta liste en plusieurs fois.`;
   return '';
 }
