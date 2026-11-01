@@ -104,6 +104,7 @@ const verifyInput = document.getElementById('verify-input');
 const verifyResult = document.getElementById('verify-result');
 const verifySubmit = document.getElementById('verify-submit');
 let verifiedId = null; // téléchargement affiché dans la fenêtre « Vérifier »
+let copiedSum = null; // SHA-256 pris par « Copier », tant que la page garde la main
 
 // ─── Modèle : de chaque source vers une « entrée » commune ─────────────────
 
@@ -794,6 +795,7 @@ importDialog.addEventListener('cancel', (event) => {
 
 function openVerify(id) {
   verifiedId = id;
+  copiedSum = null;
   verifyInput.value = '';
   verifySubmit.disabled = false;
   renderVerify();
@@ -822,6 +824,15 @@ function renderVerify() {
 
 document.getElementById('verify-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  // La somme que PDM vient de calculer, recollée : comparé à lui-même, le
+  // fichier correspondrait toujours, et la ligne afficherait « ✓ vérifié ».
+  if (copiedSum && verifyInput.value.toLowerCase().includes(copiedSum)) {
+    verifyResult.textContent =
+      'C’est la somme que PDM vient de calculer : comparée à elle-même, elle correspond toujours. ' +
+      'Colle celle publiée par le site d’où vient le fichier.';
+    verifyResult.dataset.state = 'bad';
+    return;
+  }
   verifySubmit.disabled = true;
   verifyResult.textContent = 'Vérification…';
   verifyResult.dataset.state = '';
@@ -842,6 +853,7 @@ document.getElementById('verify-copy').addEventListener('click', async () => {
   if (!sha256) return;
   try {
     await navigator.clipboard.writeText(sha256);
+    copiedSum = sha256;
     verifyResult.textContent = 'SHA-256 copié.';
     verifyResult.dataset.state = '';
   } catch (err) {
@@ -850,6 +862,12 @@ document.getElementById('verify-copy').addEventListener('click', async () => {
 });
 
 document.getElementById('verify-close').addEventListener('click', () => verifyDialog.close());
+
+// Copier sert aussi à chercher la somme sur le site (Ctrl+F). Au retour, une
+// somme identique peut venir de là-bas : seul un collage sans détour est refusé.
+window.addEventListener('blur', () => {
+  copiedSum = null;
+});
 
 createChips();
 refreshChrome();

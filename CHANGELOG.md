@@ -24,6 +24,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 - "Vérifier…" on a finished download: shows its SHA-256 (with a copy button) and compares the file, read again as
   it is on the disk, with a pasted SHA-256, SHA-512, SHA-1 or MD5. The manager shows the result on the row
   ("✓ vérifié (SHA-256 de la page)", "✗ ne correspond pas…").
+  The SHA-256 taken with the copy button and pasted straight back is refused: compared with itself, a file always
+  matches. Once the user has been to another window (the site, to search for it), the same value is accepted.
 - Import a list of links (one per line) from the manager — **Importer une liste…**, from a `.txt` file or
   pasted — or from the terminal with `pdm-host add --file links.txt`. A preview shows the links kept,
   duplicates, links already in the manager with the same type and every rejected line with its reason;
