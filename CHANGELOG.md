@@ -194,6 +194,9 @@ versions follow [Semantic Versioning](https://semver.org/).
   certificate.
 
 ### Fixed
+- A failed save of the download list (disk full, drive unplugged) stopped the engine's heartbeat for good:
+  progress, the time window and the countdown before sleep froze until a restart. It is now logged once and
+  tried again at the next beat.
 - Pausing or canceling a download whose server had stopped sending took up to 30 seconds: closing a
   response doesn't wake a read waiting on its socket, which waited for the network timeout. The socket
   is now shut down, which wakes it at once (under 2 seconds in the test, 29 before).

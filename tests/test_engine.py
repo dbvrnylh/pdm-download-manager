@@ -38,6 +38,7 @@ os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
 from pdm_engine import checksum, daemon, finish, httpdl, metalink, paths, rpc, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
+from pdm_engine import engine as engine_mod  # noqa: E402
 from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
 from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
 from pdm_engine.limiter import Limiter  # noqa: E402
@@ -973,6 +974,20 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(calls, ["suspend"])
         states = [e["power"] for e in self.events if e["type"] == "power"]
         self.assertIn({"action": "poweroff", "at": None}, states, "l'interface suit l'état")
+
+    def test_a_failed_save_does_not_stop_the_engine(self):
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with unittest.mock.patch.object(engine_mod, "write_json_atomic", side_effect=full) as write:
+            self.add("/range/small.zip", paused=True)
+            self.engine.save()  # sans lever
+            deadline = time.time() + 10
+            while write.call_count < 3 and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertGreaterEqual(write.call_count, 3, "retentée au battement suivant")
+            self.assertTrue(self.engine.ticker.is_alive(), "le battement continue")
+            self.assertTrue(self.engine.dirty)
+        self.engine.save()
+        self.assertEqual((self.engine.dirty, self.engine.save_error), (False, None))
 
     def test_cookies_follow_same_host_redirect_only(self):
         job = self.engine.add({"url": self.base + "/redirect/cookies", "cookies": "session=secret"})

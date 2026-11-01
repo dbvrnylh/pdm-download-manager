@@ -131,6 +131,7 @@ class Engine:
         self.power_at = None
         self.dirty = False
         self.last_save = 0.0
+        self.save_error = None  # la dernière sauvegarde a échoué : pourquoi
         # Limite de vitesse : un seau pour tout le moteur HTTP, et une part fixe
         # pour chaque yt-dlp (processus à part, qui ne peut pas y puiser).
         self.limiter = Limiter(self._http_rate)
@@ -158,16 +159,33 @@ class Engine:
             self.jobs[job.id] = job
 
     def start(self):
-        threading.Thread(target=self._ticker, daemon=True, name="ticker").start()
+        self.ticker = threading.Thread(target=self._ticker, daemon=True, name="ticker")
+        self.ticker.start()
         self.schedule()
 
     def save(self):
+        """Écrit la liste. Un échec (disque plein, débranché) est journalisé, et retenté au battement suivant.
+
+        Il ne remonte pas : le battement (_ticker) qui sauvegarde aussi fait avancer
+        l'affichage, la plage horaire et la veille ; s'il mourait, tout se figerait.
+        """
         with self.save_lock:
             with self.lock:
                 data = [job.to_dict() for job in self.jobs.values()]
                 self.dirty = False
                 self.last_save = time.monotonic()
-            write_json_atomic(paths.jobs_path(), data)  # 0600 : contient des cookies
+            try:
+                write_json_atomic(paths.jobs_path(), data)  # 0600 : contient des cookies
+            except OSError as e:
+                with self.lock:
+                    self.dirty = True
+                if self.save_error is None:  # une fois par panne, pas à chaque battement
+                    log.warning("liste des téléchargements non sauvegardée : %s", e)
+                self.save_error = str(e)
+            else:
+                if self.save_error is not None:
+                    log.info("liste des téléchargements de nouveau sauvegardée")
+                self.save_error = None
 
     def public_jobs(self):
         with self.lock:
