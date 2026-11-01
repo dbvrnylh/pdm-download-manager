@@ -14,8 +14,9 @@ Principe (celui d'IDM) :
    comparé à la fin aux sommes attendues (serveur, page, utilisateur).
 6. Miroirs : quand le serveur en annonce (metalink.py) et qu'une somme attendue
    permettra de vérifier le tout, chaque connexion choisit, à chaque segment, le
-   serveur le plus rapide mesuré (comme le « feedback » d'aria2). Un miroir
-   inconnu n'est essayé que quand ça vaut le coup (voir _candidates).
+   serveur le plus rapide mesuré (comme le « feedback » d'aria2), et une fois par
+   seconde, une connexion peut lâcher son segment pour en changer (voir
+   _rebalance). Un miroir inconnu n'est essayé que quand ça vaut le coup.
 7. Avec les sommes de chaque morceau (document Metalink), un morceau faux est
    retéléchargé seul, et le miroir qui l'avait envoyé est écarté.
 """
@@ -72,6 +73,7 @@ VERIFYING = "Vérification…"
 SYNC_EVERY = 5.0  # s entre deux points de reprise sûrs (fdatasync) : au pire, autant à refaire
 HASH_EVERY = 0.2  # s entre deux coups d'œil du calcul des sommes, quand il a rattrapé le téléchargement
 MIRROR_AFTER = 10.0  # s restantes : en dessous, essayer un miroir inconnu coûterait plus qu'il ne rapporte
+FASTER = 1.5  # un serveur au moins 1,5 fois plus rapide par connexion attire une connexion d'un autre
 MAX_REPAIRS = 3  # tours de réparation de morceaux faux : au-delà, le fichier entier est refusé
 REPAIRING = "Réparation…"
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) PDM/2.0"
@@ -361,16 +363,18 @@ class Source:
 
 
 class Segment:
-    __slots__ = ("start", "end", "pos", "active", "resp", "source", "since", "origin", "moved", "kicked", "kicks")
+    __slots__ = ("start", "end", "pos", "active", "resp", "source", "since", "origin", "moved", "kicked", "kicks",
+                 "moving")
 
     def __init__(self, start, end, pos):
         self.start, self.end, self.pos = start, end, pos  # end inclus ; None = inconnu
         self.active = False
         # Sa connexion en cours (voir HttpDownload._watch) : la réponse et son adresse,
         # quand et à quelle position elle a commencé, la dernière fois qu'elle a reçu
-        # quelque chose, et si elle vient d'être coupée exprès (combien de fois en tout).
+        # quelque chose, si elle vient d'être coupée exprès (combien de fois en tout),
+        # et si c'est pour changer de serveur (voir _rebalance).
         self.resp, self.source, self.since, self.origin, self.moved = None, None, 0.0, pos, 0.0
-        self.kicked, self.kicks = False, 0
+        self.kicked, self.kicks, self.moving = False, 0, False
 
     def rate(self, now, grace=SLOW_GRACE):
         """Vitesse de sa connexion depuis son ouverture (octets/s), ou None : trop tôt pour juger."""
@@ -784,6 +788,7 @@ class HttpDownload:
         synced = time.monotonic()
         while not done.wait(WATCH_EVERY):
             self._kick_slow()
+            self._rebalance()
             if time.monotonic() - synced >= SYNC_EVERY:
                 self.checkpoint()
                 synced = time.monotonic()
@@ -860,6 +865,41 @@ class HttpDownload:
             hang_up(resp)  # sa lecture échoue, et _fetch la rouvre
         if responses:
             log.info("%s : %d connexion(s) trop lente(s) rouverte(s)", self.job.filename, len(responses))
+
+    def _rebalance(self):
+        """Fait changer de serveur une connexion, quand ça vaut le coup.
+
+        Une connexion ne choisit son serveur qu'en début de segment (voir
+        _candidates), et un segment peut durer tout le téléchargement : avec 8
+        connexions lentes, aucune n'en change jamais. À chaque coup d'œil, au plus
+        une lâche donc son segment, que la suivante reprend là où il en était, et
+        repart ailleurs : vers un miroir inconnu si le téléchargement doit encore
+        durer, ou vers un serveur nettement plus rapide par connexion (FASTER),
+        qui a de la place. Celle qui part est sur le serveur le plus lent.
+        """
+        if len(self.sources) < 2 or (self.limiter and self.limiter.rate()):
+            return
+        with self.lock:
+            live = [s for s in self.segments if s.resp is not None and not s.kicked and s.remaining() > 2 * CHUNK]
+            if not live or any(s.moving for s in live):
+                return  # une à la fois
+            usable = [s for s in self.sources if not s.dropped]
+            untried = [s for s in usable if s is not self.origin and s.rate is None]
+            measured = [s for s in usable if s.rate and self._has_room(s)]
+            slowest = min(live, key=lambda seg: seg.source.rate or 0)
+            best = max(measured, key=lambda s: s.rate, default=None)
+            explore = untried and not any(s.places for s in untried) and self._lasting()
+            better = best is not None and best is not slowest.source and best.rate > FASTER * (slowest.source.rate or 0)
+            if not explore and not better:
+                return
+            slowest.moving = True
+            resp = slowest.resp
+        hang_up(resp)  # sa lecture échoue, et _fetch rend le segment
+
+    def _has_room(self, source):
+        """Ce serveur prendrait-il une connexion de plus ? (sous verrou ; au mieux de ce qu'on sait)"""
+        limit = self.hosts.limit(source.site)
+        return limit is None or source.places < limit
 
     def _next_segment(self):
         with self.lock:
@@ -1093,7 +1133,12 @@ class HttpDownload:
                 break
             with self.lock:
                 kicked, seg.kicked = seg.kicked, False
+                moving, seg.moving = seg.moving, False
             mirror = source is not self.origin
+            if moving or (kicked and not mirror and len(self.sources) > 1):
+                # Lâchée pour changer de serveur (voir _rebalance), ou trop lente avec
+                # des miroirs pour la relayer : le segment reste à prendre, au plus rapide.
+                return True
             if kicked and not mirror:  # trop lente, coupée exprès (voir _kick_slow) : rouverte aussitôt
                 continue
             if not kicked and opening and self.job.resumable and is_refusal(error, accepted=True):
@@ -1123,6 +1168,7 @@ class HttpDownload:
         now = time.monotonic()
         with self.lock:
             seg.resp, seg.source, seg.since, seg.origin, seg.moved = resp, source, now, seg.pos, now
+            seg.moving = False
 
     def _detach(self, seg):
         now = time.monotonic()
@@ -1134,6 +1180,10 @@ class HttpDownload:
             got, age = seg.pos - seg.origin, now - seg.since
             if age >= 0.2 and got >= MIN_STEAL:
                 self.best_rate = max(self.best_rate, got / age)
+                if seg.source is not None:
+                    # Celle d'un serveur rapide finit souvent avant d'être mesurée par
+                    # _kick_slow : sans cela, le plus rapide resterait inconnu.
+                    seg.source.rate = got / age
             if got:
                 self.spans.append((seg.origin, seg.pos, seg.source))
             seg.resp = None

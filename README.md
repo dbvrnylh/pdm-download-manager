@@ -229,10 +229,11 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    address Chrome was redirected to: the extension also sends the address it started from, and the engine asks it
    again, one redirect at a time, stopping at the first that announces something. When an expected checksum will
    verify the whole file, PDM takes pieces from several of them: at the end of each segment, the connection moves
-   to the fastest server measured. An unknown mirror is tried one at a time, and only when the download should last
-   more than ten seconds or connections are waiting for a place: on a line the nearest mirror already fills, the
-   others get nothing. A mirror that does not serve a file of the same size, fails or lags is dropped; if the final
-   file does not match, the next try does without mirrors.
+   to the fastest server measured, and once a second, a connection on a server much slower than another that has
+   room leaves its segment to the next connection and moves there. An unknown mirror is tried one at a time, and
+   only when the download should last more than ten seconds or connections are waiting for a place: on a line the
+   nearest mirror already fills, the others get nothing. A mirror that does not serve a file of the same size,
+   fails or lags is dropped; if the final file does not match, the next try does without mirrors.
 9. The same server often announces a Metalink document (`.meta4`) with the checksum of each piece of the file
    (256 KB at LibreOffice). PDM then checks every piece while it computes the SHA-256, in the same read: a wrong
    piece is downloaded again alone, without the mirrors that had sent any byte of it, and the checksums start

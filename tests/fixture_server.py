@@ -15,6 +15,7 @@ Routes :
   /limited/N/NOM    comme /range, mais 503 au-delà de N connexions à la fois (limite par IP)
   /tortoise/NOM     comme /range, mais la connexion qui part du début du fichier est lente (64 Ko/s)
   /stall/NOM        comme /range, mais la connexion qui part du début se bloque après 64 Ko
+  /crawl/NOM        comme /range, mais chaque connexion est lente (64 Ko/s) : un serveur surchargé
   /digest/SORTE/NOM comme /range, avec la somme du fichier dans les en-têtes : repr (Repr-Digest),
                     rfc3230 (Digest), goog (x-goog-hash), wrong (Repr-Digest d'un autre fichier)
   /mirrorbrain/SORTE/NOM  302 vers /range/NOM, comme un serveur de miroirs : il annonce les sommes
@@ -22,6 +23,7 @@ Routes :
                     rel=duplicate). Sortes : celles de /mirror/ ; bare, les sommes sans miroir (une
                     redirection quelconque : à ignorer) ; nodigest, le miroir sans les sommes.
                     ?limited : vers /limited/1/NOM, un serveur d'origine qui n'accepte qu'une connexion ;
+                    ?crawl : vers /crawl/NOM, un serveur d'origine lent ;
                     ?meta4 : annonce aussi /meta4/SORTE/NOM (Link: rel=describedby, adresse relative)
   /meta4/SORTE/NOM  document Metalink 4 : taille, sommes, sommes SHA-1 des morceaux de 256 Ko, le miroir
                     /mirror/SORTE/NOM. Sorte lying : le miroir est bon, mais le document ment sur un morceau
@@ -102,7 +104,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._file(rest, ranges=True, flaky=True)
         if route == "unstable":
             return self._file(rest, ranges=True, unstable=True)
-        if route in ("tortoise", "stall"):  # une route lente, ou un serveur surchargé, pour une connexion
+        if route in ("tortoise", "stall", "crawl"):  # une route lente, ou un serveur surchargé
             return self._file(rest, ranges=True, lagging=route)
         if route == "digest":
             kind, _, name = rest.partition("/")
@@ -111,7 +113,7 @@ class Handler(SimpleHTTPRequestHandler):
             kind, _, name = rest.partition("/")
             data = FILES.get(name, b"")
             flags = set(self.path.partition("?")[2].split("&"))
-            target = f"limited/1/{name}" if "limited" in flags else f"range/{name}"
+            target = f"limited/1/{name}" if "limited" in flags else f"crawl/{name}" if "crawl" in flags else f"range/{name}"
             headers = [("Location", f"http://127.0.0.1:{self.server.server_port}/{target}")]
             if kind != "bare":
                 mirror = "good" if kind in ("nodigest", "lying") else kind
@@ -251,7 +253,7 @@ class Handler(SimpleHTTPRequestHandler):
             FLAKY_SEEN.add((start, name))
             cut = start + 300 * 1024
         pos, step = start, 32 * 1024
-        rate = SLOW_RATE if lagging and start == 0 else RATE
+        rate = SLOW_RATE if lagging == "crawl" or (lagging and start == 0) else RATE
         try:
             while pos <= end:
                 if cut is not None and pos >= cut:

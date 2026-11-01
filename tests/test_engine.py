@@ -458,6 +458,23 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(origin and all(cookie == "session=secret" for cookie in origin))
         self.assertEqual({cookie for _, cookie in mirror}, {None}, "la session du site ne va pas chez ses miroirs")
 
+    def test_connections_leave_a_slow_server_for_a_faster_mirror(self):
+        # Origine à 64 Ko/s par connexion : 24 Mo prendraient 47 s. Le miroir, 32 fois plus rapide, les attire.
+        fx.HOSTS.clear()
+        start = time.time()
+        job = self.add("/mirrorbrain/good/big.bin?crawl")
+        sources = 0
+        while job.status in ("queued", "downloading") and time.time() - start < 40:
+            sources = max(sources, job.sources)
+            time.sleep(0.05)
+        job = self.wait(job.id, {"completed", "failed"})
+        elapsed = time.time() - start
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(sha(job.path), self.hashes["big.bin"])
+        self.assertEqual(sources, 2)
+        self.assertGreaterEqual(len(self.mirror_requests("good", "big.bin")), 4, "plusieurs connexions ont migré")
+        self.assertLess(elapsed, 12, f"{elapsed:.1f} s : les connexions sont restées sur le serveur lent")
+
     def test_a_fast_server_keeps_a_short_download_to_itself(self):
         # Un miroir inconnu coûterait plus qu'il ne rapporterait : le fichier est là dans la seconde.
         fx.HOSTS.clear()

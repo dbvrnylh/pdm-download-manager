@@ -14,12 +14,16 @@ versions follow [Semantic Versioning](https://semver.org/).
   something (never as far as the final server, which may have no room for one more connection). Each connection
   picks, at the end of each segment, the fastest server measured (aria2's "feedback" selector); an unknown mirror
   is tried one at a time, only when the download should last more than 10 s or connections are waiting for a place
-  (an origin that limits connections per IP). On a line the nearest mirror already fills, nothing changes: measured
-  on LibreOffice's 212 MB tarball, 53–56 MB/s with mirrors against 51–52 MB/s without, where spreading connections
-  evenly had given 31–48 MB/s. A mirror whose file has another size, that fails or lags is dropped; one that sends
-  another file of the same size is caught by the checksum, and the next try does without mirrors. Mirrors never get
-  the site's cookies, never get `If-Range` (their ETags differ), and an `http://` mirror listed over `https://` is
-  ignored. The manager shows "N serveurs" while several send the file.
+  (an origin that limits connections per IP). A segment can last the whole download, so once a second at most one
+  connection also leaves its segment (the next connection picks it up where it was) to move: to a server at least
+  1.5 times faster per connection that has room, or to an unknown mirror while the download should last. On a line
+  the nearest mirror already fills, nothing changes: measured on LibreOffice's 212 MB tarball, 53–56 MB/s with
+  mirrors against 51–52 MB/s without, where spreading connections evenly had given 31–48 MB/s. Kiwix's 114 MB file
+  taken from the browser, whose first mirror was slow: 21.7 s from it alone, 6.2 s with the others (2 to 3 servers
+  at once). A mirror whose file has another size, that fails or lags is dropped; one that sends another file of the
+  same size is caught by the checksum, and the next try does without mirrors. Mirrors never get the site's cookies,
+  never get `If-Range` (their ETags differ), and an `http://` mirror listed over `https://` is ignored. The manager
+  shows "N serveurs" while several send the file.
 - Wrong pieces are downloaded again, alone. When the mirror server also announces a Metalink document (`.meta4`,
   RFC 5854: LibreOffice's gives a SHA-1 for each 256 KB piece), the engine checks every piece while it computes
   the file's checksum, in the same pass. A wrong piece is carved out and downloaded again, without the mirrors that
