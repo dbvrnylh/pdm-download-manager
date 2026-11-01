@@ -14,7 +14,7 @@ import { EngineClient } from '../lib/engine.js';
 import { basename, filenameFromUrl } from '../lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../lib/format.js';
 import { PRESETS, httpJob, videoJob } from '../lib/jobs.js';
-import { MAX_LINKS, parseLinkList } from '../lib/linklist.js';
+import { MAX_LINKS, formatEntry, parseLinkList } from '../lib/linklist.js';
 import { inWindow } from '../lib/schedule.js';
 import { markBypass } from '../lib/store.js';
 
@@ -824,8 +824,10 @@ function importPlan() {
   const kind = importKind.value === 'video' ? 'ytdlp' : 'http';
   const same = (job) => job.kind === kind && (kind === 'http' || (job.preset ?? 'best') === importQuality.value);
   const known = new Set([...engineJobs.values()].filter(same).map((job) => job.url));
-  const fresh = parsed.urls.filter((url) => !known.has(url));
-  return { ...parsed, fresh, known: parsed.urls.length - fresh.length };
+  const fresh = parsed.entries.filter((entry) => !known.has(entry.urls[0]));
+  // Une page vidéo n'a ni miroirs ni options d'aria2 : signalé, puis laissé de côté.
+  const extras = kind === 'ytdlp' && fresh.some((entry) => entry.urls.length > 1 || Object.keys(entry.options).length);
+  return { ...parsed, fresh, extras, known: parsed.entries.length - fresh.length };
 }
 
 function importBlocker(plan) {
@@ -851,6 +853,9 @@ function renderImportPreview(before = []) {
     if (plan.invalid.length) {
       nodes.push(problemList(plan.invalid.map(({ line, text, reason }) => `Ligne ${line} : ${reason} (${shorten(text)})`)));
     }
+    const notes = plan.warnings.map(({ line, reason }) => `Ligne ${line} : ${reason}`);
+    if (plan.extras) notes.push('Miroirs et options ignorés : ce sont des pages vidéo.');
+    if (notes.length) nodes.push(problemList(notes, 'notes'));
   }
   const blocker = importBlocker(plan);
   if (blocker) nodes.push(el('p', 'blocked', blocker));
@@ -859,8 +864,8 @@ function renderImportPreview(before = []) {
   importSubmit.textContent = plan.fresh.length ? `Ajouter ${plural(plan.fresh.length, 'téléchargement')}` : 'Ajouter';
 }
 
-function problemList(lines) {
-  const list = el('ul', 'problems');
+function problemList(lines, className = 'problems') {
+  const list = el('ul', className);
   for (const line of lines.slice(0, MAX_SHOWN_PROBLEMS)) list.append(el('li', '', line));
   if (lines.length > MAX_SHOWN_PROBLEMS) list.append(el('li', '', `… et ${lines.length - MAX_SHOWN_PROBLEMS} autres`));
   return list;
@@ -875,21 +880,24 @@ async function importLinks() {
   importSubmit.disabled = true;
   importClose.disabled = true;
   const refused = [];
-  for (const [index, url] of plan.fresh.entries()) {
+  for (const [index, entry] of plan.fresh.entries()) {
     if (!engine.connected) {
-      refused.push(...plan.fresh.slice(index).map((rest) => ({ url: rest, error: 'moteur déconnecté' })));
+      refused.push(...plan.fresh.slice(index).map((rest) => ({ entry: rest, error: 'moteur déconnecté' })));
       break;
     }
     importPreview.replaceChildren(el('p', '', `Ajout ${index + 1} / ${plan.fresh.length}…`));
+    const [url, ...mirrors] = entry.urls;
     try {
-      const job =
-        importKind.value === 'video'
-          ? await videoJob(url, { preset: importQuality.value })
-          : await httpJob(url, { source: 'list' });
+      let job;
+      if (importKind.value === 'video') job = await videoJob(url, { preset: importQuality.value });
+      else {
+        // Les options d'aria2 (out=, checksum=…) sont traduites par le moteur, comme celles de son API.
+        job = { ...(await httpJob(url, { source: 'list' })), mirrors, options: entry.options };
+      }
       if (importLater.checked) job.scheduled = true; // n'avancera que pendant la plage horaire
       await engine.request({ type: 'add', job });
     } catch (err) {
-      refused.push({ url, error: err.message });
+      refused.push({ entry, error: err.message });
     }
   }
   importing = false;
@@ -899,8 +907,8 @@ async function importLinks() {
     importDialog.close();
     return;
   }
-  // Les liens refusés restent dans la zone : on peut les corriger et réessayer.
-  importText.value = refused.map((r) => r.url).join('\n');
+  // Les liens refusés restent dans la zone, avec leurs miroirs et options : on peut les corriger et réessayer.
+  importText.value = refused.map((r) => formatEntry(r.entry)).join('\n');
   renderImportPreview([
     el('p', '', `${plural(plan.fresh.length - refused.length, 'téléchargement ajouté', 'téléchargements ajoutés')} à la file.`),
     el(
@@ -908,7 +916,7 @@ async function importLinks() {
       'blocked',
       `${plural(refused.length, 'lien refusé', 'liens refusés')} par le moteur. ${refused.length > 1 ? 'Ils restent' : 'Il reste'} ci-dessus pour réessayer :`,
     ),
-    problemList(refused.map((r) => `${shorten(r.url)} : ${r.error}`)),
+    problemList(refused.map((r) => `${shorten(r.entry.urls[0])} : ${r.error}`)),
   ]);
 }
 

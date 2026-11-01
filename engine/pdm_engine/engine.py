@@ -17,7 +17,7 @@ import time
 import uuid
 from urllib.parse import quote
 
-from . import checksum, finish, httpdl, metalink, paths
+from . import aria2, checksum, finish, httpdl, metalink, paths
 from .config import LIMITS, MAX_SPEED, MIN_SPEED, QUALITIES
 from .hosts import Hosts
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
@@ -229,6 +229,11 @@ class Engine:
         url = (spec.get("url") or "").strip()
         if not re.match(r"^https?://", url, re.I):
             raise ValueError("adresse invalide (http ou https uniquement)")
+        if spec.get("options"):
+            # Les options d'aria2 d'une liste importée (voir aria2.parse_list) : ce qu'elles
+            # disent l'emporte. Celles que PDM ne suit pas ont déjà été signalées à la lecture.
+            fields, _ = aria2.to_spec(spec["options"], self.config.download_dir(), strict=False)
+            spec = {**spec, **fields}
         if len(url) > MAX_URL or len(spec.get("referer") or "") > MAX_URL:
             raise ValueError(f"adresse de plus de {MAX_URL // 1024} Ko")
         kind = spec.get("kind") or "http"

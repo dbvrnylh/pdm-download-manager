@@ -80,6 +80,12 @@
             Une page vidéo importée en « Fichier » passe en échec, sans rien enregistrer.
           </li>
           <li>
+            <strong>Le format des listes d’aria2</strong> marche aussi : des miroirs du même fichier sur une ligne,
+            séparés par une tabulation ; ses options en dessous, en retrait (<code>out=nom.iso</code>,
+            <code>checksum=sha-256=…</code>, <code>header=…</code>, <code>split=4</code>…) ; une séquence
+            <code>photo[001-120].jpg</code> pour 120 fichiers, <code>{dl1,dl2}</code> pour des miroirs.
+          </li>
+          <li>
             Un lien en double, ou déjà dans le gestionnaire avec le même type et la même qualité, n’est ajouté
             qu’une fois.
             Avant l’ajout, PDM t’indique ce qu’il a compris de ta liste et les lignes refusées.

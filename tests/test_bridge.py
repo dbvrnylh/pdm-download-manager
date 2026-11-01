@@ -285,6 +285,44 @@ esac
         self.assertTrue(chrome.request({"type": "config", "set": {"rpc": False}})["ok"])
         self.assertEqual(ws.closed_with(), 1001, "API désactivée : connexions fermées")
 
+    def test_cli_imports_a_list_written_for_aria2(self):
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+        hashes = {name: fx.make_file(name, 300 * 1024) for name in ("serie-08.bin", "serie-09.bin", "serie-10.bin")}
+        mirror = self.base.replace("127.0.0.1", "localhost") + "/mirror/good/list-a.bin"
+        links = self.downloads.parent / "aria2.txt"
+        links.parent.mkdir(parents=True, exist_ok=True)
+        links.write_text("\n".join([
+            "# écrite pour aria2 -i",
+            f"{self.base}/range/list-a.bin\t{mirror}",
+            "  out=renomme.bin",
+            f"  checksum=sha-256={hashlib.sha256(fx.FILES['list-a.bin']).hexdigest()}",
+            "  dir=/srv/ailleurs",
+            "  max-tries=5",
+            "  frobnicate=1",
+            f"{self.base}/range/serie-[08-10].bin",
+            "  max-download-limit=1M",
+        ]) + "\n")
+        done = subprocess.run([str(HOST), "add", "--file", str(links)], capture_output=True, text=True,
+                              env=self.env, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Ligne 5 : dir ignoré", done.stdout)
+        self.assertIn("Ligne 7 : option inconnue, ignorée : frobnicate", done.stdout)
+        self.assertIn("4 ajouté(s)", done.stdout)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            jobs = {j["url"].rsplit("/", 1)[1]: j for j in chrome.request({"type": "list"})["jobs"]}
+            if len(jobs) == 4 and all(j["status"] == "completed" for j in jobs.values()):
+                break
+            time.sleep(0.2)
+        first = jobs["list-a.bin"]
+        self.assertEqual((first["status"], Path(first["path"]).name, first["verified"]),
+                         ("completed", "renomme.bin", True))
+        for name, digest in hashes.items():
+            job = jobs[name]
+            self.assertEqual((job["status"], job["speedLimit"]), ("completed", 1024 * 1024))
+            self.assertEqual(hashlib.sha256(Path(job["path"]).read_bytes()).hexdigest(), digest)
+
     def test_the_managers_commands_reach_the_engine(self):
         chrome = self.connect()
         chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})

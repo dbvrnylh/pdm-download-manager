@@ -97,37 +97,49 @@ def _parse_add(args):
 
 
 def _add_list(source, kind, quality, later):
-    """pdm-host add --file LISTE [--video] [--quality Q] [--later] : un lien par ligne, « - » pour l'entrée standard."""
-    from .util import MAX_LINKS, parse_link_list
+    """pdm-host add --file LISTE [--video] [--quality Q] [--later] : un lien par ligne, « - » pour l'entrée standard.
+
+    Au format du fichier d'entrée d'aria2 (-i) : miroirs séparés par une tabulation,
+    options en retrait (out=, checksum=…), séquences [1-10] (voir aria2.parse_list).
+    """
+    from .aria2 import parse_list
+    from .util import MAX_LINKS
 
     try:
         text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         sys.exit(f"Impossible de lire {source} : {e.strerror}")
 
-    urls, invalid, duplicates = parse_link_list(text)
-    for number, line, reason in invalid:
-        print(f"Ligne {number} ignorée : {reason} ({line})")
+    parsed = parse_list(text)
+    entries, invalid, duplicates = parsed["entries"], parsed["invalid"], parsed["duplicates"]
+    for problem in invalid:
+        print(f"Ligne {problem['line']} ignorée : {problem['reason']} ({problem['text']})")
+    for problem in parsed["warnings"]:
+        print(f"Ligne {problem['line']} : {problem['reason']}")
+    if kind == "ytdlp" and any(len(e["urls"]) > 1 or e["options"] for e in entries):
+        print("Miroirs et options ignorés : ce sont des pages vidéo.")
     engine = _Connection()
     # Même lien, même type et, pour une vidéo, même qualité : une page refusée en
     # fichier peut revenir avec --video, et une vidéo en 480p après la 720p.
     wanted = (quality or engine.request({"type": "config"})["config"]["videoQuality"]) if kind == "ytdlp" else None
     known = {job["url"] for job in _all_jobs(engine)
              if job["kind"] == kind and (kind == "http" or (job.get("preset") or "best") == wanted)}
-    fresh = [url for url in urls if url not in known]
+    fresh = [entry for entry in entries if entry["urls"][0] not in known]
     if len(fresh) > MAX_LINKS:
         sys.exit(f"{len(fresh)} liens à ajouter : {MAX_LINKS} au maximum par import, découpe la liste.")
 
     refused = 0
-    for url in fresh:  # dans l'ordre du fichier : c'est l'ordre de la file d'attente
-        reply = engine.request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "list",
-                                                       "scheduled": later}})
+    for entry in fresh:  # dans l'ordre du fichier : c'est l'ordre de la file d'attente
+        job = {"url": entry["urls"][0], "kind": kind, "preset": quality, "source": "list", "scheduled": later}
+        if kind == "http":
+            job.update(mirrors=entry["urls"][1:], options=entry["options"])
+        reply = engine.request({"type": "add", "job": job})
         if not reply["ok"]:
             refused += 1
-            print(f"Refusé : {url} ({reply['error']})")
+            print(f"Refusé : {job['url']} ({reply['error']})")
     parts = [f"{len(fresh) - refused} ajouté(s)"]
-    if len(urls) > len(fresh):
-        parts.append(f"{len(urls) - len(fresh)} déjà dans la liste")
+    if len(entries) > len(fresh):
+        parts.append(f"{len(entries) - len(fresh)} déjà dans la liste")
     if duplicates:
         parts.append(f"{duplicates} doublon(s)")
     if invalid:

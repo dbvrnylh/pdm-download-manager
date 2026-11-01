@@ -395,6 +395,15 @@ code {
   color: var(--muted);
 }
 
+/* Options ignorées (dir, inconnues) : dites, sans bloquer l'ajout. */
+.import-preview .notes {
+  margin-bottom: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .import-preview .blocked,
 .import-preview .problems {
   color: var(--danger);

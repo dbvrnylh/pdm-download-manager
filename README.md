@@ -143,6 +143,27 @@ https://example.org/course/chapter-2.pdf
 https://example.org/course/appendix.zip
 ```
 
+Lists written for aria2 (`aria2c -i`) work as they are: mirrors of the same file on one line, separated by a
+tab; its options below it, indented; and sequences.
+
+```text
+https://example.org/fedora.iso	https://mirror.example/fedora.iso
+  out=fedora-42.iso
+  checksum=sha-256=…
+  header=Authorization: Bearer …
+https://example.org/photos/img[001-120].jpg
+https://{dl1,dl2}.example.org/archive.zip
+```
+
+- Options followed: `out`, `checksum`, `header` (repeated), `referer`, `user-agent`, `pause`, `split`,
+  `max-connection-per-server`, `max-download-limit`, with the same meaning as in the
+  [JSON-RPC API](#the-aria2-compatible-api). Those about how to download (`max-tries`, `continue`…) are left to
+  PDM. `dir` and unknown options are ignored, and said so in the preview: files go to PDM's folder, by category.
+- `[001-120]` makes one download per number (leading zeros set the width, `[0-100:5]` steps by 5, `[a-z]` works
+  too); `{dl1,dl2}` makes mirrors of the same file, up to 4. Unencoded brackets and braces are not allowed in a
+  URL, so such a pattern can only be meant as one (an IPv6 address like `[::1]` is left alone).
+- Mirrors are only used when a checksum can verify the whole file, as with those a server announces.
+
 Then either:
 
 - **Manager** → **Importer une liste…** → **Charger un fichier .txt…** (or paste the links into the box) →
@@ -153,8 +174,8 @@ Then either:
 What actually happens:
 
 1. **PDM reads the list and shows you how it understood it** before adding anything: the links it kept,
-   duplicates, links already in the manager, and every rejected line with its number and the reason
-   (`il manque https:// au début`, `un seul lien par ligne`…).
+   duplicates, links already in the manager, every rejected line with its number and the reason
+   (`il manque https:// au début`, `séquence de plus de 1000 liens`…), and the options it ignores.
 2. **Each link becomes a queued download**, in the order of the list. Nothing special happens in the engine:
    it is the same as adding the links one by one by hand.
 3. **The queue does the rest.** PDM downloads as many files at once as the **Téléchargements simultanés**
@@ -431,6 +452,7 @@ engine/
                            checksum.py (expected and computed checksums) · metalink.py (mirrors)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
                            rpc.py (aria2-compatible JSON-RPC API, HTTP and WebSocket)
+                           aria2.py (aria2 options, and lists in its input-file format)
                            finish.py (after a download: extraction, program, sleep or shutdown)
 tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh

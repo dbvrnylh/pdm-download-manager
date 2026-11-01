@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { detectMedia, totalSize } from '../extension/lib/media.js';
 import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
 import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
 import { PRESETS, isStreamUrl, directFilename, httpJob, videoJob } from '../extension/lib/jobs.js';
-import { MAX_LINKS, parseLinkList } from '../extension/lib/linklist.js';
+import { MAX_LINKS, formatEntry, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
 import { addMedia, getMedia } from '../extension/lib/store.js';
 import { inWindow } from '../extension/lib/schedule.js';
@@ -125,42 +126,26 @@ test('jobs: une page vidéo part sans les en-têtes du navigateur', async () => 
   delete globalThis.chrome;
 });
 
-test('linklist: un lien par ligne, dans l’ordre, commentaires et lignes vides ignorés', () => {
-  const text = '\uFEFF# Cours\r\nhttps://x.com/b.pdf\n\n   https://x.com/a.pdf  \r# fin\n';
-  assert.deepEqual(parseLinkList(text), { urls: ['https://x.com/b.pdf', 'https://x.com/a.pdf'], invalid: [], duplicates: 0 });
-});
+// Les mêmes cas que l'implémentation du moteur (engine/pdm_engine/aria2.py) : les deux
+// lecteurs de listes doivent s'accorder, au caractère près.
+const LINKLIST_CASES = JSON.parse(readFileSync(new URL('./linklist_cases.json', import.meta.url), 'utf8'));
 
-test('linklist: doublons comptés une fois, lignes refusées avec leur numéro et la raison', () => {
-  const text = [
-    'https://x.com/a.zip',
-    'HTTP://x.com/b.zip',
-    'https://x.com/a.zip',
-    'www.x.com/c.zip',
-    'ftp://x.com/d.zip',
-    'https://x.com/e.zip https://x.com/f.zip',
-    'https://',
-    'mailto:moi@x.com',
-  ].join('\n');
-  const { urls, invalid, duplicates } = parseLinkList(text);
-  assert.deepEqual(urls, ['https://x.com/a.zip', 'HTTP://x.com/b.zip']);
-  assert.equal(duplicates, 1);
-  assert.deepEqual(
-    invalid.map(({ line, reason }) => [line, reason]),
-    [
-      [4, 'il manque https:// au début'],
-      [5, 'seuls les liens http:// et https:// sont acceptés'],
-      [6, 'un seul lien par ligne'],
-      [7, 'adresse mal formée'],
-      [8, 'seuls les liens http:// et https:// sont acceptés'],
-    ],
-  );
-  assert.equal(invalid[0].text, 'www.x.com/c.zip');
-});
+for (const { name, text, expect } of LINKLIST_CASES) {
+  test(`linklist : ${name}`, () => {
+    assert.deepEqual(parseLinkList(text), expect);
+  });
+}
 
-test('linklist: liste vide et limite', () => {
-  assert.deepEqual(parseLinkList(''), { urls: [], invalid: [], duplicates: 0 });
+test('linklist : la limite d’un import s’applique à l’import, pas à la lecture', () => {
   const many = Array.from({ length: MAX_LINKS + 1 }, (_, i) => `https://x.com/${i}.bin`).join('\n');
-  assert.equal(parseLinkList(many).urls.length, MAX_LINKS + 1); // la limite est appliquée à l'import, pas à la lecture
+  assert.equal(parseLinkList(many).entries.length, MAX_LINKS + 1);
+});
+
+test('linklist : une entrée remise en texte se relit à l’identique', () => {
+  const text = 'https://x.com/f.iso\thttps://m.example/f.iso\n  out=f.iso\n  header=X-A: 1\n  header=X-B: 2';
+  const [entry] = parseLinkList(text).entries;
+  assert.equal(formatEntry(entry), text);
+  assert.deepEqual(parseLinkList(formatEntry(entry)).entries, [entry]);
 });
 
 // Même forme que le manifeste maître d'Arte : pistes audio séparées, variantes vidéo sans son.

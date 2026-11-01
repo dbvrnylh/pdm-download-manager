@@ -39,9 +39,9 @@ import threading
 import time
 import uuid
 
-from . import checksum, paths
+from . import aria2, paths
 from .httpdl import DownloadError
-from .util import sanitize_filename, write_json_atomic
+from .util import write_json_atomic
 
 log = logging.getLogger("pdm")
 
@@ -59,16 +59,9 @@ OUTBOX = 256  # trames en attente vers un client WebSocket : au-delà, il ne lit
 STATUS = {"queued": "waiting", "downloading": "active", "paused": "paused", "completed": "complete",
           "failed": "error", "canceled": "removed"}
 STOPPED = ("complete", "error", "removed")
-# Options d'aria2 propres à un téléchargement, que PDM suit (voir _job_options).
-JOB_OPTIONS = {"split", "max-connection-per-server", "max-download-limit"}
 # L'état où entre un téléchargement → la notification d'aria2 qui l'annonce.
 EVENTS = {"active": "aria2.onDownloadStart", "paused": "aria2.onDownloadPause", "removed": "aria2.onDownloadStop",
           "complete": "aria2.onDownloadComplete", "error": "aria2.onDownloadError"}
-# Options d'aria2 qui règlent la façon de télécharger, que PDM décide seul (connexions,
-# reprise, renommage, vérification) : acceptées et ignorées, plutôt que de refuser le lien.
-IGNORED = {"min-split-size", "continue", "max-tries", "retry-wait",
-           "timeout", "connect-timeout", "lowest-speed-limit", "allow-overwrite", "auto-file-renaming",
-           "remote-time", "check-integrity", "follow-metalink", "metalink-preferred-protocol"}
 # Les méthodes d'aria2 que PDM connaît (les autres : « méthode inconnue »).
 METHODS = ("addUri", "remove", "forceRemove", "pause", "forcePause", "pauseAll", "forcePauseAll", "unpause",
            "unpauseAll", "changePosition", "changeOption", "tellStatus", "getUris", "getFiles", "getPeers",
@@ -130,14 +123,6 @@ def _page(items, offset, num):
     if end < 0:
         return []
     return items[max(end - num + 1, 0):end + 1][::-1]
-
-
-def _speed(value):
-    """« 0 », « 512K », « 2M » (comme aria2) → octets/s."""
-    match = re.fullmatch(r"(\d+)([KkMm]?)", str(value).strip())
-    if not match:
-        raise RpcError(f"vitesse illisible : {value!r} (par exemple 0, 512K ou 2M)")
-    return int(match.group(1)) * {"": 1, "k": 1024, "m": 1024 ** 2}[match.group(2).lower()]
 
 
 class Api:
@@ -229,41 +214,9 @@ class Api:
         """
         if not isinstance(uris, list) or not uris or not all(isinstance(uri, str) for uri in uris):
             raise RpcError("uris : une liste d'adresses", -32602)
-        spec = {"url": uris[0], "mirrors": uris[1:], "source": "rpc", "position": position}
-        for key, value in _options(options).items():
-            if key == "out":
-                spec["filename"] = self._out(value)
-            elif key == "dir":
-                self._dir(value)
-            elif key == "referer":
-                spec["referer"] = value
-            elif key == "user-agent":
-                spec["userAgent"] = value
-            elif key == "header":
-                spec["headers"] = [_header(line) for line in (value if isinstance(value, list) else [value])]
-            elif key == "checksum":
-                spec["checksums"] = [dict(checksum.parse(value), source="user")]
-            elif key == "pause":
-                spec["paused"] = value == "true"  # en pause dès l'ajout
-            elif key in JOB_OPTIONS:
-                continue  # plus bas, ensemble
-            elif key not in IGNORED:
-                raise RpcError(f"option non prise en charge : {key}")
-        spec.update(_job_options(options))
+        fields, _ = aria2.to_spec(options, self.config.download_dir())  # strict : une option inconnue est refusée
+        spec = {"url": uris[0], "mirrors": uris[1:], "source": "rpc", "position": position, **fields}
         return gid(self.engine.add(spec).id)
-
-    @staticmethod
-    def _out(name):
-        """Un nom de fichier, pas un chemin : « ../.bashrc » ne sort pas du dossier de téléchargement."""
-        if "/" in name or "\\" in name or name.strip() in ("", ".", ".."):
-            raise RpcError(f"option out : un nom de fichier, sans dossier ({name!r})")
-        return sanitize_filename(name)
-
-    def _dir(self, value):
-        """PDM range les fichiers dans son dossier (par catégorie) : `dir` n'est accepté que s'il le désigne."""
-        mine = os.path.realpath(self.config.download_dir())
-        if os.path.realpath(os.path.expanduser(value)) != mine:
-            raise RpcError(f"option dir : PDM range les fichiers dans {mine} (à changer dans ses réglages)")
 
     # ─── Commandes ─────────────────────────────────────────────────────────
 
@@ -310,11 +263,11 @@ class Api:
 
     def changeOption(self, g, options):
         """Les connexions et la vitesse maximale d'un téléchargement, même en cours."""
-        unknown = set(_options(options)) - JOB_OPTIONS
+        unknown = set(aria2.check(options)) - aria2.JOB_OPTIONS
         if unknown:
             raise RpcError(f"option non prise en charge par changeOption : {', '.join(sorted(unknown))} "
-                           f"(seulement {', '.join(sorted(JOB_OPTIONS))})")
-        self.engine.set_options(self._job(g).id, _job_options(options))
+                           f"(seulement {', '.join(sorted(aria2.JOB_OPTIONS))})")
+        self.engine.set_options(self._job(g).id, aria2.job_options(options))
         return "OK"
 
     def removeDownloadResult(self, g):
@@ -345,13 +298,13 @@ class Api:
         names = {"max-concurrent-downloads": "maxParallel", "max-connection-per-server": "connections",
                  "split": "connections", "max-overall-download-limit": "speedLimit", "dir": "downloadDir"}
         changes = {}
-        for key, value in _options(options).items():
+        for key, value in aria2.check(options).items():
             if key not in names:
                 raise RpcError(f"option non prise en charge : {key}")
             if key == "dir":
                 changes["downloadDir"] = value
             elif key == "max-overall-download-limit":
-                changes["speedLimit"] = _speed(value)
+                changes["speedLimit"] = aria2.speed(value)
             elif not str(value).isdigit():
                 raise RpcError(f"{key} : un nombre entier")
             else:
@@ -453,41 +406,6 @@ class Api:
             if state == "error":
                 status.update(errorCode="1", errorMessage=job.error or "")
         return {key: value for key, value in status.items() if keys is None or key in keys}
-
-
-def _options(options):
-    """Les options d'un appel : des chaînes, et une liste pour « header »."""
-    if options is None:
-        return {}
-    if not isinstance(options, dict) or not all(
-            isinstance(v, str) or (k == "header" and isinstance(v, list) and all(isinstance(x, str) for x in v))
-            for k, v in options.items()):
-        raise RpcError("options : des chaînes de caractères", -32602)
-    return options
-
-
-def _job_options(options):
-    """split, max-connection-per-server, max-download-limit → maxConnections, speedLimit (vérifiés par le moteur).
-
-    Avec les deux premiers, aria2 ouvre au plus le plus petit : PDM aussi.
-    """
-    options = _options(options)
-    result = {}
-    counts = [options[key] for key in ("split", "max-connection-per-server") if key in options]
-    if counts:
-        if not all(value.isdigit() for value in counts):
-            raise RpcError("split, max-connection-per-server : des nombres entiers")
-        result["maxConnections"] = min(map(int, counts))
-    if "max-download-limit" in options:
-        result["speedLimit"] = _speed(options["max-download-limit"])
-    return result
-
-
-def _header(line):
-    name, sep, value = line.partition(":")
-    if not sep:
-        raise RpcError(f"en-tête illisible : {line[:40]!r} (forme « Nom: valeur »)")
-    return [name.strip(), value.strip()]  # vérifiés ensuite comme ceux du navigateur (httpdl.clean_headers)
 
 
 def _error(call_id, code, message):

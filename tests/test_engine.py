@@ -36,7 +36,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import checksum, daemon, finish, httpdl, metalink, paths, rpc, util  # noqa: E402
+from pdm_engine import aria2, checksum, daemon, finish, httpdl, metalink, paths, rpc, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine import engine as engine_mod  # noqa: E402
 from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
@@ -1015,6 +1015,19 @@ class EngineTest(unittest.TestCase):
             self.assertTrue(self.engine.dirty)
         self.engine.save()
         self.assertEqual((self.engine.dirty, self.engine.save_error), (False, None))
+
+    def test_aria2_options_of_an_imported_list_mean_what_they_mean_for_the_api(self):
+        job = self.add("/range/small.zip", paused=True, options={
+            "out": "renomme.zip", "checksum": "sha-256=" + self.hashes["small.zip"], "header": ["X-Jeton: 1"],
+            "referer": "https://exemple.org/", "split": "4", "max-download-limit": "512K", "pause": "true",
+            "dir": "/srv/ailleurs", "inconnue": "1"})  # une liste écrite pour aria2 : dir et l'inconnue, ignorés
+        self.assertEqual((job.filename, job.referer, job.maxConnections, job.speedLimit, job.status),
+                         ("renomme.zip", "https://exemple.org/", 4, 512 * 1024, "paused"))
+        self.assertEqual(job.checksums[0]["source"], "user")
+        self.assertEqual(job.headers, [["X-Jeton", "1"]])
+        for bad in ({"out": "../.bashrc"}, {"split": "beaucoup"}, {"checksum": "sha-256=zz"}, {"out": 42}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.add("/range/small.zip", options=bad)
 
     def test_cookies_follow_same_host_redirect_only(self):
         job = self.engine.add({"url": self.base + "/redirect/cookies", "cookies": "session=secret"})
@@ -2078,32 +2091,12 @@ class UtilTest(unittest.TestCase):
         self.assertEqual(util.category_for("noext", "video/mp4"), ("video", "Videos"))
         self.assertEqual(util.category_for("data.bin"), ("other", "Generique"))
 
-    def test_parse_link_list(self):
-        # Mêmes cas que tests/lib.test.mjs : les deux implémentations doivent s'accorder.
-        text = "﻿# Cours\r\nhttps://x.com/b.pdf\n\n   https://x.com/a.pdf  \r# fin\n"
-        self.assertEqual(util.parse_link_list(text), (["https://x.com/b.pdf", "https://x.com/a.pdf"], [], 0))
-        text = "\n".join([
-            "https://x.com/a.zip",
-            "HTTP://x.com/b.zip",
-            "https://x.com/a.zip",
-            "www.x.com/c.zip",
-            "ftp://x.com/d.zip",
-            "https://x.com/e.zip https://x.com/f.zip",
-            "https://",
-            "mailto:moi@x.com",
-        ])
-        urls, invalid, duplicates = util.parse_link_list(text)
-        self.assertEqual(urls, ["https://x.com/a.zip", "HTTP://x.com/b.zip"])
-        self.assertEqual(duplicates, 1)
-        self.assertEqual([(number, reason) for number, _, reason in invalid], [
-            (4, "il manque https:// au début"),
-            (5, "seuls les liens http:// et https:// sont acceptés"),
-            (6, "un seul lien par ligne"),
-            (7, "adresse mal formée"),
-            (8, "seuls les liens http:// et https:// sont acceptés"),
-        ])
-        self.assertEqual(invalid[0][1], "www.x.com/c.zip")
-        self.assertEqual(util.parse_link_list(""), ([], [], 0))
+    def test_link_lists_read_like_the_extension_reads_them(self):
+        # Les mêmes cas que tests/lib.test.mjs : les deux lecteurs de listes doivent s'accorder.
+        cases = json.loads((Path(__file__).parent / "linklist_cases.json").read_text(encoding="utf-8"))
+        for case in cases:
+            with self.subTest(case["name"]):
+                self.assertEqual(aria2.parse_list(case["text"]), case["expect"])
 
     def test_parse_links(self):
         message = http.client.HTTPMessage()

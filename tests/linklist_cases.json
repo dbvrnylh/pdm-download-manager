@@ -1,0 +1,339 @@
+[
+  {
+    "name": "un lien par ligne, dans l'ordre ; commentaires, lignes vides et BOM ignorés",
+    "text": "﻿# Cours\r\nhttps://x.com/b.pdf\n\n   https://x.com/a.pdf  \r# fin\n",
+    "expect": {
+      "entries": [
+        {
+          "line": 2,
+          "urls": [
+            "https://x.com/b.pdf"
+          ],
+          "options": {}
+        },
+        {
+          "line": 4,
+          "urls": [
+            "https://x.com/a.pdf"
+          ],
+          "options": {}
+        }
+      ],
+      "invalid": [],
+      "warnings": [],
+      "duplicates": 0
+    }
+  },
+  {
+    "name": "doublons comptés une fois, lignes refusées avec leur numéro et la raison",
+    "text": "https://x.com/a.zip\nHTTP://x.com/b.zip\nhttps://x.com/a.zip\nwww.x.com/c.zip\nftp://x.com/d.zip\nhttps://x.com/e.zip https://x.com/f.zip\nhttps://\nmailto:moi@x.com",
+    "expect": {
+      "entries": [
+        {
+          "line": 1,
+          "urls": [
+            "https://x.com/a.zip"
+          ],
+          "options": {}
+        },
+        {
+          "line": 2,
+          "urls": [
+            "HTTP://x.com/b.zip"
+          ],
+          "options": {}
+        }
+      ],
+      "invalid": [
+        {
+          "line": 4,
+          "text": "www.x.com/c.zip",
+          "reason": "il manque https:// au début"
+        },
+        {
+          "line": 5,
+          "text": "ftp://x.com/d.zip",
+          "reason": "seuls les liens http:// et https:// sont acceptés"
+        },
+        {
+          "line": 6,
+          "text": "https://x.com/e.zip https://x.com/f.zip",
+          "reason": "plusieurs liens sur la ligne : un par ligne, ou des miroirs séparés par une tabulation"
+        },
+        {
+          "line": 7,
+          "text": "https://",
+          "reason": "adresse mal formée"
+        },
+        {
+          "line": 8,
+          "text": "mailto:moi@x.com",
+          "reason": "seuls les liens http:// et https:// sont acceptés"
+        }
+      ],
+      "warnings": [],
+      "duplicates": 1
+    }
+  },
+  {
+    "name": "miroirs séparés par une tabulation, options en retrait (header se répète, dir et l'inconnue ignorées)",
+    "text": "https://x.com/f.iso\thttps://m1.example/f.iso\t https://m2.example/f.iso\n  out=fedora.iso\n\tchecksum=sha-256=abc\n  header=X-A: 1\n  header=X-B: 2\n  max-tries=5\n  DIR=/srv/iso\n  frobnicate=1\n# un commentaire n'arrête pas les options\n  split=4\nhttps://x.com/g.iso\n  pause=true",
+    "expect": {
+      "entries": [
+        {
+          "line": 1,
+          "urls": [
+            "https://x.com/f.iso",
+            "https://m1.example/f.iso",
+            "https://m2.example/f.iso"
+          ],
+          "options": {
+            "out": "fedora.iso",
+            "checksum": "sha-256=abc",
+            "header": [
+              "X-A: 1",
+              "X-B: 2"
+            ],
+            "split": "4"
+          }
+        },
+        {
+          "line": 11,
+          "urls": [
+            "https://x.com/g.iso"
+          ],
+          "options": {
+            "pause": "true"
+          }
+        }
+      ],
+      "invalid": [],
+      "warnings": [
+        {
+          "line": 7,
+          "text": "DIR=/srv/iso",
+          "reason": "dir ignoré : PDM range les fichiers dans son dossier, par catégorie"
+        },
+        {
+          "line": 8,
+          "text": "frobnicate=1",
+          "reason": "option inconnue, ignorée : frobnicate"
+        }
+      ],
+      "duplicates": 0
+    }
+  },
+  {
+    "name": "une option sans lien au-dessus est refusée ; celles d'un lien refusé sont ignorées",
+    "text": "  out=perdu.bin\nftp://x.com/a.bin\n  out=a.bin\nhttps://x.com/b.bin",
+    "expect": {
+      "entries": [
+        {
+          "line": 4,
+          "urls": [
+            "https://x.com/b.bin"
+          ],
+          "options": {}
+        }
+      ],
+      "invalid": [
+        {
+          "line": 1,
+          "text": "out=perdu.bin",
+          "reason": "option sans lien au-dessus"
+        },
+        {
+          "line": 2,
+          "text": "ftp://x.com/a.bin",
+          "reason": "seuls les liens http:// et https:// sont acceptés"
+        }
+      ],
+      "warnings": [],
+      "duplicates": 0
+    }
+  },
+  {
+    "name": "séquences : zéros en tête, pas, lettres, plusieurs à la suite",
+    "text": "https://x.com/p[08-12:2].jpg\nhttps://x.com/[a-b][1-2].txt\nhttps://x.com/v[X-Z].bin\nhttps://x.com/p10.jpg",
+    "expect": {
+      "entries": [
+        {
+          "line": 1,
+          "urls": [
+            "https://x.com/p08.jpg"
+          ],
+          "options": {}
+        },
+        {
+          "line": 1,
+          "urls": [
+            "https://x.com/p10.jpg"
+          ],
+          "options": {}
+        },
+        {
+          "line": 1,
+          "urls": [
+            "https://x.com/p12.jpg"
+          ],
+          "options": {}
+        },
+        {
+          "line": 2,
+          "urls": [
+            "https://x.com/a1.txt"
+          ],
+          "options": {}
+        },
+        {
+          "line": 2,
+          "urls": [
+            "https://x.com/a2.txt"
+          ],
+          "options": {}
+        },
+        {
+          "line": 2,
+          "urls": [
+            "https://x.com/b1.txt"
+          ],
+          "options": {}
+        },
+        {
+          "line": 2,
+          "urls": [
+            "https://x.com/b2.txt"
+          ],
+          "options": {}
+        },
+        {
+          "line": 3,
+          "urls": [
+            "https://x.com/vX.bin"
+          ],
+          "options": {}
+        },
+        {
+          "line": 3,
+          "urls": [
+            "https://x.com/vY.bin"
+          ],
+          "options": {}
+        },
+        {
+          "line": 3,
+          "urls": [
+            "https://x.com/vZ.bin"
+          ],
+          "options": {}
+        }
+      ],
+      "invalid": [],
+      "warnings": [],
+      "duplicates": 1
+    }
+  },
+  {
+    "name": "séquences refusées : à l'envers, trop longue, avec des miroirs, pas nul",
+    "text": "https://x.com/[9-1].bin\nhttps://x.com/[1-1001].bin\nhttps://x.com/[1-2].bin\thttps://m.example/[1-2].bin\nhttps://x.com/[1-5:0].bin",
+    "expect": {
+      "entries": [],
+      "invalid": [
+        {
+          "line": 1,
+          "text": "https://x.com/[9-1].bin",
+          "reason": "séquence à l'envers : le début après la fin"
+        },
+        {
+          "line": 2,
+          "text": "https://x.com/[1-1001].bin",
+          "reason": "séquence de plus de 1000 liens"
+        },
+        {
+          "line": 3,
+          "text": "https://x.com/[1-2].bin\thttps://m.example/[1-2].bin",
+          "reason": "une séquence [1-10] ne se combine pas avec des miroirs sur la même ligne"
+        },
+        {
+          "line": 4,
+          "text": "https://x.com/[1-5:0].bin",
+          "reason": "séquence : un pas d'au moins 1"
+        }
+      ],
+      "warnings": [],
+      "duplicates": 0
+    }
+  },
+  {
+    "name": "accolades : des miroirs du même fichier ; pas plus de 4 ; jamais en clair pour un https",
+    "text": "https://{dl1,dl2}.x.com/f.zip\nhttps://{a,b,c,d,e,f}.x.com/g.zip\nhttps://x.com/h.zip\thttp://m.example/h.zip\nhttps://x.com/{seul}.zip",
+    "expect": {
+      "entries": [
+        {
+          "line": 1,
+          "urls": [
+            "https://dl1.x.com/f.zip",
+            "https://dl2.x.com/f.zip"
+          ],
+          "options": {}
+        },
+        {
+          "line": 4,
+          "urls": [
+            "https://x.com/{seul}.zip"
+          ],
+          "options": {}
+        }
+      ],
+      "invalid": [
+        {
+          "line": 2,
+          "text": "https://{a,b,c,d,e,f}.x.com/g.zip",
+          "reason": "plus de 4 miroirs pour un même fichier"
+        },
+        {
+          "line": 3,
+          "text": "https://x.com/h.zip\thttp://m.example/h.zip",
+          "reason": "miroir en clair (http://) pour un fichier en https://"
+        }
+      ],
+      "warnings": [],
+      "duplicates": 0
+    }
+  },
+  {
+    "name": "une adresse IPv6 n'est pas une séquence",
+    "text": "http://[::1]:8080/f.bin\nhttp://[2001:db8::1]/g.bin",
+    "expect": {
+      "entries": [
+        {
+          "line": 1,
+          "urls": [
+            "http://[::1]:8080/f.bin"
+          ],
+          "options": {}
+        },
+        {
+          "line": 2,
+          "urls": [
+            "http://[2001:db8::1]/g.bin"
+          ],
+          "options": {}
+        }
+      ],
+      "invalid": [],
+      "warnings": [],
+      "duplicates": 0
+    }
+  },
+  {
+    "name": "liste vide",
+    "text": "",
+    "expect": {
+      "entries": [],
+      "invalid": [],
+      "warnings": [],
+      "duplicates": 0
+    }
+  }
+]

@@ -6,6 +6,15 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Lists in aria2's input-file format (`aria2c -i`), in the manager's **Importer une liste…** and in
+  `pdm-host add --file`: mirrors of the same file on one line, separated by a tab; its options below it,
+  indented (`out`, `checksum`, `header`, `referer`, `user-agent`, `pause`, `split`, `max-connection-per-server`,
+  `max-download-limit`); sequences such as `img[001-120].jpg` (one download per number, leading zeros kept, a
+  step after `:`, letters too) and `{dl1,dl2}` for mirrors. `dir` and unknown options are ignored and said so,
+  instead of refusing the list. The options mean exactly what they mean for the JSON-RPC API: both now go
+  through one module (`aria2.py`). The extension and the engine each read lists (the preview needs no engine,
+  the terminal no browser): one file of cases (`tests/linklist_cases.json`) checks that both agree to the
+  character. A link refused at import is given back with its mirrors and options, to be fixed.
 - The queue has an order, and it is yours: in the manager's **En cours** view, waiting downloads are listed in
   the order they will start and are dragged to another place (also **En premier** / **En dernier** in their
   **Options…**). A move hands the queue's ranks out again among its members, so a download interrupted by a
