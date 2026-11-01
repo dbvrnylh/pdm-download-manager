@@ -886,6 +886,8 @@ class EngineTlsTest(EngineTest):
         job = self.engine.add({"url": f"https://127.0.0.1:{server.server_port}/range/small.zip"})
         job = self.wait(job.id, {"completed", "failed"})
         self.assertEqual(job.status, "failed")
+        self.assertEqual(job.error, "connexion impossible : certificat du serveur refusé "
+                                    "(unable to get local issuer certificate)")
         self.assertEqual(list(self.downloads.rglob("small.zip*")), [], "rien d'écrit sans certificat vérifié")
 
 

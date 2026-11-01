@@ -153,6 +153,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   of HLS fragments, the separate tracks and the subtitles no longer appear and disappear next to the
   videos; only the finished file shows up. The folder is removed when the download ends or is canceled,
   and kept for a paused download to resume from.
+- A server whose certificate is not trusted fails with "connexion impossible : certificat du serveur
+  refusé (…)" and the reason (expired, another name, unknown authority), instead of OpenSSL's raw
+  "[SSL: CERTIFICATE_VERIFY_FAILED] … (_ssl.c:1010)". As before, nothing is downloaded without a verified
+  certificate.
 
 ### Fixed
 - Pausing or canceling a download whose server had stopped sending took up to 30 seconds: closing a

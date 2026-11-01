@@ -194,6 +194,8 @@ def is_refusal(error, accepted=False):
 
 def _reason(error):
     reason = getattr(error, "reason", None) or error
+    if isinstance(reason, ssl.SSLCertVerificationError):  # plutôt que « [SSL: CERTIFICATE_VERIFY_FAILED] … »
+        return f"certificat du serveur refusé ({reason.verify_message})"
     return str(reason).strip() or error.__class__.__name__
 
 
