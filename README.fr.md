@@ -215,9 +215,9 @@ obtient une erreur ou une page HTML, Chrome continue.
    (encore en mémoire), puis comparé aux sommes attendues. Elles viennent de la page (au clic sur un lien,
    l'extension relève la somme affichée sur sa ligne — chez GitHub, à côté de chaque fichier — ou dans une liste
    `SHA256SUMS` qui le nomme ; dans le doute, aucune), du serveur (`Repr-Digest`, `Digest`, le `x-goog-hash` de
-   Google Cloud Storage, la redirection de Hugging Face) ou de l'utilisateur. Un fichier qui ne correspond pas
-   n'est jamais livré : il reste en `.pdm`, le téléchargement échoue avec les deux sommes, et **Réessayer** repart
-   de zéro.
+   Google Cloud Storage, la redirection de Hugging Face ou d'un serveur de miroirs comme celui de LibreOffice) ou de
+   l'utilisateur. Un fichier qui ne correspond pas n'est jamais livré : il reste en `.pdm`, le téléchargement échoue
+   avec les deux sommes, et **Réessayer** repart de zéro.
 
 **Vidéos.** yt-dlp sait lire les listes de lecture de streaming, choisir une qualité et fusionner l'audio avec la
 vidéo. PDM le pilote comme un sous-processus et lit sa progression ligne par ligne. PDM garde sa propre copie de

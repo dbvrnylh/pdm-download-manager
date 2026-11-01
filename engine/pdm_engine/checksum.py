@@ -18,6 +18,8 @@ import os
 import re
 from urllib.parse import urlparse
 
+from .util import parse_links
+
 # Nom (celui d'aria2 et des en-têtes HTTP) → (nom hashlib, chiffres hexadécimaux), du plus sûr au moins sûr.
 ALGORITHMS = {
     "sha-512": ("sha512", 128),
@@ -125,7 +127,11 @@ def from_headers(headers, full, redirects=(), size=None):
     - Content-MD5 (RFC 1864) : celui du contenu de la réponse ;
     - X-Linked-Etag de Hugging Face, sur sa redirection vers le stockage : le
       SHA-256 du fichier pour un gros fichier (64 chiffres). Pour un petit, c'est
-      une somme de git, pas celle du fichier : elle n'a que 40 chiffres, ignorée.
+      une somme de git, pas celle du fichier : elle n'a que 40 chiffres, ignorée ;
+    - Digest d'un serveur de miroirs (Metalink/HTTP, RFC 6249 : MirrorBrain, qui
+      sert LibreOffice…), sur sa redirection vers un miroir : la somme que chaque
+      miroir doit respecter. Une redirection reconnue aux miroirs qu'elle annonce
+      (Link: …; rel=duplicate) ; une autre ne parlerait que d'elle-même.
     Une seule est gardée, la plus sûre.
     """
     if (headers.get("Content-Encoding") or "identity").strip().lower() != "identity":
@@ -143,8 +149,9 @@ def from_headers(headers, full, redirects=(), size=None):
     if full:
         for name, value in SF_DIGEST.findall(headers.get("Content-Digest") or ""):
             note(name, value)
-    for name, value in RFC3230_DIGEST.findall(headers.get("Digest") or ""):
-        note(name, value)
+    for header in headers.get_all("Digest") or []:  # MirrorBrain en envoie un par somme
+        for name, value in RFC3230_DIGEST.findall(header):
+            note(name, value)
     if (headers.get("x-goog-stored-content-encoding") or "identity").strip().lower() == "identity":
         for header in headers.get_all("x-goog-hash") or []:
             for part in header.split(","):
@@ -160,6 +167,10 @@ def from_headers(headers, full, redirects=(), size=None):
             linked = redirect.get("X-Linked-Size")
             if len(etag) == 64 and (size is None or linked == str(size)):
                 note("sha-256", etag)
+        if any("duplicate" in params.get("rel", "").lower().split() for _, params in parse_links(redirect, url)):
+            for header in redirect.get_all("Digest") or []:
+                for name, value in RFC3230_DIGEST.findall(header):
+                    note(name, value)
     for algo in ALGORITHMS:
         if algo in found:
             return {"algo": algo, "hex": found[algo], "source": "server"}

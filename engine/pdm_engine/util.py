@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 # Mêmes catégories que extension/lib/categories.js (à garder synchronisées).
 # Dossiers en ASCII : un chemin accentué échoue quand la locale n'est pas UTF-8.
@@ -159,6 +159,34 @@ def filename_from_disposition(header):
         return value.encode("latin-1").decode("utf-8")
     except (UnicodeEncodeError, UnicodeDecodeError):
         return value
+
+
+# En-tête Link (RFC 8288) : <adresse>; nom=valeur; nom="valeur", <adresse>…
+_LINK = re.compile(r'\s*<([^>]*)>((?:\s*;\s*[^;,=\s]+(?:\s*=\s*(?:"(?:[^"\\]|\\.)*"|[^;,\s]*))?)*)\s*(?:,|$)')
+_LINK_PARAM = re.compile(r';\s*([^;,=\s]+)(?:\s*=\s*("(?:[^"\\]|\\.)*"|[^;,\s]*))?')
+
+
+def parse_links(headers, base):
+    """Les liens des en-têtes Link d'une réponse : [(adresse absolue, {paramètre: valeur})].
+
+    `base` : l'adresse de la réponse, contre laquelle se lisent les adresses relatives.
+    Un en-tête mal formé n'est lu que jusqu'à l'erreur.
+    """
+    links = []
+    for value in headers.get_all("Link") or []:
+        pos = 0
+        while pos < len(value):
+            match = _LINK.match(value, pos)
+            if not match or match.end() == pos:
+                break
+            params = {}
+            for name, raw in _LINK_PARAM.findall(match.group(2)):
+                if raw.startswith('"'):
+                    raw = re.sub(r"\\(.)", r"\1", raw[1:-1])
+                params.setdefault(name.lower(), raw)
+            links.append((urljoin(base, match.group(1).strip()), params))
+            pos = match.end()
+    return links
 
 
 def ensure_extension(name, mime):

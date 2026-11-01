@@ -17,8 +17,11 @@ versions follow [Semantic Versioning](https://semver.org/).
     commit); a row leading to other files, or two different values, give none;
   - the server: `Repr-Digest` and `Content-Digest` (RFC 9530), `Digest` (RFC 3230), the MD5 of `x-goog-hash`
     (Google Cloud Storage, and sites served by it such as Mozilla), `Content-MD5`, and the SHA-256 that Hugging
-    Face gives on its redirect for large files. The probe asks for them (`Want-Repr-Digest`), except when it
-    replays the browser's request;
+    Face gives on its redirect for large files, and the `Digest` that a mirror server (Metalink/HTTP, RFC 6249:
+    MirrorBrain, which serves LibreOffice) gives on its redirect to a mirror — only on a redirect that lists
+    mirrors (`Link: …; rel=duplicate`), any other one would only describe itself. Every `Digest` header counts,
+    not only the first (MirrorBrain sends one per checksum). The probe asks for them (`Want-Repr-Digest`), except
+    when it replays the browser's request;
   - the user: `pdm-host add URL --checksum sha-256=…` (aria2's syntax; `SHA256: …`, a `SHA256SUMS` line or the
     value alone also work).
 - "Vérifier…" on a finished download: shows its SHA-256 (with a copy button) and compares the file, read again as

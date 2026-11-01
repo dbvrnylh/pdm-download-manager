@@ -17,6 +17,12 @@ Routes :
   /stall/NOM        comme /range, mais la connexion qui part du début se bloque après 64 Ko
   /digest/SORTE/NOM comme /range, avec la somme du fichier dans les en-têtes : repr (Repr-Digest),
                     rfc3230 (Digest), goog (x-goog-hash), wrong (Repr-Digest d'un autre fichier)
+  /mirrorbrain/SORTE/NOM  302 vers /range/NOM, comme un serveur de miroirs : il annonce les sommes
+                    (Digest, une par en-tête) et un miroir /mirror/SORTE/NOM sur l'autre hôte (Link:
+                    rel=duplicate). Sortes : celles de /mirror/ ; bare, les sommes sans miroir (une
+                    redirection quelconque : à ignorer) ; nodigest, le miroir sans les sommes
+  /mirror/SORTE/NOM un miroir : good (le fichier), stale (une autre version, plus longue), corrupt (même
+                    taille, un octet différent), down (404)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 """
@@ -36,6 +42,7 @@ SLOW_RATE = 64 * 1024  # route /slow/
 FILES = {}  # nom → bytes
 VERSION = {}  # nom → numéro de version (change l'ETag)
 LOG = []  # (chemin, en-tête Range, cookies)
+HOSTS = []  # (en-tête Host, chemin, cookies) : quel serveur a servi quoi
 FLAKY_SEEN = set()
 UNSTABLE = [0]
 LIMITED = {"active": 0, "peak": 0, "refused": 0}  # connexions de /limited/ (serveur entier)
@@ -78,6 +85,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         LOG.append((path, self.headers.get("Range"), self.headers.get("Cookie")))
+        HOSTS.append((self.headers.get("Host"), path, self.headers.get("Cookie")))
         route, _, rest = path.lstrip("/").partition("/")
         if route == "range":
             return self._file(rest, ranges=True)
@@ -94,6 +102,27 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "digest":
             kind, _, name = rest.partition("/")
             return self._file(name, ranges=True, digest=kind)
+        if route == "mirrorbrain":
+            kind, _, name = rest.partition("/")
+            data = FILES.get(name, b"")
+            headers = [("Location", f"http://127.0.0.1:{self.server.server_port}/range/{name}")]
+            if kind != "bare":
+                mirror = "good" if kind == "nodigest" else kind
+                headers.append(("Link", f"<http://localhost:{self.server.server_port}/mirror/{mirror}/{name}>; "
+                                        "rel=duplicate; pri=1; geo=fr"))
+            if kind != "nodigest":
+                for algo, label in (("md5", "MD5"), ("sha1", "SHA"), ("sha256", "SHA-256")):
+                    headers.append(("Digest", f"{label}={_b64(algo, data)}"))
+            self.send_response(302)
+            for key, value in headers:
+                self.send_header(key, value)
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
+        if route == "mirror":
+            kind, _, name = rest.partition("/")
+            if kind == "down":
+                return self._send(404, {"Content-Type": "text/plain"}, b"not found")
+            return self._file(name, ranges=True, variant=kind)
         if route == "login-required":  # page de connexion déguisée en téléchargement
             return self._send(200, {"Content-Type": "text/html; charset=utf-8",
                                     "Content-Disposition": 'attachment; filename="rapport.pdf"'},
@@ -158,11 +187,19 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, body.encode())
         return super().do_GET()
 
-    def _file(self, name, ranges, chunked=False, flaky=False, unstable=False, lagging=None, digest=None):
+    def _file(self, name, ranges, chunked=False, flaky=False, unstable=False, lagging=None, digest=None,
+              variant=None):
         data = FILES.get(name)
         if data is None:
             return self._send(404, {"Content-Type": "text/plain"}, b"not found")
         etag = f'"{name}-v{VERSION[name]}"'
+        if variant:  # un miroir : ses propres ETag, et pas toujours le même fichier
+            etag = f'"{name}-{variant}"'
+            if variant == "stale":
+                data += b"ancienne version"
+            elif variant == "corrupt":
+                middle = len(data) // 2
+                data = data[:middle] + bytes([data[middle] ^ 1]) + data[middle + 1:]
         if unstable:  # étiquette différente à chaque requête (fichier généré par un script)
             UNSTABLE[0] += 1
             etag = f'"{name}-r{UNSTABLE[0]}"'

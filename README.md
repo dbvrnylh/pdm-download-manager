@@ -216,8 +216,9 @@ Chrome's download is cancelled and the engine takes over; if it gets an error or
    memory), then compared with the expected checksums. They come from the page (on a click on a link, the
    extension picks up the checksum shown on its row — next to each file on GitHub — or in a `SHA256SUMS` list that
    names it; when in doubt, none), from the server (`Repr-Digest`, `Digest`, Google Cloud Storage's `x-goog-hash`,
-   Hugging Face's redirect) or from the user. A file that does not match is never delivered: it stays as `.pdm`,
-   the download fails with both checksums, and **Réessayer** starts over from zero.
+   the redirect of Hugging Face or of a mirror server such as LibreOffice's) or from the user. A file that does not
+   match is never delivered: it stays as `.pdm`, the download fails with both checksums, and **Réessayer** starts
+   over from zero.
 
 **Videos.** yt-dlp knows how to read streaming playlists, choose a quality and merge audio with video.
 PDM drives it as a subprocess and parses its progress line by line. PDM keeps its own copy of the official

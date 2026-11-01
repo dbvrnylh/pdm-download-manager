@@ -30,7 +30,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import checksum, daemon, httpdl, paths, util  # noqa: E402
+from pdm_engine import checksum, daemon, httpdl, metalink, paths, util  # noqa: E402
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine.engine import Engine, in_window  # noqa: E402
 from pdm_engine.hosts import FORGET_AFTER, PEAK_WINDOW, RAISE_EVERY, Hosts  # noqa: E402
@@ -403,6 +403,16 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(job.status, "completed", job.error)
                 self.assertEqual(job.checksums, [{"algo": expected[0], "hex": expected[1], "source": "server"}])
                 self.assertTrue(job.verified)
+
+    def test_a_mirror_server_announces_the_checksum_on_its_redirect(self):
+        # MirrorBrain (LibreOffice…) : la somme est sur la redirection, pas chez le miroir.
+        job = self.wait(self.add("/mirrorbrain/good/mid.bin").id, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(job.checksums, [{"algo": "sha-256", "hex": self.hashes["mid.bin"], "source": "server"}])
+        self.assertTrue(job.verified)
+        # Une redirection qui n'annonce pas de miroirs ne parle que d'elle-même.
+        job = self.wait(self.add("/mirrorbrain/bare/mid.bin").id, {"completed", "failed"})
+        self.assertEqual((job.status, job.checksums, job.verified), ("completed", [], None))
 
     def test_a_file_that_does_not_match_is_never_delivered(self):
         fx.LOG.clear()
@@ -958,6 +968,18 @@ class ChecksumTest(unittest.TestCase):
         self.assertIsNone(self.found(("Repr-Digest", sha256), ("Content-Encoding", "gzip")))
         self.assertIsNone(self.found(("Repr-Digest", "sha-256=:AAAA:"), ("Digest", "SHA-256=nope")))
         self.assertIsNone(self.found(("ETag", f'"{self.MD5}"')), "une ETag n'est pas une somme")
+        # Un en-tête par somme, comme MirrorBrain : toutes comptent, pas seulement la première.
+        self.assertEqual(self.found(("Digest", f"MD5={md5}"), ("Digest", f"SHA-256={self.b64('sha256')}")),
+                         ("sha-256", self.SHA256))
+
+    def test_a_mirror_server_announces_the_checksum_on_its_redirect(self):
+        url = "https://download.example.org/office.tar.gz"
+        digest = ("Digest", f"SHA-256={self.b64('sha256')}")
+        mirror = ("Link", '<https://miroir.example.fr/office.tar.gz>; rel="duplicate"; pri=1; geo=fr')
+        self.assertEqual(self.found(redirects=[(url, self.headers(mirror, digest))]), ("sha-256", self.SHA256))
+        meta4 = ("Link", "<office.tar.gz.meta4>; rel=describedby; type=application/metalink4+xml")
+        self.assertIsNone(self.found(redirects=[(url, self.headers(meta4, digest))]))
+        self.assertIsNone(self.found(redirects=[(url, self.headers(digest))]))
 
     def test_hugging_face_announces_large_files_on_its_redirect(self):
         def redirect(url, etag, size="3"):
@@ -1011,6 +1033,39 @@ class ChecksumTest(unittest.TestCase):
                 cli._parse_add(args)
 
 
+class MetalinkTest(unittest.TestCase):
+    def headers(self, *links):
+        message = http.client.HTTPMessage()
+        for link in links:
+            message["Link"] = link
+        return message
+
+    def test_mirrors_come_in_the_server_order(self):
+        origin = "https://download.example.org/office.tar.gz"
+        redirect = self.headers(
+            "<https://download.example.org/office.tar.gz.meta4>; rel=describedby; type=application/metalink4+xml",
+            "<https://c.example/office.tar.gz>; rel=duplicate; pri=3",
+            "<https://a.example/office.tar.gz>; rel=duplicate; pri=1; geo=fr",
+            "<https://b.example/office.tar.gz>; rel=duplicate",
+            "<https://p.example/office.tar.gz>; rel=duplicate; pri=9; pref",
+            "<http://clair.example/office.tar.gz>; rel=duplicate; pri=1",  # en clair : refusé
+            "<ftp://ftp.example/office.tar.gz>; rel=duplicate; pri=1",
+            "<https://a.example/office.tar.gz>; rel=duplicate; pri=1",  # doublon
+        )
+        self.assertEqual(metalink.mirrors([(origin, redirect)]), [
+            "https://p.example/office.tar.gz", "https://a.example/office.tar.gz",
+            "https://c.example/office.tar.gz", "https://b.example/office.tar.gz",
+        ])
+        # Celui où la redirection mène déjà n'est pas un miroir de plus.
+        self.assertNotIn("https://a.example/office.tar.gz",
+                         metalink.mirrors([(origin, redirect)], exclude=["https://a.example/office.tar.gz"]))
+        # Un site en http:// peut annoncer des miroirs en http://.
+        plain = self.headers("<http://m.example/f.iso>; rel=duplicate")
+        self.assertEqual(metalink.mirrors([("http://example.org/f.iso", plain)]), ["http://m.example/f.iso"])
+        many = self.headers(*(f"<https://m{i}.example/f.iso>; rel=duplicate; pri={i}" for i in range(10)))
+        self.assertEqual(len(metalink.mirrors([(origin, many)])), metalink.MAX_MIRRORS)
+
+
 class UtilTest(unittest.TestCase):
     def test_sanitize_and_limits(self):
         self.assertEqual(util.sanitize_filename("a/b:c*?.mp4"), "a_b_c__.mp4")
@@ -1055,6 +1110,20 @@ class UtilTest(unittest.TestCase):
         ])
         self.assertEqual(invalid[0][1], "www.x.com/c.zip")
         self.assertEqual(util.parse_link_list(""), ([], [], 0))
+
+    def test_parse_links(self):
+        message = http.client.HTTPMessage()
+        message["Link"] = ('<https://a.example/f.iso>; rel=duplicate; pri=1; geo=fr, '
+                           '<f.iso.meta4>; rel="describedby"; type="application/metalink4+xml"; title="a, \\"b\\""')
+        message["Link"] = "<//c.example/f.iso>;rel=duplicate;pri=2"
+        message["Link"] = "pas un lien"
+        self.assertEqual(util.parse_links(message, "https://d.example/pub/f.iso"), [
+            ("https://a.example/f.iso", {"rel": "duplicate", "pri": "1", "geo": "fr"}),
+            ("https://d.example/pub/f.iso.meta4",
+             {"rel": "describedby", "type": "application/metalink4+xml", "title": 'a, "b"'}),
+            ("https://c.example/f.iso", {"rel": "duplicate", "pri": "2"}),
+        ])
+        self.assertEqual(util.parse_links(http.client.HTTPMessage(), "https://d.example/"), [])
 
     def test_plan_segments(self):
         segments = httpdl.plan_segments(10 * 1024 * 1024 + 3, 8)
