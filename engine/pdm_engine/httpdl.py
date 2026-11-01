@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -146,7 +147,11 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
-_opener = urllib.request.build_opener(_SafeRedirect)
+# Un seul contexte TLS pour toutes les connexions, celui qu'urllib prendrait : les
+# autorités du système, nom du serveur vérifié. Les tests y ajoutent la leur.
+TLS = ssl.create_default_context()
+TLS.set_alpn_protocols(["http/1.1"])
+_opener = urllib.request.build_opener(_SafeRedirect, urllib.request.HTTPSHandler(context=TLS))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -155,7 +160,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_no_redirect = urllib.request.build_opener(_NoRedirect)
+_no_redirect = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=TLS))
 MAX_HOPS = 5  # redirections suivies une à une depuis l'adresse de départ (voir HttpDownload._ask_start)
 
 

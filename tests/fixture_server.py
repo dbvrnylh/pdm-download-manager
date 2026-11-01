@@ -31,6 +31,9 @@ Routes :
                     taille, un octet faux tous les 4 Ko), down (404)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
+
+En HTTPS (start(tls=…), certificat de tls_files) : les mêmes routes, et les adresses
+qu'elles annoncent (redirections, miroirs) en https://.
 """
 
 import base64
@@ -38,6 +41,8 @@ import hashlib
 import json
 import os
 import re
+import ssl
+import subprocess
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -80,6 +85,10 @@ class Handler(SimpleHTTPRequestHandler):
         base = self.static_dir or os.getcwd()
         return str(Path(base) / path.split("?")[0].lstrip("/"))
 
+    def _url(self, host, path):
+        """Une adresse de ce serveur, sous ce nom d'hôte (127.0.0.1, ou localhost : un autre site)."""
+        return f"{self.server.scheme}://{host}:{self.server.server_port}/{path}"
+
     def _send(self, code, headers, body=b""):
         self.send_response(code)
         for key, value in headers.items():
@@ -114,10 +123,10 @@ class Handler(SimpleHTTPRequestHandler):
             data = FILES.get(name, b"")
             flags = set(self.path.partition("?")[2].split("&"))
             target = f"limited/1/{name}" if "limited" in flags else f"crawl/{name}" if "crawl" in flags else f"range/{name}"
-            headers = [("Location", f"http://127.0.0.1:{self.server.server_port}/{target}")]
+            headers = [("Location", self._url("127.0.0.1", target))]
             if kind != "bare":
                 mirror = "good" if kind in ("nodigest", "lying") else kind
-                headers.append(("Link", f"<http://localhost:{self.server.server_port}/mirror/{mirror}/{name}>; "
+                headers.append(("Link", f"<{self._url('localhost', f'mirror/{mirror}/{name}')}>; "
                                         "rel=duplicate; pri=1; geo=fr"))
             if "meta4" in flags:
                 headers.append(("Link", f'</meta4/{kind}/{name}>; rel=describedby; type="application/metalink4+xml"'))
@@ -132,7 +141,7 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "meta4":
             kind, _, name = rest.partition("/")
             data = FILES.get(name, b"")
-            mirror = f"http://localhost:{self.server.server_port}/mirror/{'good' if kind == 'lying' else kind}/{name}"
+            mirror = self._url("localhost", f"mirror/{'good' if kind == 'lying' else kind}/{name}")
             return self._send(200, {"Content-Type": "application/metalink4+xml"},
                               _meta4(name, data, mirror, lying=kind == "lying"))
         if route == "mirror":
@@ -147,9 +156,9 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "html":
             return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, b"<html><body>Login</body></html>")
         if route == "redirect":
-            return self._send(302, {"Location": f"http://127.0.0.1:{self.server.server_port}/{rest}"})
+            return self._send(302, {"Location": self._url("127.0.0.1", rest)})
         if route == "cross":
-            return self._send(302, {"Location": f"http://localhost:{self.server.server_port}/{rest}"})
+            return self._send(302, {"Location": self._url("localhost", rest)})
         if route == "headers":
             body = json.dumps(dict(self.headers.items())).encode()
             return self._send(200, {"Content-Type": "application/json"}, body)
@@ -265,7 +274,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(chunk)
                 pos += len(chunk)
                 time.sleep(len(chunk) / rate)
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:  # le client est parti (en HTTPS, souvent une ssl.SSLError)
             pass
 
 
@@ -304,9 +313,60 @@ def _digest_headers(kind, data):
     return []
 
 
-def start(port=0, static_dir=None):
+class _TlsServer(ThreadingHTTPServer):
+    """Le même serveur en HTTPS. La poignée de main se fait dans le thread de la
+    requête : dans accept(), une seule lente retiendrait toutes les autres."""
+
+    context = None
+
+    def get_request(self):
+        sock, address = self.socket.accept()
+        return self.context.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), address
+
+    def finish_request(self, request, client_address):
+        try:
+            request.do_handshake()
+        except OSError:
+            return  # le client est parti pendant la poignée de main
+        super().finish_request(request, client_address)
+
+
+def tls_files(directory):
+    """(autorité, certificat, clé) de test : une autorité, et un certificat qu'elle signe
+    pour 127.0.0.1 et localhost, les deux sites des tests. Créés par openssl, une fois.
+
+    Une vraie chaîne plutôt qu'un certificat qui se signe lui-même : Python 3.13 vérifie
+    en mode strict (VERIFY_X509_STRICT), comme les navigateurs.
+    """
+    directory = Path(directory)
+    ca, cert, key = directory / "ca.pem", directory / "cert.pem", directory / "key.pem"
+    if cert.exists():
+        return ca, cert, key
+    ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"]
+    (directory / "leaf.cnf").write_text(
+        "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n"
+        "subjectAltName=IP:127.0.0.1,DNS:localhost\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n")
+    for command in (
+        ["req", "-x509", *ec, "-days", "2", "-subj", "/CN=PDM test CA", "-keyout", "ca.key", "-out", "ca.pem",
+         "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"],
+        ["req", *ec, "-subj", "/CN=127.0.0.1", "-keyout", "key.pem", "-out", "leaf.csr"],
+        ["x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-set_serial", "1", "-days", "2",
+         "-extfile", "leaf.cnf", "-out", "cert.pem"],
+    ):
+        subprocess.run(["openssl", *command], cwd=directory, check=True, capture_output=True)
+    return ca, cert, key
+
+
+def start(port=0, static_dir=None, tls=None):
+    """Lance le serveur. `tls` : (certificat, clé), pour servir en HTTPS."""
     Handler.static_dir = static_dir
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if tls:
+        server = _TlsServer(("127.0.0.1", port), Handler)
+        server.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.context.load_cert_chain(*tls)
+    else:
+        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.scheme = "https" if tls else "http"
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server

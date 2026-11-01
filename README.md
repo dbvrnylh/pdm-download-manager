@@ -364,14 +364,14 @@ engine/
                            hosts.py (connections per site) · limiter.py (speed limit)
                            checksum.py (expected and computed checksums) · metalink.py (mirrors)
                            daemon.py (Unix socket) · host.py (Native Messaging bridge)
-tests/                     Python integration tests against a local HTTP server, Node unit tests
+tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh
 ```
 
 Run the tests:
 
 ```bash
-python3 -m unittest discover -s tests -v   # engine, daemon, bridge, yt-dlp (≈ 1 min)
+python3 -m unittest discover -s tests -v   # engine, daemon, bridge, yt-dlp (≈ 5 min)
 node --test tests/lib.test.mjs             # extension modules
 npx eslint extension                       # lint
 ```
@@ -379,8 +379,11 @@ npx eslint extension                       # lint
 The Python suite spins up a real HTTP server that simulates range support, per-connection throttling,
 dropped connections, servers limiting connections per IP, files changing mid-download, unstable ETags,
 cross-host redirects and announced checksums (right or wrong), then checks the
-SHA-256 of every downloaded file. The yt-dlp tests generate their own HLS stream with ffmpeg; they are skipped
-when yt-dlp or ffmpeg is missing. CI runs everything on every push.
+SHA-256 of every downloaded file. The tests where the transport matters (connections cut, paused or moved,
+mirrors, piece repair, the browser path) run again over HTTPS, with a test certificate authority made by
+`openssl`: a bug that only shows over TLS, such as encrypted bytes written into the file, does not pass unseen.
+The yt-dlp tests generate their own HLS stream with ffmpeg. Tests are skipped when the tool they need (yt-dlp,
+ffmpeg, openssl) is missing. CI runs everything on every push.
 
 Design choices worth knowing:
 

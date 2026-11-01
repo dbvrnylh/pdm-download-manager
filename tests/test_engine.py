@@ -44,10 +44,17 @@ def sha(path):
 
 
 class EngineTest(unittest.TestCase):
+    TLS = False  # EngineTlsTest : les mêmes, en HTTPS
+
     @classmethod
     def setUpClass(cls):
-        cls.server = fx.start()
-        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        tls = None
+        if cls.TLS:
+            ca, *tls = fx.tls_files(TMP)
+            httpdl.TLS.load_verify_locations(ca)  # en plus des autorités du système
+        cls.server = fx.start(tls=tls)
+        cls.base = f"{cls.server.scheme}://127.0.0.1:{cls.server.server_port}"
+        cls.other = cls.base.replace("127.0.0.1", "localhost")  # un autre site, sur le même serveur
         cls.hashes = {
             "big.bin": fx.make_file("big.bin", 24 * 1024 * 1024),
             "small.zip": fx.make_file("small.zip", 900 * 1024),
@@ -450,7 +457,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(job.status, "completed", job.error)
         self.assertEqual(sha(job.path), self.hashes["big.bin"])
         self.assertTrue(job.verified)
-        self.assertEqual(job.mirrors, [f"http://localhost:{self.server.server_port}/mirror/good/big.bin"])
+        self.assertEqual(job.mirrors, [self.other + "/mirror/good/big.bin"])
         self.assertEqual(sources, 2, "le serveur d'origine et son miroir en même temps")
         mirror = self.mirror_requests("good", "big.bin")
         self.assertGreaterEqual(len(mirror), 3, "le miroir a servi des morceaux")
@@ -544,7 +551,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(job.status, "completed", job.error)
         self.assertEqual(job.checksums, [{"algo": "sha-256", "hex": self.hashes["mid.bin"], "source": "server"}])
         self.assertTrue(job.verified)
-        self.assertEqual(job.mirrors, [f"http://localhost:{self.server.server_port}/mirror/good/mid.bin"])
+        self.assertEqual(job.mirrors, [self.other + "/mirror/good/mid.bin"])
         self.assertTrue(job.metalink.endswith("/meta4/good/mid.bin"))
         self.assertTrue(self.mirror_requests("good", "mid.bin"), "le miroir annoncé a servi")
         self.assertNotIn("startUrl", job.public(), "rien de plus à envoyer à l'interface")
@@ -683,7 +690,7 @@ class EngineTest(unittest.TestCase):
         first = self.busy_server("/limited/2/big.bin", 2)
         started = time.time()
         # Même serveur de test, autre nom : pour le moteur, un autre site.
-        other = self.engine.add({"url": self.base.replace("127.0.0.1", "localhost") + "/range/small.zip"})
+        other = self.engine.add({"url": self.other + "/range/small.zip"})
         other = self.wait(other.id, {"completed", "failed"}, timeout=10)
         self.assertEqual(other.status, "completed", other.error)
         self.assertLess(time.time() - started, 3)
@@ -839,6 +846,52 @@ class EngineTest(unittest.TestCase):
         self.assertIn("downloading", statuses)
         self.assertEqual(statuses[-1], "completed")
         self.assertTrue(all("cookies" not in e["job"] for e in self.events if e["type"] == "job"))
+
+
+# Les tests où le transport compte, rejoués en HTTPS : presque tous les vrais
+# téléchargements le sont, et un bug propre à TLS passe sans bruit en HTTP (c979d9c :
+# des octets chiffrés écrits dans le fichier, invisibles ici, fréquents chez Kiwix).
+TLS_TESTS = {
+    "test_multi_connection_is_faster_and_exact",
+    "test_pause_then_resume",
+    "test_resume_after_daemon_restart",
+    "test_unknown_size",
+    "test_connection_drops_are_retried",
+    "test_a_lagging_connection_does_not_hold_up_the_end",
+    "test_a_stalled_connection_is_reopened_without_waiting_for_the_timeout",
+    "test_pause_does_not_wait_for_a_stalled_connection",
+    "test_file_changed_on_server_restarts",
+    "test_a_mirror_server_announces_the_checksum_on_its_redirect",
+    "test_a_file_comes_from_its_mirrors_at_the_same_time",
+    "test_connections_leave_a_slow_server_for_a_faster_mirror",
+    "test_a_mirror_that_fails_is_left_out",
+    "test_a_wrong_piece_is_downloaded_again_without_the_mirror_that_sent_it",
+    "test_a_download_taken_from_the_browser_still_hears_the_mirror_server",
+    "test_a_server_limiting_connections_is_followed_instead_of_failing",
+    "test_probe_accepts_and_reuses_connection",
+    "test_cancel_removes_partial_file",
+    "test_cookies_follow_same_host_redirect_only",
+}
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl absent : pas de certificat de test")
+class EngineTlsTest(EngineTest):
+    TLS = True
+
+    def test_a_server_whose_certificate_is_not_trusted_is_refused(self):
+        # Le même serveur, mais signé par une autorité que personne ne connaît.
+        _, *tls = fx.tls_files(Path(tempfile.mkdtemp(dir=TMP)))
+        server = fx.start(tls=tls)
+        self.addCleanup(server.shutdown)
+        job = self.engine.add({"url": f"https://127.0.0.1:{server.server_port}/range/small.zip"})
+        job = self.wait(job.id, {"completed", "failed"})
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(list(self.downloads.rglob("small.zip*")), [], "rien d'écrit sans certificat vérifié")
+
+
+for _name in dir(EngineTest):
+    if _name.startswith("test_") and _name not in TLS_TESTS:
+        setattr(EngineTlsTest, _name, None)  # unittest ne lance que ce qui s'appelle
 
 
 class ConfigTest(unittest.TestCase):
