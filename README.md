@@ -50,6 +50,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   your own program after each download, and put the computer to sleep or shut it down once everything is done.
 - **Torrents and magnet links.** Click a magnet link or a `.torrent` link and PDM downloads what it describes,
   with [aria2](https://aria2.github.io/) doing the BitTorrent work in the background (`sudo apt install aria2`).
+- **Watch while it downloads.** **Lire** on a video or a song that is still downloading opens it in your player
+  (VLC, mpv…): the beginning plays at once, a jump ahead sends a connection there, and the connections take
+  turns in front of the playback when one alone is slower than the video.
 - **Speaks aria2.** AriaNg, aria2 scripts and the extensions that send their links to aria2 can drive PDM through
   the same JSON-RPC API: local only, with a secret, and off until you turn it on.
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
@@ -107,6 +110,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Change the order of the queue | Manager → **En cours** → drag a waiting download to its place. Or **Options…** on it → **En premier** / **En dernier**. |
 | Limit one download, or give it more connections | Manager → **Options…** on it: connections and maximum speed for this file only, applied at once while it runs (a video: from its next start). |
 | Sleep or shut down when everything is done | Manager → **À la fin : veille** or **éteindre** (or `pdm-host when-done suspend\|poweroff`). Once nothing downloads or waits in the queue, a 60 s countdown with **Annuler** appears, then systemd puts the computer to sleep or shuts it down. Once only: the choice goes back to "rien". |
+| Watch a video while it downloads | Manager → **Lire** on it. See [below](#watch-while-it-downloads). |
 | Download a torrent | Click its magnet link or its `.torrent` link, as usual; or paste the magnet link in the manager, or `pdm-host add "magnet:?xt=…"`. Needs aria2 (`sudo apt install aria2`). See [below](#torrents-and-magnet-links). |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 | Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
@@ -240,6 +244,22 @@ sudo apt install aria2
   is kept as a `.torrent` for this (and to resume a download without asking the peers again).
 - Through the [JSON-RPC API](#the-aria2-compatible-api): `addUri` with a magnet link, `addTorrent`, `select-file`
   (in both, and in `changeOption`) and `getFiles`, as in aria2.
+
+### Watch while it downloads
+
+**Lire**, on a video or a song that is downloading (from a link, not through yt-dlp), opens it in your system's
+player for that kind of file (VLC, mpv, Totem…; without one, in a browser tab). PDM serves the file as it
+arrives at a local address, `http://127.0.0.1:PORT/play/…`, like an online video: the player asks for the
+pieces it needs, and jumps where you want.
+
+- What is already written is served at once. What is missing, the engine fetches first: a jump ahead (or the
+  end of an MP4, where its index often is) sends a connection there at once.
+- When the playback waits for the connection in front of it, slower than the video, another one takes the next
+  stretch, a little further, and so on while it waits (one more per second at most): they take turns in front
+  of the playback, like the sequential download of a BitTorrent client. The rest of the file still downloads.
+- The address works only on this computer, and only with its random secret part: a web page cannot guess it.
+  Any player that reads a network address can use it (copy it from VLC's *Média → Ouvrir un flux réseau*).
+- Not yet for torrents, nor for videos downloaded through yt-dlp (they are assembled at the end).
 
 ### The aria2-compatible API
 
@@ -482,6 +502,10 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
   that is how the protocol works, in PDM as in any client. Once complete, PDM keeps sharing (ratio 1, one day at
   most) unless you set the ratio to 0 in **Réglages**. Where sharing a work without its owner's permission is
   illegal, downloading it with BitTorrent is sharing it.
+- **Playing while it downloads** goes through a local address (`127.0.0.1` only, never the network), served
+  only with a random secret per download and only to a request that names `127.0.0.1` or `localhost` (no
+  "DNS rebinding"); it reads that download's file and nothing else. The player opened is the one your desktop
+  sets for that kind of file (`xdg-mime`), started like the desktop does (`gio launch`, no shell).
 - **Private browsing** downloads are never taken over.
 - **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
   lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.
@@ -505,6 +529,7 @@ engine/
                            aria2.py (aria2 options, and lists in its input-file format)
                            finish.py (after a download: extraction, program, sleep or shutdown)
                            torrent.py (torrents and magnet links, through aria2c)
+                           stream.py (playing a file while it downloads)
 tests/                     Python integration tests against a local HTTP(S) server, Node unit tests
 install.sh · uninstall.sh
 ```
@@ -512,7 +537,7 @@ install.sh · uninstall.sh
 Run the tests:
 
 ```bash
-python3 -m unittest discover -s tests -v   # engine, daemon, bridge, yt-dlp (≈ 5 min)
+python3 -m unittest discover -s tests -v   # engine, daemon, bridge, yt-dlp, torrents (≈ 8 min)
 node --test tests/lib.test.mjs             # extension modules
 npx eslint extension                       # lint
 ```

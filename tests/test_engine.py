@@ -37,7 +37,7 @@ import fixture_server as fx  # noqa: E402
 TMP = Path(tempfile.mkdtemp(prefix="pdm-test-", dir=os.environ.get("PDM_TEST_TMP")))
 os.environ["PDM_DATA_DIR"] = str(TMP / "data")
 
-from pdm_engine import aria2, checksum, daemon, finish, httpdl, metalink, paths, rpc, torrent, util  # noqa: E402
+from pdm_engine import aria2, checksum, daemon, finish, httpdl, metalink, paths, rpc, stream, torrent, util  # noqa: E402,E501
 from pdm_engine.config import Config  # noqa: E402
 from pdm_engine import engine as engine_mod  # noqa: E402
 from pdm_engine.engine import Engine, _mirrors, in_window  # noqa: E402
@@ -2009,6 +2009,143 @@ class TorrentTest(unittest.TestCase):
         finally:
             self.engine.aria2.release()
         self.assertFalse(self.engine.aria2.running)
+
+
+class StreamTest(unittest.TestCase):
+    """Lire un fichier pendant qu'il se télécharge (stream.py) : ce qu'un lecteur demande, comme VLC le demande."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = fx.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        fx.make_file("film.mp4", 24 * 1024 * 1024)
+        fx.make_file("archive.bin", 1024 * 1024)
+        cls.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # jamais par un proxy
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(root / "data")
+        (root / "data").mkdir()
+        self.config = Config(root / "data" / "config.json")
+        self.config.update({"downloadDir": str(root / "dl"), "notify": False})
+        tools = Tools(self.config)
+        tools.ready.set()
+        self.engine = Engine(self.config, tools, lambda event: None)
+        self.engine.start()
+        self.addCleanup(self.engine.streams.stop)
+        self.data = fx.FILES["film.mp4"]
+
+    def get(self, url, wanted=None, method="GET", host=None):
+        """(code, en-têtes, octets) d'une requête au serveur de lecture."""
+        headers = {"Range": wanted} if wanted else {}
+        if host:
+            headers["Host"] = host
+        try:
+            with self.http.open(urllib.request.Request(url, headers=headers, method=method), timeout=30) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.headers, e.read()
+
+    def play(self, path, until=lambda job: job.size and job.path):
+        job = self.engine.add({"url": self.base + path})
+        deadline = time.time() + 20
+        while not until(job) and time.time() < deadline:
+            time.sleep(0.02)
+        with unittest.mock.patch.object(stream, "open_player", return_value=None) as opened:
+            played = self.engine.play(job.id)
+        opened.assert_called_once_with(played["url"], "video/mp4")
+        self.assertIsNone(played["player"], "aucun lecteur : l'extension l'ouvrira dans un onglet")
+        return job, played["url"]
+
+    def test_a_video_plays_while_it_downloads_and_a_jump_is_fetched_first(self):
+        self.config.update({"connections": 1})  # du début à la fin, à 2 Mo/s : la fin n'arriverait qu'après 11 s
+        job, url = self.play("/range/film.mp4", until=lambda job: job.path and job.downloaded > 256 * 1024)
+        self.assertTrue(url.endswith("/film.mp4"), "un nom que le lecteur reconnaît")
+        code, headers, body = self.get(url, "bytes=0-65535")
+        self.assertEqual((code, body), (206, self.data[:65536]))
+        self.assertEqual(headers["Content-Range"], f"bytes 0-65535/{len(self.data)}")
+        self.assertEqual((headers["Content-Type"], headers["Accept-Ranges"]), ("video/mp4", "bytes"))
+
+        far = 22 * 1024 * 1024  # un saut vers la fin, où un MP4 range souvent son index
+        started = time.time()
+        code, _, body = self.get(url, f"bytes={far}-{far + 1024 * 1024 - 1}")
+        self.assertEqual((code, body), (206, self.data[far:far + 1024 * 1024]))
+        self.assertLess(time.time() - started, 5, "une connexion y est allée aussitôt")
+        self.assertEqual(job.status, "downloading", "servi bien avant la fin du téléchargement")
+
+        job = self.wait_done(job)
+        self.assertEqual(sha(job.path), hashlib.sha256(self.data).hexdigest(), "le fichier reste exact")
+        code, headers, body = self.get(url)  # fini : tout, d'un coup, sans Range
+        self.assertEqual((code, headers["Content-Length"], body), (200, str(len(self.data)), self.data))
+
+    def test_connections_take_turns_ahead_of_a_slow_playback(self):
+        # Des connexions lentes (256 Ko/s chacune, 2 Mo/s à 8) : la tête seule ferait attendre la lecture.
+        self.addCleanup(setattr, fx, "RATE", fx.RATE)
+        fx.RATE = 256 * 1024
+        job, url = self.play("/range/film.mp4")
+        started = time.time()
+        code, _, body = self.get(url, f"bytes=0-{6 * 1024 * 1024 - 1}")  # lu d'une traite, comme un lecteur
+        elapsed = time.time() - started
+        self.assertEqual((code, body), (206, self.data[:6 * 1024 * 1024]))
+        # 6 Mo dans l'ordre : 12 s derrière la seule connexion de tête (3 Mo à 256 Ko/s, puis le segment suivant).
+        self.assertLess(elapsed, 8, f"les connexions se relaient devant la lecture ({elapsed:.1f} s)")
+        job = self.wait_done(job)
+        self.assertEqual(sha(job.path), hashlib.sha256(self.data).hexdigest())
+
+    def wait_done(self, job, timeout=40):
+        deadline = time.time() + timeout
+        while (job.status != "completed" or job.id in self.engine.runners) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(job.status, "completed", job.error)
+        return job
+
+    def test_only_this_machine_with_the_token_is_served(self):
+        job, url = self.play("/range/film.mp4")
+        job = self.wait_done(job)
+        size = len(self.data)
+        token = url.split("/")[-2]
+        self.assertEqual(self.get(url.replace(token, "x" * len(token)))[0], 404)
+        self.assertEqual(self.get(url.split("/play/")[0] + "/")[0], 404)
+        self.assertEqual(self.get(url, host="pdm.attaquant.example")[0], 403, "DNS rebinding")
+        code, headers, _ = self.get(url, f"bytes={size}-")
+        self.assertEqual((code, headers["Content-Range"]), (416, f"bytes */{size}"))
+        code, _, body = self.get(url, "bytes=-100")  # les 100 derniers octets
+        self.assertEqual((code, body), (206, self.data[-100:]))
+        code, headers, body = self.get(url, method="HEAD")
+        self.assertEqual((code, headers["Content-Length"], body), (200, str(size), b""))
+        other = self.engine.add({"url": self.base + "/range/archive.bin"})
+        with self.assertRaises(ValueError):  # ni vidéo ni musique
+            self.engine.play(other.id)
+        self.engine.remove(job.id)
+        self.assertEqual(self.get(url)[0], 404, "retiré : plus rien")
+
+    def test_the_system_player_opens_the_address(self):
+        share = Path(tempfile.mkdtemp(dir=TMP))
+        (share / "applications").mkdir()
+        (share / "applications" / "vlc.desktop").write_text("[Desktop Entry]\nName=VLC media player\nExec=vlc %U\n")
+        url = "http://127.0.0.1:1/play/t/film.mkv"
+        found = {"gio": "/usr/bin/gio", "mpv": "/usr/bin/mpv"}
+        with unittest.mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(share), "XDG_DATA_DIRS": ""}), \
+                unittest.mock.patch.object(stream, "_detached") as launched, \
+                unittest.mock.patch.object(stream.shutil, "which", side_effect=found.get):
+            # Le désigné par le bureau, pour la variante x- du type (video/x-matroska) : lancé comme il le ferait.
+            with unittest.mock.patch.object(stream, "_query_default",
+                                            side_effect=lambda mime: "vlc.desktop" if mime == "video/x-matroska" else None):
+                self.assertEqual(stream.open_player(url, "video/matroska"), "VLC media player")
+            launched.assert_called_once_with(["gio", "launch", str(share / "applications" / "vlc.desktop"), url])
+            launched.reset_mock()
+            with unittest.mock.patch.object(stream, "_query_default", return_value=None) as asked:
+                self.assertEqual(stream.open_player(url, "audio/flac"), "mpv")  # aucun désigné : un lecteur connu
+                launched.assert_called_once_with(["/usr/bin/mpv", url])
+                asked.reset_mock()
+                self.assertEqual(stream.open_player(url, "application/zip"), "mpv")
+                asked.assert_not_called()  # le programme par défaut d'un type quelconque n'est pas un lecteur
+            found.pop("mpv")
+            with unittest.mock.patch.object(stream, "_query_default", return_value=None):
+                self.assertIsNone(stream.open_player(url, "video/mp4"))  # rien : le navigateur le lira
+        self.assertEqual(stream.mime_of("x.mkv", "application/octet-stream"), "video/matroska")
+        self.assertEqual(stream.mime_of("x.bin", "video/webm; codecs=vp9"), "video/webm")
 
 
 class TorrentFileTest(unittest.TestCase):

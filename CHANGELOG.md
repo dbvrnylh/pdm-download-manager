@@ -6,6 +6,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Watching a video or listening to a song while it downloads. **Lire** in the manager (a download from a link,
+  not through yt-dlp) opens it in the system's player for that kind of file (VLC, mpv, Totem…, found through
+  `xdg-mime` and started with `gio launch`; without one, a browser tab). The engine serves the file as it arrives
+  at `http://127.0.0.1:PORT/play/SECRET/name`, with ranges like any online video: what is written is served at
+  once, what is missing is fetched first. A jump ahead, or the end of an MP4 where its index often is, sends a
+  connection there at once; when the playback waits for the connection in front of it, another takes the next
+  stretch further on, one more per second at most, so they take turns in front of it like a sequential BitTorrent
+  download. Served on this computer only, with a random secret per download, and only to requests naming
+  `127.0.0.1` or `localhost`. Tested with a real MP4 whose index is at the end, played by Chromium while it
+  downloads.
 - Sharing resumes after a restart of the engine, like an interrupted download (setting **Reprendre
   automatiquement les téléchargements interrompus**); its time limit counts the time shared before, and what it
   sent is saved once a minute while it shares. aria2 first checks every piece again (**Vérification avant

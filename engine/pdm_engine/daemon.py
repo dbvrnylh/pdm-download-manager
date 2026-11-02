@@ -198,6 +198,8 @@ class Daemon:
             elif kind == "stop-sharing":
                 self.engine.stop_sharing(message["id"])
                 reply()
+            elif kind == "play":  # lire pendant le téléchargement (voir stream.py)
+                reply(**self.engine.play(message["id"]))
             elif kind == "when-done":
                 self.engine.when_done(message.get("action"))
                 reply(power=self.engine.power_state())

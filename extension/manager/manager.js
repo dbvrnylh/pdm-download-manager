@@ -524,10 +524,13 @@ function engineActions(entry) {
         : button('Plus tard', send('program', { scheduled: true }))]
     : [];
   const options = entry.hasOptions ? [button('Options…', () => openOptions(id))] : [];
+  // Une vidéo ou une musique se lit pendant qu'elle arrive (voir stream.py du moteur).
+  const playable = entry.status === 'active' && entry.kind === 'http' && ['video', 'audio'].includes(entry.category.id);
+  const play = playable ? [button('Lire', () => playWhileDownloading(id))] : [];
   switch (entry.status) {
     case 'queued':
     case 'active':
-      return [button('Pause', send('pause')), ...later, ...options, cancel];
+      return [button('Pause', send('pause')), ...play, ...later, ...options, cancel];
     case 'paused':
       if (entry.choosing) {
         // « Tout télécharger » : reprendre sans choisir, c'est tout prendre (voir Engine.resume).
@@ -551,6 +554,13 @@ function engineActions(entry) {
       return [...actions, remove];
     }
   }
+}
+
+// Le moteur sert le fichier en cours à une adresse locale, et l'ouvre dans le lecteur du système
+// (VLC, mpv…), qui lit aussi MKV et AVI. Sans lecteur installé : un onglet, que Chrome lit lui-même.
+async function playWhileDownloading(id) {
+  const reply = await engine.request({ type: 'play', id });
+  if (!reply.player) await chrome.tabs.create({ url: reply.url });
 }
 
 // Dernier recours quand le moteur échoue (site très protégé) : Chrome

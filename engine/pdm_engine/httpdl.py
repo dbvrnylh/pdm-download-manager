@@ -60,6 +60,10 @@ MIN_SPLIT = 1024 * 1024  # découpage de départ : en dessous, une connexion de 
 # en fin de fichier qu'une connexion lente fait attendre tout le monde. Une connexion
 # saine, elle, finit seule : une requête de plus coûterait plus qu'elle ne rapporte.
 MIN_STEAL = 256 * 1024
+# Lecture pendant le téléchargement (voir HttpDownload.want).
+SOON = 1.0  # s : un manque que la connexion de son segment couvrira dans ce délai n'est pas un saut
+LEAD = 2.0  # s de téléchargement laissées à la connexion de tête quand une autre vient prendre la suite
+PLAY_MOVE_EVERY = 1.0  # s entre deux connexions déplacées pour la lecture
 assert MIN_STEAL >= 2 * CHUNK  # voir _stream : un découpage ne touche jamais les octets en cours d'écriture
 WATCH_EVERY = 1.0  # s entre deux coups d'œil aux connexions (vitesse, connexions qui traînent)
 SLOW_GRACE = 3.0  # s avant de juger une connexion : le temps que TCP prenne son élan
@@ -401,6 +405,17 @@ class Segment:
         return [self.start, self.end, self.pos]
 
 
+def available(segments, offset):
+    """Octets d'un seul tenant déjà écrits à partir d'`offset` : ceux de son segment (start, end, pos).
+
+    Ce que promet `pos` est écrit (voir HttpDownload._stream) : un lecteur peut le lire.
+    """
+    for start, _, pos in segments:
+        if start <= offset < pos:
+            return pos - offset
+    return 0
+
+
 def plan_segments(size, connections):
     if size == 0:
         return []
@@ -502,6 +517,8 @@ class HttpDownload:
         self.wanted = 0  # le nombre voulu au dernier coup d'œil
         self.joined = False  # _download a fini de les attendre : plus aucune à lancer
         self.parallel = False  # plusieurs connexions possibles (fichier repris par morceaux, de taille connue)
+        self.playhead = None  # où en est la lecture pendant le téléchargement (voir want), ou None
+        self.moved_for_play = 0.0  # quand une connexion a été déplacée pour elle, la dernière fois
 
     # ─── Pilotage par le moteur ────────────────────────────────────────────
 
@@ -531,6 +548,73 @@ class HttpDownload:
                 "sources": len({s.source for s in self.segments if s.resp is not None}),
                 "stage": stage,
             }
+
+    def available(self, offset):
+        """Octets d'un seul tenant déjà écrits à partir d'`offset` (pour la lecture en cours)."""
+        with self.lock:
+            self.playhead = offset
+            return available([(s.start, s.end, s.pos) for s in self.segments], offset)
+
+    def want(self, offset):
+        """La lecture attend les octets à partir d'`offset`, pas encore reçus : une connexion y va.
+
+        Un saut (le lecteur va plus loin, ou lit d'abord la fin, où un MP4 range souvent
+        son index) : le segment qui contient `offset` est coupé là, comme pour une
+        connexion de plus (voir _next_segment), et la connexion la moins utile à la
+        lecture lâche le sien pour le prendre : celle qui écrit derrière cet endroit,
+        sinon la plus loin devant.
+
+        La lecture qui attend la connexion de tête, plus lente que la vidéo : une autre
+        prépare la suite, une avance (LEAD secondes) plus loin que la dernière qui la
+        précède, et ainsi de suite tant qu'elle attend. Elles se relaient dans l'ordre,
+        comme le téléchargement séquentiel d'un client BitTorrent. Une connexion au plus
+        par PLAY_MOVE_EVERY : chaque déplacement coûte une requête, et le reste du
+        fichier ne doit pas s'arrêter.
+        """
+        if not self.parallel:
+            return  # une seule connexion, du début à la fin : la lecture suit
+        now = time.monotonic()
+        with self.lock:
+            self.playhead = offset
+            if now - self.moved_for_play < PLAY_MOVE_EVERY or any(s.moving for s in self.segments):
+                return
+            ahead = sorted((s for s in self.segments if s.end is not None and s.end >= offset), key=lambda s: s.start)
+            if not ahead or ahead[0].start > offset or ahead[0].pos > offset:
+                return  # déjà là
+            head = ahead[0]
+            rate = (head.rate(now, grace=1.0) or 0) if head.resp is not None else 0
+            gap = offset - head.pos
+            if head.resp is None or (gap >= MIN_STEAL and gap > rate * SOON):
+                target, cut = head, offset  # un saut : une connexion y va
+            else:
+                # Sa connexion y arrive, mais seule : le premier segment devant elle qui se coupe, coupé
+                # une avance plus loin que sa propre connexion (loin de ce qu'elle écrit) ; un libre, pris tel quel.
+                step = max(4 * MIN_STEAL, int(rate * LEAD))
+                target = cut = None
+                for seg in ahead:
+                    if seg.done() or (seg.active and seg.resp is None):
+                        continue  # fini, ou pris par une connexion qui ouvre sa requête
+                    if not seg.active:
+                        target, cut = seg, seg.pos
+                        break
+                    if seg.end - (seg.pos + step) >= 4 * MIN_STEAL:
+                        target, cut = seg, seg.pos + step
+                        break
+                if target is None:
+                    return  # toutes se relaient déjà devant elle
+            if cut > target.pos:
+                target.end, wanted = cut - 1, Segment(cut, target.end, cut)
+                self.segments.append(wanted)
+            # Celles qui écrivent entre la lecture et cet endroit la servent déjà : jamais déplacées.
+            busy = [s for s in self.segments if s.resp is not None and not s.moving and not s.kicked
+                    and not offset <= s.pos < cut]
+            if not busy:
+                return  # une connexion libre le prendra (voir _next_segment)
+            leaving = max(busy, key=lambda s: float("inf") if s.pos < offset else s.pos - offset)
+            leaving.moving = True
+            self.moved_for_play = now
+            resp = leaving.resp
+        hang_up(resp)  # sa lecture échoue, _fetch rend le segment, et la connexion prend celui de la lecture
 
     def checkpoint(self):
         """Fait du reçu un point de reprise sûr. False si le disque refuse (débranché…).
@@ -987,10 +1071,14 @@ class HttpDownload:
 
     def _next_segment(self):
         with self.lock:
-            for seg in self.segments:
-                if not seg.active and not seg.done():
-                    seg.active = True
-                    return seg
+            free = [seg for seg in self.segments if not seg.active and not seg.done()]
+            if free:
+                # Pendant une lecture, le plus près devant elle d'abord ; ce qui est derrière, en dernier.
+                head = self.playhead
+                seg = free[0] if head is None else min(
+                    free, key=lambda s: s.pos - head if s.pos >= head else float("inf"))
+                seg.active = True
+                return seg
             # Segmentation dynamique : on coupe en deux le plus gros segment en cours.
             victim = self._victim()
             if victim is None:

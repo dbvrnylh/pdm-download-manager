@@ -19,7 +19,7 @@ import time
 import uuid
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import aria2, checksum, finish, httpdl, metalink, paths, torrent
+from . import aria2, checksum, finish, httpdl, metalink, paths, stream, torrent
 from .config import LIMITS, MAX_SPEED, MIN_SPEED, QUALITIES
 from .hosts import Hosts
 from .httpdl import PART_SUFFIX, DownloadError, HttpDownload, clean_headers
@@ -141,6 +141,7 @@ class Engine:
         self.runners = {}
         self.seeds = {}  # id → TorrentDownload fini qui partage encore (hors de la file : il ne télécharge plus)
         self.closing = False  # le démon s'arrête (voir shutdown)
+        self.streams = stream.StreamServer(self)  # lecture pendant le téléchargement, lancé au premier « Lire »
         self.reserved = {}  # chemin réservé → id du téléchargement
         self.cancelled = set()  # annulés pendant leur sonde, avant même d'exister
         self.verifying = set()  # fichiers terminés en cours de vérification (« Vérifier… »)
@@ -220,6 +221,7 @@ class Engine:
         while self.seeds and time.monotonic() < deadline:
             time.sleep(0.05)
         self.aria2.stop()
+        self.streams.stop()
         self.save()
 
     def save(self):
@@ -666,6 +668,7 @@ class Engine:
                     pass
             self.dirty = True
         torrent.forget(job_id)  # son .torrent gardé, s'il en avait un
+        self.streams.forget(job_id)
         self.emit({"type": "removed", "id": job_id})
         self.save()
 
@@ -740,6 +743,59 @@ class Engine:
     def open_file(self, job_id):
         path = self._completed_path(job_id)
         _detached(["xdg-open", path])
+
+    # ─── Lecture pendant le téléchargement (voir stream.py) ────────────────
+
+    def play(self, job_id, open_player=True):
+        """Lit une vidéo ou une musique qui se télécharge : son adresse de lecture, ouverte dans le lecteur
+        du système → {url, player} ; player None : aucun lecteur, à ouvrir ailleurs (le navigateur)."""
+        with self.lock:
+            job = self._get(job_id)
+            self._playable(job)
+            filename, mime = job.filename, stream.mime_of(job.filename, job.mime)
+        url = self.streams.url(job_id, filename)
+        player = stream.open_player(url, mime) if open_player else None
+        log.info("%s %s : lecture (%s)", job_id, filename, player or "sans lecteur du système")
+        return {"url": url, "player": player}
+
+    def _playable(self, job):
+        """Lisible pendant son téléchargement ? (sous verrou) ValueError sinon, avec pourquoi."""
+        if job.kind != "http" or job.category not in ("video", "audio"):
+            raise ValueError("seules les vidéos et les musiques se lisent pendant leur téléchargement")
+        if job.status in ("canceled", "failed"):
+            raise ValueError("ce téléchargement est arrêté")
+        if not job.size or not job.path:
+            raise ValueError("taille encore inconnue : réessaie dans un instant")
+
+    def media(self, job_id):
+        """Le fichier à lire, tel qu'il est maintenant → (chemin, taille, type) ; ValueError s'il ne se lit plus."""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise ValueError("téléchargement inconnu")
+            self._playable(job)
+            path = job.path if job.status == "completed" else job.path + PART_SUFFIX
+            return path, job.size, stream.mime_of(job.filename, job.mime)
+
+    def available(self, job_id, offset):
+        """Octets lisibles d'un seul tenant à partir d'`offset` ; None : il n'y en aura plus (arrêté, retiré)."""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.status in ("canceled", "failed"):
+                return None
+            if job.status == "completed":
+                return max((job.size or 0) - offset, 0)
+            runner = self.runners.get(job_id)
+            if isinstance(runner, HttpDownload):
+                return runner.available(offset)
+            return httpdl.available(job.segments, offset)  # en pause : ce qui est sur le disque
+
+    def want(self, job_id, offset):
+        """La lecture attend ces octets : le téléchargement y envoie une connexion (voir HttpDownload.want)."""
+        with self.lock:
+            runner = self.runners.get(job_id)
+        if isinstance(runner, HttpDownload):
+            runner.want(offset)
 
     def show_file(self, job_id):
         with self.lock:
