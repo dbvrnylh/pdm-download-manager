@@ -112,7 +112,11 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "announce":  # tracker : les pairs, en liste compacte (BEP 23)
             query = dict(part.partition("=")[::2] for part in self.path.partition("?")[2].split("&"))
             infohash, port = unquote_to_bytes(query.get("info_hash", "")), int(query.get("port") or 0)
-            others = [p for p in ANNOUNCED.get(infohash, []) if p != port and p not in SEEDERS]
+            # Les autres pairs, seulement à qui télécharge encore (« left ») : un pair complet n'a besoin
+            # de personne. Sinon deux pairs s'appellent au même instant, et aria2c coupe la connexion en
+            # double de chaque côté, les deux, jusqu'à l'annonce suivante.
+            others = [p for p in ANNOUNCED.get(infohash, []) if p != port and p not in SEEDERS
+                      ] if int(query.get("left") or 0) else []
             if port and query.get("event") == "stopped":
                 ANNOUNCED.get(infohash, set()).discard(port)
             elif port:
