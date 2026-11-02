@@ -1824,9 +1824,11 @@ class TorrentFileTest(unittest.TestCase):
     def test_torrent_files_and_magnet_links_are_read(self):
         single, infohash = fx.make_torrent("http://t.example/announce", "f.bin", b"x" * 1000)
         self.assertEqual(torrent.parse_torrent(single), {"infohash": infohash, "name": "f.bin", "length": 1000,
-                                                          "trackers": ["http://t.example/announce"]})
+                                                          "trackers": ["http://t.example/announce"],
+                                                          "files": [["f.bin", 1000]]})
         folder, _ = fx.make_torrent("http://t.example/announce", "d", {"a": b"1" * 10, "b/c": b"2" * 5})
         self.assertEqual(torrent.parse_torrent(folder)["length"], 15)
+        self.assertEqual(torrent.parse_torrent(folder)["files"], [["d/a", 10], ["d/b/c", 5]])  # l'ordre d'aria2
         self.assertEqual(torrent.magnet_hash(f"magnet:?xt=urn:btih:{infohash.upper()}&dn=f"), infohash)
         base32 = base64.b32encode(bytes.fromhex(infohash)).decode()
         self.assertEqual(torrent.magnet_hash(f"magnet:?dn=f&xt=urn:btih:{base32}"), infohash)
