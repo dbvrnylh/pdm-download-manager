@@ -257,6 +257,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   counted itself idle since it started, or since an earlier check. Idleness now starts after the last client
   leaves. The bridge test that reconnects after closing "Chrome" was in fact served by a new engine every
   time, and failed when it reached the old one while it was stopping.
+- A bridge (Chrome reconnecting to PDM) that reached the engine while it was stopping was accepted, then cut
+  without an answer: the engine kept its socket open while it stopped aria2c and saved the list. It now
+  removes its socket first; the bridge starts a new engine, which waits for the old one to finish (30 seconds
+  at most) and takes over.
 - A torrent added while five others were sharing waited in aria2 without end (aria2 keeps 5 active downloads by
   default): PDM now lets aria2 keep them all active, and limits the downloads itself as before.
 - A failed save of the download list (disk full, drive unplugged) stopped the engine's heartbeat for good:

@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -147,6 +148,34 @@ class BridgeTest(unittest.TestCase):
         # Le même démon : un nouveau, qui relirait la liste sauvegardée, répondrait pareil,
         # et cacherait un démon arrêté sitôt le téléchargement fini.
         self.assertEqual(self._daemon_pids(), [daemon])
+
+    def test_a_bridge_arriving_while_the_daemon_stops_is_served(self):
+        # Un démon décide de s'arrêter, et son arrêt dure (ralenti ici de 2 s : sur un disque
+        # lent, ou quand aria2c écrit ses fichiers de contrôle). Un pont qui arrivait pendant
+        # ce temps était accepté sur le socket encore ouvert, puis coupé sans réponse ; il doit
+        # être servi, par le démon suivant.
+        slow = textwrap.dedent("""
+            import sys, time
+            sys.path.insert(0, sys.argv[1])
+            from pdm_engine import daemon, engine
+            shutdown = engine.Engine.shutdown
+            def slow(self):
+                time.sleep(2)
+                shutdown(self)
+            engine.Engine.shutdown = slow
+            daemon.main()
+        """)
+        stopping = subprocess.Popen([sys.executable, "-c", slow, str(ROOT / "engine")],
+                                    env=dict(self.env, PDM_IDLE_EXIT="1"), start_new_session=True)
+        self.addCleanup(stopping.wait, 15)
+        log = Path(self.env["PDM_DATA_DIR"]) / "engine.log"
+        deadline = time.time() + 15
+        while not (log.exists() and "arrêt" in log.read_text()) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIsNone(stopping.poll(), "toujours en train de s'arrêter")
+        chrome = self.connect()
+        self.assertTrue(chrome.request({"type": "hello"})["ok"])
+        self.assertEqual(stopping.wait(10), 0)
 
     def test_cli_imports_a_list_of_links(self):
         chrome = self.connect()

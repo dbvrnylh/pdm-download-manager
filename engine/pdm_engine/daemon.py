@@ -26,6 +26,7 @@ from .tools import Tools
 log = logging.getLogger("pdm")
 
 IDLE_EXIT = int(os.environ.get("PDM_IDLE_EXIT", 600))  # s sans client ni téléchargement → arrêt
+LOCK_WAIT = 30  # s d'attente du démon qui s'arrête : partages suspendus, aria2c arrêté, liste sauvegardée
 
 
 def unix_address(path):
@@ -86,14 +87,12 @@ class Daemon:
 
     def run(self):
         paths.ensure_dirs()
+        sock_path = paths.socket_path()
         lock_file = open(paths.lock_path(), "w")
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not _take_lock(lock_file, sock_path):
             log.info("un autre démon tourne déjà")
             return
 
-        sock_path = paths.socket_path()
         address, dir_fd = unix_address(sock_path)
         try:
             os.unlink(address)  # socket orphelin d'un démon mort
@@ -126,13 +125,18 @@ class Daemon:
                     continue
                 threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
         finally:
-            self.rpc.stop()
-            self.engine.shutdown()  # partages suspendus, aria2c arrêté, liste sauvegardée
+            # Plus de pont d'abord : l'arrêt peut durer (aria2c qui écrit ses fichiers de
+            # contrôle, liste sauvegardée sur un disque lent), et le système accepterait
+            # pendant ce temps les ponts sur le socket encore ouvert, que sa fermeture
+            # couperait sans réponse. Sans socket, un pont lance un démon, qui attend
+            # celui-ci (voir _take_lock).
             server.close()
             try:
                 os.unlink(sock_path)
             except OSError:
                 pass
+            self.rpc.stop()
+            self.engine.shutdown()  # partages suspendus, aria2c arrêté, liste sauvegardée
 
     def _idle_too_long(self):
         with self.clients_lock:
@@ -288,6 +292,21 @@ class Daemon:
         except Exception as e:
             log.exception("ajout")
             reply(False, error=f"erreur interne : {e}")
+
+
+def _take_lock(lock_file, sock_path):
+    """Le verrou qui garantit un seul démon. Pris par un démon qui a son socket : il sert
+    les ponts, on s'efface. Pris sans socket : il s'arrête (il retire son socket en premier)
+    ou démarre ; on attend qu'il le lâche, pour servir le pont qui nous a lancé."""
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if sock_path.exists() or time.monotonic() > deadline:
+                return False
+            time.sleep(0.1)
 
 
 def _terminate(signum, frame):
