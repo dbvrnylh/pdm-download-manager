@@ -1967,6 +1967,35 @@ class TorrentTest(unittest.TestCase):
             self.assertEqual(f.read(7), b"modifie", "son fichier est laissé tel qu'il l'a fait")
         self.until(lambda: not self.engine.aria2.running)
 
+    def test_a_video_in_a_torrent_plays_while_the_rest_waits_its_turn(self):
+        files = {"episode.mp4": os.urandom(6 * 1024 * 1024 + 123), "bonus.bin": os.urandom(2 * 1024 * 1024)}
+        metainfo, _ = self.seed("saison", files, upload_limit="1M")  # ~8 s pour tout
+        job = self.engine.add({"torrent": base64.b64encode(metainfo).decode(), "source": "rpc"})
+        self.until(lambda: job.mediaFile is not None and job.status == "downloading" and job.path)
+        self.assertTrue(job.public()["playable"])
+        self.assertEqual(job.mediaFile[1:3], ("saison/episode.mp4", len(files["episode.mp4"])))
+        with unittest.mock.patch.object(stream, "open_player", return_value=None):
+            url = self.engine.play(job.id)["url"]
+        self.addCleanup(self.engine.streams.stop)
+        self.assertTrue(url.endswith("/episode.mp4"))
+        runner = self.engine.runners[job.id]
+
+        def steered():
+            option = self.engine.aria2.call("aria2.getOption", runner.gid).get("bt-prioritize-piece", "")
+            chosen = [f["selected"] for f in self.engine.aria2.call("aria2.getFiles", runner.gid)]
+            return option.startswith("head=") and chosen == ["true", "false"]  # dans l'ordre du torrent
+        self.until(steered)  # le début et la fin d'abord, et rien que lui, le temps qu'il finisse
+        http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for wanted, expected in (("bytes=0-65535", files["episode.mp4"][:65536]),
+                                 ("bytes=-100", files["episode.mp4"][-100:])):  # l'index d'un MP4 est souvent là
+            with http.open(urllib.request.Request(url, headers={"Range": wanted}), timeout=40) as resp:
+                self.assertEqual((resp.status, resp.read()), (206, expected), wanted)
+        self.assertEqual(job.status, "downloading", "lu bien avant la fin")
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        for path, content in files.items():  # le reste a suivi : aria2c n'a pas cru le torrent fini
+            self.assertEqual((Path(job.path) / path).read_bytes(), content, path)
+
     def test_removing_a_sharing_torrent_stops_it_and_keeps_its_file(self):
         self.config.update({"seedRatio": 1.0})
         data = os.urandom(600_000)
@@ -2175,6 +2204,17 @@ class TorrentFileTest(unittest.TestCase):
                 torrent.magnet_hash(url)
         for name in ("..", "a/b", "a\\b", "", "x\0"):
             self.assertFalse(torrent._safe(name), name)
+
+    def test_what_of_a_torrent_plays_while_it_downloads(self):
+        pieces = (int("f0", 16), 8, 100)  # pièces de 100 octets : les 4 premières reçues
+        self.assertEqual([torrent.covered(pieces, start, 800) for start in (0, 150, 399, 400, 750)],
+                         [400, 250, 1, 0, 0])
+        self.assertEqual(torrent.covered(pieces, 50, 300), 250, "jamais au-delà du fichier lu")
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        files = [["d/lisez-moi.txt", 10], ["d/film.mkv", 500], ["d/court.mp4", 300], ["d/.pad/0", 5]]
+        self.assertEqual(torrent.media_file(files, None, config.category_for), (2, "d/film.mkv", 500, 10))
+        self.assertEqual(torrent.media_file(files, [1, 3], config.category_for), (3, "d/court.mp4", 300, 510))
+        self.assertIsNone(torrent.media_file(files, [1, 4], config.category_for))
 
     def test_sharing_ends_at_the_ratio_or_the_time_of_the_settings(self):
         root = Path(tempfile.mkdtemp(dir=TMP))

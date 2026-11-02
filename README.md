@@ -50,9 +50,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
   your own program after each download, and put the computer to sleep or shut it down once everything is done.
 - **Torrents and magnet links.** Click a magnet link or a `.torrent` link and PDM downloads what it describes,
   with [aria2](https://aria2.github.io/) doing the BitTorrent work in the background (`sudo apt install aria2`).
-- **Watch while it downloads.** **Lire** on a video or a song that is still downloading opens it in your player
-  (VLC, mpv…): the beginning plays at once, a jump ahead sends a connection there, and the connections take
-  turns in front of the playback when one alone is slower than the video.
+- **Watch while it downloads.** **Lire** on a video or a song that is still downloading, from a link or a
+  torrent, opens it in your player (VLC, mpv…): the beginning plays at once, a jump ahead sends a connection
+  there, and the connections take turns in front of the playback when one alone is slower than the video.
 - **Speaks aria2.** AriaNg, aria2 scripts and the extensions that send their links to aria2 can drive PDM through
   the same JSON-RPC API: local only, with a secret, and off until you turn it on.
 - **No dependencies to install** for the engine: Python standard library only. Light and dark themes.
@@ -247,7 +247,7 @@ sudo apt install aria2
 
 ### Watch while it downloads
 
-**Lire**, on a video or a song that is downloading (from a link, not through yt-dlp), opens it in your system's
+**Lire**, on a video or a song that is downloading (from a link or a torrent, not through yt-dlp), opens it in your system's
 player for that kind of file (VLC, mpv, Totem…; without one, in a browser tab). PDM serves the file as it
 arrives at a local address, `http://127.0.0.1:PORT/play/…`, like an online video: the player asks for the
 pieces it needs, and jumps where you want.
@@ -259,7 +259,14 @@ pieces it needs, and jumps where you want.
   of the playback, like the sequential download of a BitTorrent client. The rest of the file still downloads.
 - The address works only on this computer, and only with its random secret part: a web page cannot guess it.
   Any player that reads a network address can use it (copy it from VLC's *Média → Ouvrir un flux réseau*).
-- Not yet for torrents, nor for videos downloaded through yt-dlp (they are assembled at the end).
+- **A torrent** plays its video or song (the biggest of the chosen files). aria2 picks pieces at random, the
+  rarest first, and cannot fetch a given byte; it can put the beginning and the end of a file first. So the
+  file's end (the MP4 index) and a window in front of the playback go first (about 8 s of download, 4 to
+  32 MB), and the window follows the playback (moved every 5 s at most, at once after a jump; each move pauses
+  aria2 for an instant). A jump far ahead in a torrent takes longer than with a link: the window then covers
+  everything before it too. In a torrent of several files (a whole season), aria2 downloads only the one you
+  watch until it is complete, then all the others you chose.
+- Not for videos downloaded through yt-dlp (they are assembled at the end).
 
 ### The aria2-compatible API
 

@@ -164,6 +164,8 @@ function fromEngine(job) {
     extracted: job.extracted,
     afterError: job.afterError,
     upload: job.upload ?? 0,
+    // Se lit-il pendant son téléchargement (une vidéo ou une musique, d'un lien ou d'un torrent) ?
+    playable: job.playable ?? (job.kind === 'http' && /^(video|audio)$/.test(job.category)),
     // Un torrent fini qui partage encore, et ce qu'il a envoyé à ses pairs en tout.
     seeding: Boolean(job.seeding),
     uploaded: job.uploaded ?? 0,
@@ -525,8 +527,7 @@ function engineActions(entry) {
     : [];
   const options = entry.hasOptions ? [button('Options…', () => openOptions(id))] : [];
   // Une vidéo ou une musique se lit pendant qu'elle arrive (voir stream.py du moteur).
-  const playable = entry.status === 'active' && entry.kind === 'http' && ['video', 'audio'].includes(entry.category.id);
-  const play = playable ? [button('Lire', () => playWhileDownloading(id))] : [];
+  const play = entry.status === 'active' && entry.playable ? [button('Lire', () => playWhileDownloading(id))] : [];
   switch (entry.status) {
     case 'queued':
     case 'active':

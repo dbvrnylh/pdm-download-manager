@@ -55,7 +55,8 @@ STAGING = ".pdm-torrent-"  # préfixe du dossier caché où un torrent s'écrit,
 # Trouver des pairs sans tracker (DHT), et par ceux déjà trouvés (PEX). Coupés dans les tests.
 DISCOVERY = ["--enable-dht=true", "--enable-peer-exchange=true"]
 KEYS = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "uploadLength",
-        "connections", "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files"]
+        "connections", "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files",
+        "bitfield", "pieceLength"]
 SHARE_KEYS = ["status", "uploadSpeed", "uploadLength", "connections", "numSeeders", "completedLength",
               "totalLength", "verifiedLength", "verifyIntegrityPending"]
 STOP_WAIT = 5  # s pour qu'aria2c lâche un torrent retiré : il écrit encore son fichier de contrôle
@@ -63,6 +64,14 @@ CHECK_GRACE = 5  # s laissées à aria2c pour commencer à revérifier un torren
 # Torrents actifs à la fois dans aria2c (5 par défaut : les suivants y attendraient sans fin). PDM
 # limite lui-même les téléchargements ; les autres partagent, finis.
 MAX_ACTIVE = 1000
+# Lecture pendant le téléchargement (voir TorrentDownload.start_playing).
+# Octets devant la lecture qu'aria2c va chercher d'abord : PLAY_AHEAD secondes de téléchargement, bornées.
+# Dans la fenêtre, les pièces arrivent dans le désordre : plus large, la suivante peut se faire attendre.
+PLAY_AHEAD = 8.0
+PLAY_MIN_WINDOW = 4 * 1024 * 1024
+PLAY_WINDOW = 32 * 1024 * 1024
+PLAY_TAIL = 16 * 1024 * 1024  # la fin du fichier lu aussi, d'abord : l'index d'un MP4 y est souvent
+STEER_EVERY = 5.0  # s entre deux déplacements de la fenêtre : chacun met aria2c en pause, un instant
 MAGNET = re.compile(r"^magnet:\?(.*&)?xt=urn:btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})(&|$)")
 
 
@@ -211,6 +220,31 @@ def files_of(job_id):
 def select_text(selection, count):
     """La sélection au format d'aria2 (select-file) : « 1,3,5 » ; None : tous."""
     return ",".join(map(str, selection)) if selection else f"1-{count}"
+
+
+def media_file(files, selection, category_for):
+    """Le fichier à lire pendant le téléchargement : le plus gros des choisis qui soit une vidéo ou une
+    musique → (numéro, chemin, taille, début dans le torrent), ou None. `files` : voir files_of."""
+    chosen = set(selection or range(1, len(files) + 1))
+    best, offset = None, 0
+    for index, (path, length) in enumerate(files, 1):
+        if index in chosen and category_for(path)[0] in ("video", "audio") and (best is None or length > best[2]):
+            best = (index, path, length, offset)
+        offset += length
+    return best
+
+
+def covered(pieces, start, end):
+    """Octets d'un seul tenant déjà reçus à partir de `start` (dans le torrent), jusqu'à `end` au plus.
+
+    `pieces` : (bitfield d'aria2c en entier, son nombre de bits, longueur d'une pièce). Une
+    pièce n'y est cochée qu'une fois vérifiée et écrite : ce qu'elle couvre se lit.
+    """
+    value, bits, length = pieces
+    first = index = start // length
+    while index < bits and index * length < end and (value >> (bits - 1 - index)) & 1:
+        index += 1
+    return min(index * length, end) - start if index > first else 0
 
 
 def forget(job_id):
@@ -369,6 +403,8 @@ class TorrentDownload:
         self.gid = None
         self.seeding = False  # fini, et il partage : run() a rendu la main, aria2c le garde (voir share)
         self.suspended = False  # partage interrompu par l'arrêt du démon : à reprendre au démarrage
+        self.pieces = None  # (bitfield, nombre de bits, longueur d'une pièce) au dernier relevé (voir covered)
+        self.play = None  # la lecture en cours, et la fenêtre de priorité d'aria2c (voir start_playing)
         self.sent = job.uploaded or 0  # octets envoyés aux pairs avant ce téléchargement-ci d'aria2c
         self.state = {"downloaded": job.downloaded or 0, "size": job.size, "uploaded": self.sent,
                       "sharedFor": job.sharedFor or 0}
@@ -385,7 +421,10 @@ class TorrentDownload:
 
     def select(self, selection, count):
         """Change les fichiers voulus, même en cours (aria2c reprend avec la nouvelle sélection)."""
-        if self.gid:
+        self._find_media()
+        with self.lock:
+            narrowed = self.play is not None and self.play["narrowed"]
+        if self.gid and not narrowed:  # réduit au fichier lu : le choix revient à sa fin (voir _widen)
             try:
                 self.aria2.call("aria2.changeOption", self.gid, {"select-file": select_text(selection, count)})
             except Aria2Error:
@@ -399,6 +438,95 @@ class TorrentDownload:
                 self.aria2.call("aria2.changeOption", self.gid, {"max-download-limit": str(rate or 0)})
             except Aria2Error:
                 pass  # au pire, la suivante
+
+    # ─── Lecture pendant le téléchargement (voir stream.py) ────────────────
+
+    def start_playing(self):
+        """La lecture du fichier vidéo ou musique du torrent commence (voir media_file).
+
+        aria2c choisit ses pièces au hasard (les plus rares d'abord), et ne sait pas aller
+        chercher un octet précis. Il sait en revanche faire passer devant le début et la
+        fin de chaque fichier (bt-prioritize-piece) : une fenêtre devant la lecture (voir
+        _window), déplacée à mesure qu'elle avance, ou aussitôt à un saut (voir
+        _steer). D'un torrent de plusieurs fichiers, aria2c ne télécharge que celui-là le
+        temps qu'il finisse : sinon le début de chacun passerait aussi devant.
+        """
+        with self.lock:
+            if self.job.mediaFile is None:
+                raise ValueError("aucune vidéo ni musique parmi les fichiers choisis de ce torrent")
+            if self.play is None:
+                self.play = {"head": self._window(), "applied": None, "urgent": True, "at": 0.0, "narrowed": False}
+
+    def _window(self):
+        """La largeur de la fenêtre de lecture, d'après la vitesse du moment (sous verrou)."""
+        return int(min(max(self.state.get("speed", 0) * PLAY_AHEAD, PLAY_MIN_WINDOW), PLAY_WINDOW))
+
+    def available(self, offset):
+        """Octets d'un seul tenant reçus à partir d'`offset` dans le fichier lu ; la fenêtre suit la lecture."""
+        with self.lock:
+            media, pieces = self.job.mediaFile, self.pieces
+            if self.play is not None:
+                self.play["head"] = max(self.play["head"], offset + self._window())
+        if media is None or pieces is None:
+            return 0
+        return covered(pieces, media[3] + offset, media[3] + media[2])
+
+    def want(self, offset):
+        """La lecture attend ces octets : au-delà de la fenêtre (un saut), elle y est déplacée aussitôt."""
+        with self.lock:
+            play = self.play
+            window = self._window()
+            if play is not None and offset >= (play["applied"] or 0) - window // 2:
+                play["head"], play["urgent"] = max(play["head"], offset + window), True
+
+    def _find_media(self):
+        files = files_of(self.job.id)
+        self.job.mediaFile = media_file(files, self.job.selection, self.config.category_for) if files else None
+
+    def _steer(self):
+        """Déplace la fenêtre de priorité d'aria2c devant la lecture (voir start_playing).
+
+        aria2c ne change bt-prioritize-piece que d'un téléchargement en pause : une pause
+        forcée (sans prévenir les trackers), l'option, puis la reprise, le tout en un instant.
+        """
+        with self.lock:
+            play = self.play
+            if play is None:
+                return
+            head, applied, urgent = play["head"], play["applied"], play["urgent"]
+            now = time.monotonic()
+            if applied is not None and not urgent and (
+                    head - applied < self._window() // 2 or now - play["at"] < STEER_EVERY):
+                return
+            narrow = not play["narrowed"] and stored(self.job.id).exists() and \
+                (len(self.job.selection) if self.job.selection else self.job.fileCount or 1) > 1
+            play.update(applied=head, urgent=False, at=now, narrowed=play["narrowed"] or narrow)
+        options = {"bt-prioritize-piece": f"head={head},tail={PLAY_TAIL}"}
+        if narrow:  # rendu à la fin du fichier lu (voir _widen) : il faut son .torrent pour le redonner
+            options["select-file"] = str(self.job.mediaFile[0])
+        self.aria2.call("aria2.forcePause", self.gid)
+        try:
+            deadline = time.monotonic() + STOP_WAIT
+            while self.aria2.call("aria2.tellStatus", self.gid, ["status"])["status"] != "paused":
+                if time.monotonic() > deadline:
+                    return
+                time.sleep(0.02)
+            self.aria2.call("aria2.changeOption", self.gid, options)
+        finally:
+            self.aria2.call("aria2.unpause", self.gid)
+
+    def _widen(self, options):
+        """Le fichier lu est fini, et aria2c ne téléchargeait que lui (voir _steer) : aria2c le croit
+        terminé. Il lui est redonné avec tous les fichiers choisis, et repart de ce qu'il a reçu."""
+        metainfo = stored(self.job.id).read_bytes()
+        self._forget()
+        options = dict(options, **{"select-file": select_text(self.job.selection, self.job.fileCount or 0),
+                                   "max-download-limit": str(self.limit_rate or 0)})
+        self.sent = self.state["uploaded"]
+        self.gid = self.aria2.call("aria2.addTorrent", base64.b64encode(metainfo).decode(), [], options)
+        with self.lock:
+            self.play = None  # fini : plus rien à faire passer devant
+        log.info("%s : fichier lu fini, les autres reprennent", self.job.id)
 
     def cleanup(self):
         """Annulé : son dossier caché part, et rien d'autre."""
@@ -499,6 +627,7 @@ class TorrentDownload:
         if metainfo is not None:
             files = parse_torrent(metainfo)["files"]
             self.job.fileCount = len(files)
+            self._find_media()
             if self._waits_for_choice(files):
                 return "paused"
             if self.job.selection:
@@ -521,6 +650,7 @@ class TorrentDownload:
                 if not self._keep_metadata():
                     keep_files(self.job.id, files)
                 self.job.fileCount = len(files)
+                self._find_media()
                 if self._waits_for_choice(files):
                     return "paused"
                 if self.job.selection:
@@ -529,6 +659,15 @@ class TorrentDownload:
                 self.aria2.call("aria2.unpause", self.gid)
                 continue
             self._read(status, metadata)
+            if not metadata and status["status"] in ("active", "complete") and self.play is not None:
+                if self.play["narrowed"] and (status["status"] == "complete" or self._finished(status)):
+                    self._widen(options)
+                    continue
+                if status["status"] == "active":
+                    try:
+                        self._steer()
+                    except Aria2Error as e:  # la lecture attendra un peu plus : le téléchargement, lui, continue
+                        log.info("%s : fenêtre de lecture non déplacée (%s)", self.job.id, e)
             if status["status"] == "complete":
                 self._deliver(status, self._unchosen())
                 return "completed"
@@ -596,6 +735,8 @@ class TorrentDownload:
             self.job.filename = name
             self.job.path = str(self.staging / name)
         with self.lock:
+            if status.get("bitfield") and status.get("pieceLength") and not metadata:
+                self.pieces = (int(status["bitfield"], 16), len(status["bitfield"]) * 4, int(status["pieceLength"]))
             self.state = {
                 "downloaded": done if not metadata else self.state["downloaded"],
                 "size": total if not metadata and total else self.state["size"],

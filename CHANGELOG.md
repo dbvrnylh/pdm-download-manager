@@ -6,6 +6,14 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Watching a video from a torrent while it downloads: **Lire** on a torrent plays its video or song (the biggest of
+  the chosen files). What is readable comes from aria2's bitfield, a piece being marked once checked and written.
+  aria2 picks pieces at random and cannot fetch a given byte, but can put the beginning and end of a file first
+  (`bt-prioritize-piece`): the file's end and a window in front of the playback go first (about 8 s of download, 4 to 32 MB), and the window
+  follows it (every 5 s at most, at once after a jump), through a forced pause of an instant, the option changed,
+  and a resume. In a torrent of several files, aria2 downloads only the one being watched until it is complete
+  (otherwise every file's beginning would go first too); aria2 then believes the torrent finished, so PDM gives
+  it back with all the chosen files, and it resumes from what it received.
 - Watching a video or listening to a song while it downloads. **Lire** in the manager (a download from a link,
   not through yt-dlp) opens it in the system's player for that kind of file (VLC, mpv, Totem…, found through
   `xdg-mime` and started with `gio launch`; without one, a browser tab). The engine serves the file as it arrives

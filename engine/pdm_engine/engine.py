@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import uuid
+from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import aria2, checksum, finish, httpdl, metalink, paths, stream, torrent
@@ -105,6 +106,7 @@ class Job:
         self.connections = 0
         self.sources = 0  # serveurs qui envoient le fichier (miroirs compris) ; d'un torrent, ses pairs complets
         self.upload = 0.0  # octets/s envoyés aux autres pairs (un torrent)
+        self.mediaFile = None  # d'un torrent, le fichier qui se lit pendant le téléchargement (torrent.media_file)
         self.stage = None
         self.sample = None
         # Segments affichés : ceux reçus. `segments`, sauvegardé, ne garde que ceux
@@ -114,10 +116,16 @@ class Job:
     def to_dict(self):
         return {name: getattr(self, name) for name in PERSISTED}
 
+    def playable(self):
+        """Se lit-il pendant son téléchargement ? Une vidéo ou une musique d'un lien, ou d'un torrent."""
+        if self.kind == "torrent":
+            return self.mediaFile is not None
+        return self.kind == "http" and self.category in ("video", "audio")
+
     def public(self):
         data = {k: v for k, v in self.to_dict().items() if k not in HIDDEN}
         data.update(speed=self.speed, eta=self.eta, connections=self.connections, sources=self.sources,
-                    stage=self.stage, upload=self.upload,
+                    stage=self.stage, upload=self.upload, playable=self.playable(),
                     chosenCount=len(self.selection) if self.selection else self.fileCount)
         if self.status not in ("downloading", "paused"):
             data["segments"] = []
@@ -752,20 +760,29 @@ class Engine:
         with self.lock:
             job = self._get(job_id)
             self._playable(job)
-            filename, mime = job.filename, stream.mime_of(job.filename, job.mime)
+            runner = self.runners.get(job_id)
+            if job.kind == "torrent":
+                if not isinstance(runner, TorrentDownload):
+                    raise ValueError("un torrent se lit pendant qu'il se télécharge : reprends-le d'abord")
+                runner.start_playing()
+            filename = self._media_name(job)
         url = self.streams.url(job_id, filename)
-        player = stream.open_player(url, mime) if open_player else None
+        player = stream.open_player(url, stream.mime_of(filename, job.mime)) if open_player else None
         log.info("%s %s : lecture (%s)", job_id, filename, player or "sans lecteur du système")
         return {"url": url, "player": player}
 
     def _playable(self, job):
         """Lisible pendant son téléchargement ? (sous verrou) ValueError sinon, avec pourquoi."""
-        if job.kind != "http" or job.category not in ("video", "audio"):
+        if not job.playable():
             raise ValueError("seules les vidéos et les musiques se lisent pendant leur téléchargement")
         if job.status in ("canceled", "failed"):
             raise ValueError("ce téléchargement est arrêté")
-        if not job.size or not job.path:
+        if not job.path or (job.kind == "http" and not job.size):
             raise ValueError("taille encore inconnue : réessaie dans un instant")
+
+    @staticmethod
+    def _media_name(job):
+        return os.path.basename(job.mediaFile[1]) if job.kind == "torrent" else job.filename
 
     def media(self, job_id):
         """Le fichier à lire, tel qu'il est maintenant → (chemin, taille, type) ; ValueError s'il ne se lit plus."""
@@ -774,8 +791,13 @@ class Engine:
             if job is None:
                 raise ValueError("téléchargement inconnu")
             self._playable(job)
+            mime = stream.mime_of(self._media_name(job), job.mime)
+            if job.kind == "torrent":
+                # Son chemin commence par le nom du torrent : celui du dossier caché, puis de Torrents/.
+                parts = Path(job.mediaFile[1]).parts
+                return str(Path(job.path).joinpath(*parts[1:])), job.mediaFile[2], mime
             path = job.path if job.status == "completed" else job.path + PART_SUFFIX
-            return path, job.size, stream.mime_of(job.filename, job.mime)
+            return path, job.size, mime
 
     def available(self, job_id, offset):
         """Octets lisibles d'un seul tenant à partir d'`offset` ; None : il n'y en aura plus (arrêté, retiré)."""
@@ -783,37 +805,20 @@ class Engine:
             job = self.jobs.get(job_id)
             if job is None or job.status in ("canceled", "failed"):
                 return None
+            size = job.mediaFile[2] if job.kind == "torrent" and job.mediaFile else job.size or 0
             if job.status == "completed":
-                return max((job.size or 0) - offset, 0)
+                return max(size - offset, 0)
             runner = self.runners.get(job_id)
-            if isinstance(runner, HttpDownload):
+            if isinstance(runner, (HttpDownload, TorrentDownload)):
                 return runner.available(offset)
-            return httpdl.available(job.segments, offset)  # en pause : ce qui est sur le disque
+            return httpdl.available(job.segments, offset) if job.kind == "http" else 0  # en pause
 
     def want(self, job_id, offset):
-        """La lecture attend ces octets : le téléchargement y envoie une connexion (voir HttpDownload.want)."""
+        """La lecture attend ces octets : le téléchargement va les chercher d'abord (voir les want)."""
         with self.lock:
             runner = self.runners.get(job_id)
-        if isinstance(runner, HttpDownload):
+        if isinstance(runner, (HttpDownload, TorrentDownload)):
             runner.want(offset)
-
-    def show_file(self, job_id):
-        with self.lock:
-            job = self._get(job_id)
-            path = job.path
-        if not path:
-            raise ValueError("fichier pas encore créé")
-        target = path if os.path.exists(path) else os.path.dirname(path)
-        # Le gestionnaire de fichiers sélectionne le fichier (Nautilus, Dolphin, Nemo…).
-        uri = "file://" + quote(target)
-        shown = shutil.which("dbus-send") and subprocess.run(
-            ["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
-             "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
-             f"array:string:{uri}", "string:"],
-            capture_output=True, timeout=5,
-        ).returncode == 0
-        if not shown:
-            _detached(["xdg-open", os.path.dirname(target) if os.path.isfile(target) else target])
 
     # ─── File d'attente et exécution ───────────────────────────────────────
 
