@@ -2144,7 +2144,8 @@ class StreamTest(unittest.TestCase):
             found.pop("mpv")
             with unittest.mock.patch.object(stream, "_query_default", return_value=None):
                 self.assertIsNone(stream.open_player(url, "video/mp4"))  # rien : le navigateur le lira
-        self.assertEqual(stream.mime_of("x.mkv", "application/octet-stream"), "video/matroska")
+        # D'après son nom (/etc/mime.types) : l'un ou l'autre selon le système, open_player essaie les deux.
+        self.assertIn(stream.mime_of("x.mkv", "application/octet-stream"), ("video/matroska", "video/x-matroska"))
         self.assertEqual(stream.mime_of("x.bin", "video/webm; codecs=vp9"), "video/webm")
 
 
