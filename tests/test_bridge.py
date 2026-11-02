@@ -88,8 +88,7 @@ class BridgeTest(unittest.TestCase):
 
     def tearDown(self):
         for chrome in self.chromes:
-            if chrome.proc.poll() is None:
-                chrome.kill()
+            chrome.kill()  # un pont déjà parti : ses tubes, fermés quand même
         for pid in self._daemon_pids():
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -176,6 +175,13 @@ class BridgeTest(unittest.TestCase):
         chrome = self.connect()
         self.assertTrue(chrome.request({"type": "hello"})["ok"])
         self.assertEqual(stopping.wait(10), 0)
+
+    def test_bridge_exits_cleanly_when_the_daemon_stops(self):
+        # Chrome garde stdin ouvert : le fil du pont qui le lit y reste bloqué. En sortant,
+        # Python attendait son verrou et finissait en erreur fatale (SIGABRT, code -6).
+        chrome = self.connect()
+        self.assertTrue(chrome.request({"type": "shutdown"})["ok"])
+        self.assertEqual(chrome.proc.wait(10), 0)
 
     def test_cli_imports_a_list_of_links(self):
         chrome = self.connect()

@@ -261,6 +261,9 @@ versions follow [Semantic Versioning](https://semver.org/).
   without an answer: the engine kept its socket open while it stopped aria2c and saved the list. It now
   removes its socket first; the bridge starts a new engine, which waits for the old one to finish (30 seconds
   at most) and takes over.
+- The bridge ended on a fatal Python error (SIGABRT) whenever the engine closed first (`pdm-host stop`, an
+  engine stopping): on exit, Python waited for standard input, which the thread reading Chrome still held.
+  It now exits at once, cleanly.
 - A torrent added while five others were sharing waited in aria2 without end (aria2 keeps 5 active downloads by
   default): PDM now lets aria2 keep them all active, and limits the downloads itself as before.
 - A failed save of the download list (disk full, drive unplugged) stopped the engine's heartbeat for good:
