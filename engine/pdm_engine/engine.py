@@ -7,6 +7,7 @@ save_lock → lock → verrou du téléchargement.
 """
 
 import base64
+import functools
 import json
 import logging
 import os
@@ -55,8 +56,9 @@ PERSISTED = {
     # Les fichiers d'un torrent : combien il en a, les numéros voulus (None : tous), et s'il attend
     # qu'on les choisisse (None : pas encore demandé ; False : choisi, ou rien à choisir).
     "fileCount": None, "selection": None, "choosing": None,
-    # Un torrent : octets envoyés à ses pairs en tout, et s'il partage encore, fini (voir Engine._share).
-    "uploaded": 0, "seeding": False,
+    # Un torrent : octets envoyés à ses pairs en tout, s'il partage encore, fini (voir Engine._share), et
+    # depuis combien de secondes il partage (la limite de temps compte les redémarrages).
+    "uploaded": 0, "seeding": False, "sharedFor": 0,
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
 HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl",
@@ -127,6 +129,7 @@ class Job:
 class Engine:
     TICK = 0.5
     SAVE_EVERY = 2.0
+    SAVE_SHARING = 60.0  # s : un partage ne réécrit la liste que de loin en loin (ce qu'il a envoyé, depuis quand)
 
     def __init__(self, config, tools, emit):
         self.config = config
@@ -137,6 +140,7 @@ class Engine:
         self.jobs = {}  # ordre d'insertion = ordre d'ajout
         self.runners = {}
         self.seeds = {}  # id → TorrentDownload fini qui partage encore (hors de la file : il ne télécharge plus)
+        self.closing = False  # le démon s'arrête (voir shutdown)
         self.reserved = {}  # chemin réservé → id du téléchargement
         self.cancelled = set()  # annulés pendant leur sonde, avant même d'exister
         self.verifying = set()  # fichiers terminés en cours de vérification (« Vérifier… »)
@@ -174,19 +178,49 @@ class Engine:
                 # Interrompu par un arrêt : on reprend, ou on attend l'utilisateur. Un
                 # programmé attend sa plage horaire : ce n'est pas une interruption.
                 job.status = "queued" if self.config["autoResume"] or job.scheduled else "paused"
-            if job.seeding:
-                # Son partage s'est arrêté avec le démon : reste son dossier caché, à côté du
-                # contenu (des liens vers les mêmes données ; le contenu, lui, est chez l'utilisateur).
+            if job.seeding and not self._may_reshare(job):
+                # Son partage, interrompu par l'arrêt du démon, ne reprendra pas : reste son dossier
+                # caché, à côté du contenu (des liens vers les mêmes données ; le contenu est chez l'utilisateur).
                 job.seeding = False
                 if job.path:
                     shutil.rmtree(os.path.join(os.path.dirname(job.path), f"{torrent.STAGING}{job.id}"),
                                   ignore_errors=True)
             self.jobs[job.id] = job
 
+    def _may_reshare(self, job):
+        """Un partage interrompu reprend-il au démarrage ? Comme un téléchargement interrompu (autoResume),
+        s'il n'a pas déjà assez partagé, et si tout est encore là : le fichier de l'utilisateur (supprimé :
+        il veut récupérer la place), le dossier caché, et le .torrent pour le redonner à aria2c."""
+        return bool(self.config["autoResume"] and not self._shared_enough(job, job.uploaded, job.sharedFor)
+                    and job.path and os.path.exists(job.path) and torrent.stored(job.id).exists()
+                    and os.path.isdir(os.path.join(os.path.dirname(job.path), f"{torrent.STAGING}{job.id}")))
+
     def start(self):
         self.ticker = threading.Thread(target=self._ticker, daemon=True, name="ticker")
         self.ticker.start()
         self.schedule()
+        with self.lock:  # les partages interrompus par l'arrêt du démon (voir _load)
+            resumed = [job for job in self.jobs.values() if job.seeding]
+            for job in resumed:
+                self.seeds[job.id] = TorrentDownload(job, self.config, self.aria2, os.path.dirname(job.path),
+                                                     share=True)
+        for job in resumed:
+            threading.Thread(target=self._share, args=(job, self.seeds[job.id], True), daemon=True,
+                             name=f"share-{job.id}").start()
+
+    def shutdown(self):
+        """Le démon s'arrête : les partages sont suspendus (ils reprendront au démarrage), aria2c s'en va
+        en écrivant ses fichiers de contrôle (les torrents en cours reprendront), la liste est sauvegardée."""
+        with self.lock:
+            self.closing = True
+            seeds = list(self.seeds.values())
+        for runner in seeds:
+            runner.stop("suspended")
+        deadline = time.monotonic() + torrent.STOP_WAIT * 2
+        while self.seeds and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.aria2.stop()
+        self.save()
 
     def save(self):
         """Écrit la liste. Un échec (disque plein, débranché) est journalisé, et retenté au battement suivant.
@@ -830,21 +864,26 @@ class Engine:
             runner.stop("canceled")
             runner.share(lambda sent, elapsed: True)
 
-    def _share(self, job, runner):
-        """Le partage d'un torrent fini, dans le fil de son téléchargement, jusqu'à ce qu'il ait assez donné."""
-        log.info("%s %s : partage", job.id, job.filename)
+    def _share(self, job, runner, resumed=False):
+        """Le partage d'un torrent fini, dans le fil de son téléchargement (ou le sien, repris au démarrage),
+        jusqu'à ce qu'il ait assez donné."""
+        log.info("%s %s : partage%s", job.id, job.filename, " repris" if resumed else "")
+        enough = functools.partial(self._shared_enough, job)
         try:
-            uploaded = runner.share(lambda sent, elapsed: self._shared_enough(job, sent, elapsed))
+            uploaded = runner.reshare(enough) if resumed else runner.share(enough)
         except Exception:  # bug : journalisé ; le téléchargement, lui, est fini
             log.exception("partage de %s", job.id)
             uploaded = job.uploaded
+        progress = runner.progress()
         with self.lock:
             self.seeds.pop(job.id, None)
-            job.seeding, job.uploaded = False, uploaded
-            job.upload, job.connections, job.sources = 0.0, 0, 0
+            job.seeding, job.uploaded = runner.suspended, uploaded  # suspendu : il reprendra au démarrage
+            job.sharedFor = progress.get("sharedFor", job.sharedFor)
+            job.upload, job.connections, job.sources, job.stage = 0.0, 0, 0, None
             self.dirty = True
             removed = job.id not in self.jobs
-        log.info("%s %s : partage fini, %s envoyés", job.id, job.filename, human_size(uploaded))
+        log.info("%s %s : partage %s, %s envoyés", job.id, job.filename,
+                 "suspendu" if runner.suspended else "fini", human_size(uploaded))
         if not removed:
             self._publish(job)
         self.save()
@@ -928,7 +967,7 @@ class Engine:
             runner.stop("queued")
 
     def _ticker(self):
-        while True:
+        while not self.closing:
             time.sleep(self.TICK)
             self._check_window()
             self._check_power()
@@ -948,18 +987,19 @@ class Engine:
                     else:
                         self._measure_speed(job, now)
                     updates.append(job.public())
-                # Finis : seulement ce qu'ils envoient. Sans réécrire la liste pour autant : un partage dure
-                # des heures, et son total est sauvegardé à la fin (voir _share).
+                # Finis : seulement ce qu'ils envoient. La liste n'est réécrite pour eux qu'une fois par
+                # minute : un partage dure des heures, et ce qu'il a envoyé n'a pas à l'être à la seconde.
                 for job_id, runner in self.seeds.items():
                     job = self.jobs.get(job_id)
                     if job is None:
                         continue
                     progress = runner.progress()
                     job.uploaded = progress.get("uploaded", job.uploaded)
+                    job.sharedFor = progress.get("sharedFor", job.sharedFor)
                     job.upload, job.connections = progress.get("upload", 0.0), progress.get("connections", 0)
-                    job.sources = progress.get("sources", 0)
+                    job.sources, job.stage = progress.get("sources", 0), progress.get("stage")
                     updates.append(job.public())
-                if self.runners:
+                if self.runners or (self.seeds and now - self.last_save >= self.SAVE_SHARING):
                     self.dirty = True
                 save = self.dirty and now - self.last_save >= self.SAVE_EVERY
             for update in updates:

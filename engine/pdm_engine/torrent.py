@@ -19,7 +19,8 @@ déplacer ce qu'il partage : le contenu rejoint le dossier des torrents par des 
 physiques (les mêmes données, sous deux noms), et aria2c continue de lire son dossier
 caché, qui garde aussi les morceaux à cheval des fichiers non choisis, sans lesquels
 ces pièces-là ne s'envoient pas. Le partage fini, le dossier caché part ; les fichiers
-de l'utilisateur restent.
+de l'utilisateur restent. Un arrêt du démon le suspend : au démarrage suivant, aria2c
+revérifie chaque pièce de ce dossier, puis reprend (voir TorrentDownload.reshare).
 """
 
 import base64
@@ -55,8 +56,10 @@ STAGING = ".pdm-torrent-"  # préfixe du dossier caché où un torrent s'écrit,
 DISCOVERY = ["--enable-dht=true", "--enable-peer-exchange=true"]
 KEYS = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "uploadLength",
         "connections", "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files"]
-SHARE_KEYS = ["status", "uploadSpeed", "uploadLength", "connections", "numSeeders"]
+SHARE_KEYS = ["status", "uploadSpeed", "uploadLength", "connections", "numSeeders", "completedLength",
+              "totalLength", "verifiedLength", "verifyIntegrityPending"]
 STOP_WAIT = 5  # s pour qu'aria2c lâche un torrent retiré : il écrit encore son fichier de contrôle
+CHECK_GRACE = 5  # s laissées à aria2c pour commencer à revérifier un torrent repris, avant de juger son contenu
 # Torrents actifs à la fois dans aria2c (5 par défaut : les suivants y attendraient sans fin). PDM
 # limite lui-même les téléchargements ; les autres partagent, finis.
 MAX_ACTIVE = 1000
@@ -365,8 +368,10 @@ class TorrentDownload:
         self.lock = threading.Lock()
         self.gid = None
         self.seeding = False  # fini, et il partage : run() a rendu la main, aria2c le garde (voir share)
+        self.suspended = False  # partage interrompu par l'arrêt du démon : à reprendre au démarrage
         self.sent = job.uploaded or 0  # octets envoyés aux pairs avant ce téléchargement-ci d'aria2c
-        self.state = {"downloaded": job.downloaded or 0, "size": job.size, "uploaded": self.sent}
+        self.state = {"downloaded": job.downloaded or 0, "size": job.size, "uploaded": self.sent,
+                      "sharedFor": job.sharedFor or 0}
 
     # ─── Pilotage par le moteur ────────────────────────────────────────────
 
@@ -413,33 +418,75 @@ class TorrentDownload:
                 self.aria2.release()
 
     def share(self, enough):
-        """Partage ce qui est fini, jusqu'à ce que `enough(octets envoyés, secondes)` le dise, qu'on
-        l'arrête (stop), ou qu'aria2c s'en aille avec le démon. Rend les octets envoyés en tout.
+        """Partage ce qui est fini, jusqu'à ce que `enough(octets envoyés, secondes de partage)` le dise,
+        qu'on l'arrête (stop), ou qu'aria2c s'en aille. Rend les octets envoyés en tout.
 
         Appelé après run(), quand il a rendu « completed » avec `seeding` : le contenu est déjà
-        chez l'utilisateur, ceci ne fait plus qu'envoyer. À la fin, le dossier caché part.
+        chez l'utilisateur, ceci ne fait plus qu'envoyer. À la fin, le dossier caché part ;
+        sauf arrêté pour « suspended » (le démon s'arrête) : il reprendra au démarrage.
         """
-        started = time.monotonic()
+        started, before = time.monotonic(), self.job.sharedFor or 0
+        checked = False  # aria2c a revérifié le contenu (un partage repris) : vu en train de le faire
         try:
             while not self.stop_event.wait(POLL):
                 status = self.aria2.call("aria2.tellStatus", self.gid, SHARE_KEYS)
                 sent = self.sent + int(status.get("uploadLength") or 0)
+                elapsed = before + time.monotonic() - started
+                checking = "verifiedLength" in status or "verifyIntegrityPending" in status
+                checked = checked or checking
+                total = int(status.get("totalLength") or 0)
+                stage = (f"Vérification avant partage… {int(status.get('verifiedLength') or 0) * 100 // total} %"
+                         if checking and total else None)
                 with self.lock:
                     self.state = {"uploaded": sent, "upload": float(status.get("uploadSpeed") or 0),
                                   "connections": int(status.get("connections") or 0),
-                                  "sources": int(status.get("numSeeders") or 0)}
-                if status["status"] != "active" or enough(sent, time.monotonic() - started):
+                                  "sources": int(status.get("numSeeders") or 0), "sharedFor": elapsed,
+                                  "stage": stage}
+                if status["status"] != "active" or enough(sent, elapsed):
+                    break
+                if not checking and not self._finished(status) and (
+                        checked or time.monotonic() - started > CHECK_GRACE):
+                    # Des pièces ne sont plus bonnes : le fichier a changé depuis. aria2c irait les
+                    # retélécharger ; ce n'est plus un partage, il s'arrête là.
+                    log.info("%s : contenu modifié depuis la fin, partage arrêté", self.job.id)
                     break
         except Aria2Error:
-            pass  # aria2c parti (le démon s'arrête) : le partage avec lui
+            pass  # aria2c parti : le partage avec lui
         finally:
+            self.suspended = self.stop_reason == "suspended"
             self._forget()
-            shutil.rmtree(self.staging, ignore_errors=True)
+            if not self.suspended:
+                shutil.rmtree(self.staging, ignore_errors=True)
             self.seeding = False
             self.aria2.release()
         with self.lock:
-            self.state = {"uploaded": self.state["uploaded"]}
+            self.state = {"uploaded": self.state.get("uploaded", self.sent),
+                          "sharedFor": self.state.get("sharedFor", before)}
             return self.state["uploaded"]
+
+    def reshare(self, enough):
+        """Reprend le partage d'un torrent fini, interrompu par un arrêt du démon (voir share).
+
+        aria2c revérifie d'abord chaque pièce du dossier caché : le fichier a pu changer
+        pendant l'arrêt ; s'il a changé, le partage s'arrête là. Rend les octets envoyés en tout.
+        """
+        self.seeding = True
+        try:
+            metainfo = stored(self.job.id).read_bytes()
+            self.aria2.acquire()
+        except (OSError, DownloadError) as e:  # plus de .torrent, ou plus d'aria2c : plus de partage
+            log.info("%s : partage pas repris (%s)", self.job.id, e)
+            self.seeding = False
+            shutil.rmtree(self.staging, ignore_errors=True)
+            return self.sent
+        options = {"dir": str(self.staging), "check-integrity": "true"}
+        if self.job.selection:
+            options["select-file"] = select_text(self.job.selection, self.job.fileCount or 0)
+        try:
+            self.gid = self.aria2.call("aria2.addTorrent", base64.b64encode(metainfo).decode(), [], options)
+        except Aria2Error as e:
+            log.info("%s : partage pas repris (aria2c : %s)", self.job.id, e)
+        return self.share(enough)
 
     # ─── Déroulement ───────────────────────────────────────────────────────
 
@@ -459,7 +506,9 @@ class TorrentDownload:
             self.gid = self.aria2.call("aria2.addTorrent", base64.b64encode(metainfo).decode(), [], options)
         else:
             # La description reçue, aria2c attend (pause-metadata) : le temps de lire la liste des fichiers.
-            self.gid = self.aria2.call("aria2.addUri", [self.job.url], dict(options, **{"pause-metadata": "true"}))
+            # Il l'écrit aussi en .torrent (bt-save-metadata) : gardée, elle évite de la redemander aux pairs.
+            self.gid = self.aria2.call("aria2.addUri", [self.job.url],
+                                       dict(options, **{"pause-metadata": "true", "bt-save-metadata": "true"}))
         metadata = metainfo is None  # un lien magnet commence par chercher la description du torrent
         while not self.stop_event.wait(POLL):
             status = self.aria2.call("aria2.tellStatus", self.gid, KEYS)
@@ -469,7 +518,8 @@ class TorrentDownload:
                 self.sent = self.state["uploaded"]  # le nouveau téléchargement d'aria2c compte depuis zéro
                 files = [[os.path.relpath(f["path"], self.staging), int(f["length"])]
                          for f in self.aria2.call("aria2.getFiles", self.gid)]
-                keep_files(self.job.id, files)
+                if not self._keep_metadata():
+                    keep_files(self.job.id, files)
                 self.job.fileCount = len(files)
                 if self._waits_for_choice(files):
                     return "paused"
@@ -502,6 +552,23 @@ class TorrentDownload:
         if not self.ask or len(files) < 2 or self.job.selection:
             return False
         self.job.choosing = True
+        return True
+
+    def _keep_metadata(self):
+        """La description d'un lien magnet, écrite par aria2c dans le dossier caché : gardée par le moteur
+        comme un .torrent (pour reprendre, et partager après un redémarrage). False : pas là, ou pas la bonne."""
+        path = self.staging / f"{self.job.infoHash}.torrent"
+        try:
+            data = path.read_bytes()
+            os.unlink(path)  # pas à côté du contenu
+        except OSError:
+            return False
+        try:
+            if len(data) > MAX_TORRENT or parse_torrent(data)["infohash"] != self.job.infoHash:
+                return False
+        except ValueError:
+            return False
+        keep(self.job.id, data)
         return True
 
     def _metainfo(self):

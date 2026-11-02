@@ -6,6 +6,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Sharing resumes after a restart of the engine, like an interrupted download (setting **Reprendre
+  automatiquement les téléchargements interrompus**); its time limit counts the time shared before, and what it
+  sent is saved once a minute while it shares. aria2 first checks every piece again (**Vérification avant
+  partage…** in the manager): a file changed meanwhile is not shared again, and is left as it is. A file deleted
+  meanwhile, a ratio or a time already reached, or sharing turned off: it does not resume, and its hidden folder
+  goes. A magnet link's description, received from its peers, is now kept as a `.torrent` (aria2's
+  `bt-save-metadata`): sharing can resume, and so can a paused download, without asking the peers again.
 - Sharing a torrent once complete. It is yours at once, and PDM keeps sending it to other peers until it has
   sent as much as it received (ratio 1), for one day at most: **Réglages** sets the ratio (0: no sharing), the
   time limit and the upload speed of torrents (during and after their download); a changed setting applies at

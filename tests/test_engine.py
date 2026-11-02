@@ -1729,6 +1729,9 @@ class TorrentTest(unittest.TestCase):
         self.assertEqual(Path(job.path), folder)
         for path, content in files.items():
             self.assertEqual((folder / path).read_bytes(), content, path)
+        self.assertEqual(sorted(p.name for p in (self.downloads / "Torrents").iterdir()), ["collection"])
+        kept = torrent.stored(job.id).read_bytes()  # sa description, reçue des pairs, gardée en .torrent
+        self.assertEqual(torrent.parse_torrent(kept)["infohash"], infohash)
 
     def test_a_paused_torrent_resumes_from_what_it_received_and_a_canceled_one_leaves_nothing(self):
         data = os.urandom(4 * 1024 * 1024)
@@ -1906,6 +1909,64 @@ class TorrentTest(unittest.TestCase):
             self.engine.stop_sharing(job.id)  # déjà arrêté
         self.until(lambda: not self.engine.aria2.running)
 
+    def restart(self):
+        """Le démon s'arrête (les partages sont suspendus), puis repart : un nouveau moteur, la même liste."""
+        self.engine.shutdown()
+        self.events = []
+        tools = Tools(self.config)
+        tools.ready.set()
+        self.engine = Engine(self.config, tools, self.events.append)
+        self.engine.start()
+        self.addCleanup(self.engine.aria2.stop)
+
+    def test_sharing_cut_by_a_restart_resumes_after_checking_the_content(self):
+        self.config.update({"seedRatio": 1.0, "seedTime": 0})
+        data = os.urandom(3 * 1024 * 1024 + 77)
+        metainfo, infohash = self.seed("repris.bin", data)
+        job = self.wait(self.engine.add({"torrent": base64.b64encode(metainfo).decode()}), {"completed", "failed"})
+        self.assertTrue(job.seeding, job.error)
+        staging = self.downloads / "Torrents" / f"{torrent.STAGING}{job.id}"
+        self.seeder.stop()  # le moteur reste seul à avoir le contenu
+        time.sleep(1.2)  # qu'il compte un peu de partage
+        announced = len(fx.ANNOUNCES)
+        self.restart()
+        self.assertTrue(staging.exists(), "suspendu : son dossier caché reste pour reprendre")
+        job = self.engine.jobs[job.id]
+        self.assertTrue(job.seeding)
+        self.assertGreater(job.sharedFor, 0, "la limite de temps compte aussi d'avant l'arrêt")
+        # Revérifié, il s'annonce de nouveau, complet : sans quoi le client suivant ne le trouverait pas.
+        self.until(lambda: any(h == bytes.fromhex(infohash) and not left for h, _, left, _ in fx.ANNOUNCES[announced:]))
+
+        directory = Path(tempfile.mkdtemp(dir=self.root))
+        leecher = fx.Leecher(directory, metainfo)
+        self.addCleanup(leecher.stop)
+        self.assertEqual(leecher.proc.wait(timeout=40), 0)
+        self.assertEqual((directory / "repris.bin").read_bytes(), data, "reçu du moteur, après son redémarrage")
+        self.until(lambda: not job.seeding)
+        self.assertGreaterEqual(job.uploaded, len(data))
+        self.assertFalse(staging.exists())
+        self.assertEqual(Path(job.path).read_bytes(), data)
+        self.until(lambda: not self.engine.aria2.running)
+
+    def test_a_file_changed_while_the_engine_was_stopped_is_not_shared_again(self):
+        self.config.update({"seedRatio": 1.0, "seedTime": 0})
+        metainfo, _ = self.seed("change.bin", os.urandom(1024 * 1024))
+        job = self.wait(self.engine.add({"torrent": base64.b64encode(metainfo).decode()}), {"completed", "failed"})
+        self.assertTrue(job.seeding, job.error)
+        self.seeder.stop()
+        self.engine.shutdown()
+        with open(job.path, "r+b") as f:  # modifié sur place : les mêmes données que celles du dossier caché
+            f.seek(500_000)
+            f.write(b"modifie")
+        self.restart()
+        job = self.engine.jobs[job.id]
+        self.until(lambda: not job.seeding)  # revérifié : une pièce n'est plus bonne
+        self.assertFalse((self.downloads / "Torrents" / f"{torrent.STAGING}{job.id}").exists())
+        with open(job.path, "rb") as f:
+            f.seek(500_000)
+            self.assertEqual(f.read(7), b"modifie", "son fichier est laissé tel qu'il l'a fait")
+        self.until(lambda: not self.engine.aria2.running)
+
     def test_removing_a_sharing_torrent_stops_it_and_keeps_its_file(self):
         self.config.update({"seedRatio": 1.0})
         data = os.urandom(600_000)
@@ -1992,22 +2053,46 @@ class TorrentFileTest(unittest.TestCase):
         config.update({"seedRatio": 0})  # plus de partage : ceux en cours s'arrêtent aussi
         self.assertTrue(engine._shared_enough(job, 0, 0))
 
-    def test_a_share_cut_by_a_restart_leaves_no_hidden_folder(self):
-        root = Path(tempfile.mkdtemp(dir=TMP))
-        os.environ["PDM_DATA_DIR"] = str(root)
-        folder = root / "dl" / "Torrents"
-        hidden = folder / f"{torrent.STAGING}abc"
-        hidden.mkdir(parents=True)
-        (hidden / "f.bin").write_bytes(b"contenu")
-        os.link(hidden / "f.bin", folder / "f.bin")
-        util.write_json_atomic(paths.jobs_path(), [{
-            "id": "abc", "url": "magnet:?xt=urn:btih:" + "ab" * 20, "kind": "torrent", "status": "completed",
-            "filename": "f.bin", "path": str(folder / "f.bin"), "seeding": True, "uploaded": 5}])
-        config = Config(root / "config.json")
-        job = Engine(config, Tools(config), lambda event: None).jobs["abc"]
-        self.assertEqual((job.seeding, job.uploaded), (False, 5))
-        self.assertFalse(hidden.exists(), "son partage s'est arrêté avec le démon")
-        self.assertEqual((folder / "f.bin").read_bytes(), b"contenu", "le fichier, lui, reste")
+    def test_a_share_that_will_not_resume_leaves_no_hidden_folder(self):
+        def interrupted(case):
+            """Un partage interrompu par l'arrêt du démon, comme il reste sur le disque → le moteur qui repart."""
+            root = Path(tempfile.mkdtemp(dir=TMP))
+            os.environ["PDM_DATA_DIR"] = str(root)
+            folder = root / "dl" / "Torrents"
+            hidden = folder / f"{torrent.STAGING}abc"
+            hidden.mkdir(parents=True)
+            (hidden / "f.bin").write_bytes(b"contenu")
+            os.link(hidden / "f.bin", folder / "f.bin")
+            torrent.keep("abc", fx.make_torrent("http://t.example/announce", "f.bin", b"contenu")[0])
+            job = {"id": "abc", "url": "magnet:?xt=urn:btih:" + "ab" * 20, "kind": "torrent",
+                   "status": "completed", "filename": "f.bin", "path": str(folder / "f.bin"), "size": 7,
+                   "seeding": True, "uploaded": 5, "sharedFor": 60}
+            config = Config(root / "config.json")
+            if case == "fichier supprimé":
+                os.unlink(folder / "f.bin")
+            elif case == ".torrent perdu":
+                torrent.forget("abc")
+            elif case == "ratio atteint":
+                job["uploaded"] = 7
+            elif case == "temps écoulé":
+                config.update({"seedTime": 1})
+            elif case == "plus de partage":
+                config.update({"seedRatio": 0})
+            elif case == "sans reprise automatique":
+                config.update({"autoResume": False})
+            util.write_json_atomic(paths.jobs_path(), [job])
+            return Engine(config, Tools(config), lambda event: None).jobs["abc"], hidden
+
+        job, hidden = interrupted("rien")
+        self.assertTrue(job.seeding and hidden.exists(), "tout est là : il reprendra (Engine.start)")
+        for case in ("fichier supprimé", ".torrent perdu", "ratio atteint", "temps écoulé", "plus de partage",
+                     "sans reprise automatique"):
+            with self.subTest(case=case):
+                job, hidden = interrupted(case)
+                self.assertEqual((job.seeding, job.uploaded), (False, 5 if case != "ratio atteint" else 7))
+                self.assertFalse(hidden.exists())
+                if case != "fichier supprimé":
+                    self.assertEqual(Path(job.path).read_bytes(), b"contenu", "le fichier, lui, reste")
 
     def test_without_aria2c_a_torrent_is_refused_at_once(self):
         root = Path(tempfile.mkdtemp(dir=TMP))

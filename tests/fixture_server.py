@@ -65,6 +65,7 @@ LIMITED = {"active": 0, "peak": 0, "refused": 0}  # connexions de /limited/ (ser
 LIMITED_LOCK = threading.Lock()
 SEEDERS = []  # ports des aria2c qui partagent (Seeder), donnés par /announce
 ANNOUNCED = {}  # empreinte (octets) → ports des pairs qui se sont annoncés à /announce
+ANNOUNCES = []  # (empreinte, port, octets qui lui manquent, événement) de chaque annonce, dans l'ordre
 
 
 def make_file(name, size, seed=None):
@@ -117,6 +118,7 @@ class Handler(SimpleHTTPRequestHandler):
             # double de chaque côté, les deux, jusqu'à l'annonce suivante.
             others = [p for p in ANNOUNCED.get(infohash, []) if p != port and p not in SEEDERS
                       ] if int(query.get("left") or 0) else []
+            ANNOUNCES.append((infohash, port, int(query.get("left") or 0), query.get("event")))
             if port and query.get("event") == "stopped":
                 ANNOUNCED.get(infohash, set()).discard(port)
             elif port:

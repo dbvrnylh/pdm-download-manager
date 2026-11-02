@@ -125,8 +125,7 @@ class Daemon:
                 threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
         finally:
             self.rpc.stop()
-            self.engine.aria2.stop()  # il écrit ses fichiers de contrôle : les torrents reprendront
-            self.engine.save()
+            self.engine.shutdown()  # partages suspendus, aria2c arrêté, liste sauvegardée
             server.close()
             try:
                 os.unlink(sock_path)

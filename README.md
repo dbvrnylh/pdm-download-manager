@@ -231,7 +231,13 @@ sudo apt install aria2
   torrents already sharing. aria2 cannot move what it shares: the files reach `Torrents/` as hard links (the same
   data under two names, no copy), and aria2 keeps reading its hidden folder, which also holds the pieces of
   unchosen files needed to send pieces that straddle two files. When sharing ends, that folder goes. On a disk
-  without hard links (FAT, exFAT), a torrent is put away without sharing. A restart of the engine ends sharing.
+  without hard links (FAT, exFAT), a torrent is put away without sharing.
+- **Sharing goes on after a restart** of the engine (a reboot, an update), like an interrupted download
+  (**Reprendre automatiquement les téléchargements interrompus**), and the time limit counts the time shared
+  before. aria2 first checks every piece again (**Vérification avant partage…**): if the file was changed
+  meanwhile, sharing stops there and the file is left as you made it. Delete the file and sharing does not
+  resume: its hidden folder goes, and the space with it. A magnet link's description, received from its peers,
+  is kept as a `.torrent` for this (and to resume a download without asking the peers again).
 - Through the [JSON-RPC API](#the-aria2-compatible-api): `addUri` with a magnet link, `addTorrent`, `select-file`
   (in both, and in `changeOption`) and `getFiles`, as in aria2.
 
