@@ -127,3 +127,8 @@ def main():
                 write_message(stdout, data)
     except (OSError, ValueError):
         pass
+    # Si le démon a fermé le premier (arrêt, « pdm-host stop »), le fil qui lit Chrome reste
+    # bloqué sur stdin, que Chrome garde ouvert, en tenant le verrou de sys.stdin : Python, en
+    # sortant, attendrait ce verrou et finirait en erreur fatale (SIGABRT). Tout ce qui allait
+    # vers Chrome est déjà écrit (write_message vide le tampon) : on sort sans attendre.
+    os._exit(0)
