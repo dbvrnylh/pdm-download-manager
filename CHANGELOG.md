@@ -245,6 +245,8 @@ versions follow [Semantic Versioning](https://semver.org/).
   certificate.
 
 ### Fixed
+- A torrent added while five others were sharing waited in aria2 without end (aria2 keeps 5 active downloads by
+  default): PDM now lets aria2 keep them all active, and limits the downloads itself as before.
 - A failed save of the download list (disk full, drive unplugged) stopped the engine's heartbeat for good:
   progress, the time window and the countdown before sleep froze until a restart. It is now logged once and
   tried again at the next beat.

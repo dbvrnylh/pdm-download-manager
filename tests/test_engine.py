@@ -1936,6 +1936,8 @@ class TorrentTest(unittest.TestCase):
             aria2c = self.engine.aria2
             self.assertNotIn(aria2c.secret, Path(f"/proc/{aria2c.proc.pid}/cmdline").read_text(), "ps le montrerait")
             self.assertEqual(os.stat(paths.data_dir() / "aria2.conf").st_mode & 0o777, 0o600)
+            # Les torrents qui partagent restent actifs dans aria2c : jamais un téléchargement n'y attend.
+            self.assertEqual(aria2c.call("aria2.getGlobalOption")["max-concurrent-downloads"], "1000")
             with self.assertRaises(torrent.Aria2Error):
                 aria2c.secret, real = "faux", aria2c.secret
                 try:

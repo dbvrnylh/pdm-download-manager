@@ -57,6 +57,9 @@ KEYS = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "upl
         "connections", "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files"]
 SHARE_KEYS = ["status", "uploadSpeed", "uploadLength", "connections", "numSeeders"]
 STOP_WAIT = 5  # s pour qu'aria2c lâche un torrent retiré : il écrit encore son fichier de contrôle
+# Torrents actifs à la fois dans aria2c (5 par défaut : les suivants y attendraient sans fin). PDM
+# limite lui-même les téléchargements ; les autres partagent, finis.
+MAX_ACTIVE = 1000
 MAGNET = re.compile(r"^magnet:\?(.*&)?xt=urn:btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})(&|$)")
 
 
@@ -300,7 +303,7 @@ class Aria2:
         self.proc = subprocess.Popen(
             [exe, f"--conf-path={conf}", "--enable-rpc", f"--rpc-listen-port={self.port}", "--rpc-listen-all=false",
              "--rpc-save-upload-metadata=false", "--seed-ratio=0.0", "--file-allocation=trunc",
-             f"--max-overall-upload-limit={self.upload_limit}",
+             f"--max-overall-upload-limit={self.upload_limit}", f"--max-concurrent-downloads={MAX_ACTIVE}",
              f"--dht-file-path={data / 'dht.dat'}", f"--stop-with-process={os.getpid()}",
              f"--log={data / 'aria2.log'}", "--log-level=warn", "--console-log-level=error", *DISCOVERY],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
