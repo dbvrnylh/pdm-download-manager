@@ -2377,6 +2377,33 @@ class DaemonIdleTest(unittest.TestCase):
         self.assertFalse(check(30.0))
         self.assertFalse(check(60.0))
 
+    def test_a_client_between_two_checks_delays_the_exit(self):
+        # Le test du pont : Chrome arrive à 0,1 s, lance un téléchargement (fini à 2,9 s) et
+        # part, le tout avant la première vérification, à 3,1 s. Aucune ne l'a vu : le démon
+        # se croyait inactif depuis son démarrage, et s'arrêtait à cette vérification.
+        state = {"now": 0.0}
+        fakes = {name: unittest.mock.Mock() for name in ("Config", "Tools", "Engine", "RpcServer")}
+        with unittest.mock.patch.multiple(daemon, time=SimpleNamespace(monotonic=lambda: state["now"]), **fakes):
+            watcher = daemon.Daemon()  # démarré à 0 s
+        watcher.engine = SimpleNamespace(has_work=lambda: False)
+        watcher.rpc = SimpleNamespace(running=False)
+
+        def check(at):
+            state["now"] = at
+            with unittest.mock.patch.object(daemon, "IDLE_EXIT", 3):
+                return watcher._idle_too_long()
+
+        def visit():  # un client qui se connecte puis part, servi par le vrai _serve
+            ours, theirs = socket.socketpair()
+            theirs.close()
+            watcher._serve(ours)
+
+        visit()
+        self.assertFalse(check(3.1), "inactif depuis 0,2 s seulement : trop tôt pour s'arrêter")
+        visit()  # un autre, à 5 s : l'attente repart après lui
+        self.assertFalse(check(6.11))
+        self.assertTrue(check(9.12))
+
 
 class ChecksumTest(unittest.TestCase):
     DATA = b"PDM"

@@ -136,13 +136,17 @@ class BridgeTest(unittest.TestCase):
                 break
         chrome.kill()  # Chrome ferme le canal en plein téléchargement
 
-        self.assertIsNotNone(self._daemon_pid(), "le démon tourne toujours")
+        daemon = self._daemon_pid()
+        self.assertIsNotNone(daemon, "le démon tourne toujours")
         time.sleep(2.5)
         second = self.connect()
         jobs = {j["id"]: j for j in second.request({"type": "list"})["jobs"]}
         job = jobs[job_id]
         self.assertEqual(job["status"], "completed")
         self.assertEqual(hashlib.sha256(Path(job["path"]).read_bytes()).hexdigest(), self.hash)
+        # Le même démon : un nouveau, qui relirait la liste sauvegardée, répondrait pareil,
+        # et cacherait un démon arrêté sitôt le téléchargement fini.
+        self.assertEqual(self._daemon_pids(), [daemon])
 
     def test_cli_imports_a_list_of_links(self):
         chrome = self.connect()

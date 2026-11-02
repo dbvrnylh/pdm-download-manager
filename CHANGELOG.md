@@ -252,6 +252,11 @@ versions follow [Semantic Versioning](https://semver.org/).
   certificate.
 
 ### Fixed
+- The idle engine still quit right after its last download when its client had come and gone between two of
+  its idleness checks (Chrome opened, a download added, Chrome closed): no check had seen it busy, so it
+  counted itself idle since it started, or since an earlier check. Idleness now starts after the last client
+  leaves. The bridge test that reconnects after closing "Chrome" was in fact served by a new engine every
+  time, and failed when it reached the old one while it was stopping.
 - A torrent added while five others were sharing waited in aria2 without end (aria2 keeps 5 active downloads by
   default): PDM now lets aria2 keep them all active, and limits the downloads itself as before.
 - A failed save of the download list (disk full, drive unplugged) stopped the engine's heartbeat for good:

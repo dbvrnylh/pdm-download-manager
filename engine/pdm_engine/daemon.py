@@ -69,7 +69,9 @@ class Daemon:
         self.clients = set()
         self.clients_lock = threading.Lock()
         self.clock = time.monotonic  # remplacée dans les tests
-        self.idle_since = self.clock()  # None : occupé (client connecté ou téléchargement)
+        # Depuis quand une vérification le voit inactif ; None : pas encore vu inactif depuis
+        # son dernier travail (au démarrage, il a pu servir un client avant la première).
+        self.idle_since = None
 
     def emit(self, event):
         """Un événement du moteur : aux clients du démon, et en notification d'aria2 aux clients WebSocket."""
@@ -165,6 +167,9 @@ class Daemon:
         finally:
             with self.clients_lock:
                 self.clients.discard(client)
+                # Un client venu et reparti entre deux vérifications : aucune ne l'a vu,
+                # mais l'inactivité ne commence qu'après lui.
+                self.idle_since = None
             client.alive = False
             conn.close()
 
