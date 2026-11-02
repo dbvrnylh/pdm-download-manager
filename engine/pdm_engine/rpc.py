@@ -59,9 +59,11 @@ OUTBOX = 256  # trames en attente vers un client WebSocket : au-delà, il ne lit
 STATUS = {"queued": "waiting", "downloading": "active", "paused": "paused", "completed": "complete",
           "failed": "error", "canceled": "removed"}
 STOPPED = ("complete", "error", "removed")
-# L'état où entre un téléchargement → la notification d'aria2 qui l'annonce.
+# L'état où entre un téléchargement → la notification d'aria2 qui l'annonce. « seeding » : un torrent
+# fini qui partage, encore actif pour aria2, qui l'annonce à part (onBtDownloadComplete).
 EVENTS = {"active": "aria2.onDownloadStart", "paused": "aria2.onDownloadPause", "removed": "aria2.onDownloadStop",
-          "complete": "aria2.onDownloadComplete", "error": "aria2.onDownloadError"}
+          "complete": "aria2.onDownloadComplete", "error": "aria2.onDownloadError",
+          "seeding": "aria2.onBtDownloadComplete"}
 # Les méthodes d'aria2 que PDM connaît (les autres : « méthode inconnue »).
 METHODS = ("addUri", "addTorrent", "remove", "forceRemove", "pause", "forcePause", "pauseAll", "forcePauseAll",
            "unpause", "unpauseAll", "changePosition", "changeOption", "tellStatus", "getUris", "getFiles",
@@ -103,6 +105,11 @@ def new_secret():
 
 
 # ─── Traduction PDM ↔ aria2 ────────────────────────────────────────────────
+
+
+def aria2_state(job):
+    """L'état d'aria2 d'un téléchargement. Un torrent fini qui partage est encore actif, comme chez aria2."""
+    return "active" if job.seeding else STATUS.get(job.status)
 
 
 def gid(job_id):
@@ -228,7 +235,11 @@ class Api:
     # ─── Commandes ─────────────────────────────────────────────────────────
 
     def remove(self, g):
-        self.engine.cancel(self._job(g).id)
+        job = self._job(g)
+        if job.seeding:  # chez aria2 aussi, retirer un torrent qui partage arrête le partage, et il est fini
+            self.engine.stop_sharing(job.id)
+        else:
+            self.engine.cancel(job.id)
         return g
 
     forceRemove = remove
@@ -251,7 +262,7 @@ class Api:
 
     def unpause(self, g):
         job = self._job(g)
-        if STATUS.get(job.status) != "paused":
+        if aria2_state(job) != "paused":
             raise RpcError(f"{g} n'est pas en pause")
         self.engine.resume(job.id)
         return g
@@ -284,7 +295,7 @@ class Api:
 
     def removeDownloadResult(self, g):
         job = self._job(g)
-        if STATUS.get(job.status) not in STOPPED:
+        if aria2_state(job) not in STOPPED:
             raise RpcError(f"{g} n'est pas terminé : remove d'abord")
         self.engine.remove(job.id)  # le fichier, lui, reste
         return "OK"
@@ -308,15 +319,22 @@ class Api:
 
     def changeGlobalOption(self, options):
         names = {"max-concurrent-downloads": "maxParallel", "max-connection-per-server": "connections",
-                 "split": "connections", "max-overall-download-limit": "speedLimit", "dir": "downloadDir"}
+                 "split": "connections", "max-overall-download-limit": "speedLimit", "dir": "downloadDir",
+                 "max-overall-upload-limit": "uploadLimit", "seed-ratio": "seedRatio", "seed-time": "seedTime"}
         changes = {}
         for key, value in aria2.check(options).items():
             if key not in names:
                 raise RpcError(f"option non prise en charge : {key}")
             if key == "dir":
                 changes["downloadDir"] = value
-            elif key == "max-overall-download-limit":
-                changes["speedLimit"] = aria2.speed(value)
+            elif key in ("max-overall-download-limit", "max-overall-upload-limit"):
+                changes[names[key]] = aria2.speed(value)
+            elif key in ("seed-ratio", "seed-time"):  # des nombres à virgule chez aria2 ; des minutes pour le temps
+                try:
+                    number = float(value)
+                except ValueError:
+                    raise RpcError(f"{key} : un nombre") from None
+                changes[names[key]] = number if key == "seed-ratio" else round(number)
             elif not str(value).isdigit():
                 raise RpcError(f"{key} : un nombre entier")
             else:
@@ -359,10 +377,12 @@ class Api:
     def getGlobalStat(self):
         with self.engine.lock:
             jobs = list(self.engine.jobs.values())
-            states = [STATUS.get(job.status) for job in jobs]
+            states = [aria2_state(job) for job in jobs]
             speed = sum(job.speed or 0 for job in jobs)
-        stopped = sum(state in STOPPED for state in states)
-        return {"downloadSpeed": str(int(speed)), "uploadSpeed": "0", "numActive": str(states.count("active")),
+            upload = sum(job.upload or 0 for job in jobs)
+        stopped = sum(s in STOPPED for s in states)
+        return {"downloadSpeed": str(int(speed)), "uploadSpeed": str(int(upload)),
+                "numActive": str(states.count("active")),
                 "numWaiting": str(states.count("waiting") + states.count("paused")), "numStopped": str(stopped),
                 "numStoppedTotal": str(stopped)}
 
@@ -370,7 +390,9 @@ class Api:
         connections = str(self.config["connections"])
         return {"dir": str(self.config.download_dir()), "max-concurrent-downloads": str(self.config["maxParallel"]),
                 "split": connections, "max-connection-per-server": connections,
-                "max-overall-download-limit": str(self.config["speedLimit"])}
+                "max-overall-download-limit": str(self.config["speedLimit"]),
+                "max-overall-upload-limit": str(self.config["uploadLimit"]),
+                "seed-ratio": f"{self.config['seedRatio']:.1f}", "seed-time": str(self.config["seedTime"])}
 
     def getOption(self, g):
         job = self._job(g)
@@ -402,7 +424,7 @@ class Api:
 
     def _jobs(self, states):
         with self.engine.lock:
-            return [job for job in self.engine.jobs.values() if STATUS.get(job.status) in states]
+            return [job for job in self.engine.jobs.values() if aria2_state(job) in states]
 
     @staticmethod
     def _uris(job):
@@ -412,22 +434,23 @@ class Api:
         if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) for k in keys)):
             raise RpcError("keys : une liste de noms", -32602)
         with self.engine.lock:
-            state = STATUS.get(job.status, "waiting")
+            now = aria2_state(job) or "waiting"
             total = str(job.size or 0)
-            done = total if state == "complete" and job.size else str(job.downloaded or 0)
+            done = total if (now == "complete" or job.seeding) and job.size else str(job.downloaded or 0)
             status = {
-                "gid": gid(job.id), "status": state, "totalLength": total, "completedLength": done,
+                "gid": gid(job.id), "status": now, "totalLength": total, "completedLength": done,
                 "uploadLength": "0", "downloadSpeed": str(int(job.speed or 0)), "uploadSpeed": "0",
                 "connections": str(job.connections or 0),
                 "dir": os.path.dirname(job.path) if job.path else str(self.config.download_dir()),
                 "files": [{"index": "1", "path": job.path or "", "length": total, "completedLength": done,
                            "selected": "true", "uris": self._uris(job)}],
             }
-            if state == "error":
+            if now == "error":
                 status.update(errorCode="1", errorMessage=job.error or "")
             if job.kind == "torrent":  # ce qu'AriaNg lit pour afficher un torrent
                 status.update(bittorrent={"info": {"name": job.filename or ""}}, infoHash=job.infoHash or "",
-                              numSeeders=str(job.sources or 0), uploadSpeed=str(int(job.upload or 0)))
+                              numSeeders=str(job.sources or 0), uploadSpeed=str(int(job.upload or 0)),
+                              uploadLength=str(job.uploaded or 0), seeder="true" if job.seeding else "false")
         return {key: value for key, value in status.items() if keys is None or key in keys}
 
 
@@ -822,7 +845,8 @@ class RpcServer:
         # L'état d'aria2 de chaque téléchargement, tel que vu au dernier événement : une
         # notification n'est envoyée que quand il change (les progrès, eux, arrivent sans cesse).
         with engine.lock:
-            self.states = {job.id: STATUS.get(job.status) for job in engine.jobs.values()}
+            self.states = {job.id: "seeding" if job.seeding else STATUS.get(job.status)
+                           for job in engine.jobs.values()}
         self.states_lock = threading.Lock()
 
     @property
@@ -871,6 +895,8 @@ class RpcServer:
         """
         if event.get("type") == "job":
             job_id, state = event["job"]["id"], STATUS.get(event["job"]["status"])
+            if event["job"].get("seeding"):
+                state = "seeding"
         elif event.get("type") == "removed":
             job_id, state = event["id"], None
         else:

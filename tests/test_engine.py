@@ -945,6 +945,10 @@ class EngineTest(unittest.TestCase):
                 unittest.mock.patch.object(finish, "POWER_DELAY", 0.4):
             with self.assertRaises(ValueError):
                 self.engine.when_done("suspend")  # rien à attendre
+            self.engine.seeds["t"] = None  # un torrent fini qui partage : il ne retarde rien
+            with self.assertRaises(ValueError):
+                self.engine.when_done("suspend")
+            del self.engine.seeds["t"]
             with self.assertRaises(ValueError):
                 self.engine.when_done("reboot")
             job = self.add("/range/mid.bin")
@@ -1435,6 +1439,38 @@ class RpcTest(unittest.TestCase):
             ("DownloadStop", rpc.gid("b")), ("DownloadStop", rpc.gid("d")),  # retirés avant la fin : arrêtés
         ])
 
+    def test_a_torrent_that_shares_is_still_active_like_with_aria2(self):
+        sent = []
+        watcher = rpc.RpcServer(self.engine, self.config)
+        watcher.server = SimpleNamespace(broadcast=lambda frame: sent.append(json.loads(frame[2:])))
+        for job in ({"status": "downloading"}, {"status": "completed", "seeding": True},
+                    {"status": "completed", "seeding": True}, {"status": "completed", "seeding": False}):
+            watcher.observe({"type": "job", "job": {"id": "t", **job}})
+        self.assertEqual([m["method"] for m in sent], ["aria2.onDownloadStart", "aria2.onBtDownloadComplete",
+                                                       "aria2.onDownloadComplete"], "les notifications d'aria2")
+        job = engine_mod.Job(url="magnet:?xt=urn:btih:" + "ab" * 20, kind="torrent", status="completed",
+                             size=1000, downloaded=1000, uploaded=420, seeding=True)
+        with self.engine.lock:
+            self.engine.jobs[job.id] = job
+        g = rpc.gid(job.id)
+        status = self.call("aria2.tellStatus", g, ["status", "seeder", "completedLength", "uploadLength"])
+        self.assertEqual(status, {"status": "active", "seeder": "true", "completedLength": "1000",
+                                  "uploadLength": "420"})
+        self.assertIn(g, [s["gid"] for s in self.call("aria2.tellActive", ["gid"])])
+        self.assertEqual(self.call("aria2.tellStopped", 0, 10, ["gid"]), [])
+        with self.assertRaises(rpc.RpcError):  # pas fini pour aria2 : remove d'abord
+            self.call("aria2.removeDownloadResult", g)
+        self.assertEqual(self.call("aria2.changeGlobalOption", {"seed-ratio": "2.5", "seed-time": "90",
+                                                                 "max-overall-upload-limit": "512K"}), "OK")
+        self.assertEqual((self.config["seedRatio"], self.config["seedTime"], self.config["uploadLimit"]),
+                         (2.5, 90, 512 * 1024))
+        options = self.call("aria2.getGlobalOption")
+        self.assertEqual((options["seed-ratio"], options["seed-time"], options["max-overall-upload-limit"]),
+                         ("2.5", "90", "524288"))
+        for bad in ({"seed-ratio": "beaucoup"}, {"seed-ratio": "-1"}, {"seed-time": "1e9"}):
+            with self.subTest(bad=bad), self.assertRaises(rpc.RpcError):
+                self.call("aria2.changeGlobalOption", bad)
+
     def test_websocket_refuses_web_pages_and_bad_handshakes(self):
         port = self.rpc.server.server_port
         for kwargs, code in (
@@ -1623,7 +1659,8 @@ class TorrentTest(unittest.TestCase):
         (self.root / "data").mkdir()
         self.downloads = self.root / "dl"
         self.config = Config(self.root / "data" / "config.json")
-        self.config.update({"downloadDir": str(self.downloads), "notify": False})
+        # Sans partage après la fin, sauf dans les tests du partage : les autres regardent le téléchargement.
+        self.config.update({"downloadDir": str(self.downloads), "notify": False, "seedRatio": 0})
         quiet = unittest.mock.patch.object(torrent, "DISCOVERY", HERMETIC)  # personne d'autre que l'essaim local
         quiet.start()
         self.addCleanup(quiet.stop)
@@ -1644,6 +1681,7 @@ class TorrentTest(unittest.TestCase):
         data, infohash = fx.make_torrent(self.tracker, name, files)
         seeder = fx.Seeder(directory, data, upload_limit)
         self.addCleanup(seeder.stop)
+        self.seeder = seeder  # le dernier : un test l'arrête, pour que le moteur reste seul à avoir le contenu
         return data, infohash
 
     def wait(self, job, states, timeout=40):
@@ -1800,6 +1838,98 @@ class TorrentTest(unittest.TestCase):
         with self.assertRaises(rpc.RpcError):
             api.dispatch("aria2.changeOption", ["token:s", g, {"select-file": "9"}])
 
+    # ─── Partage, une fois fini ────────────────────────────────────────────
+
+    def test_a_finished_torrent_is_shared_until_it_gave_back_its_size(self):
+        self.config.update({"seedRatio": 1.0, "seedTime": 0})
+        data = os.urandom(2 * 1024 * 1024 + 4321)
+        metainfo, _ = self.seed("partage.bin", data)
+        job = self.wait(self.engine.add({"torrent": base64.b64encode(metainfo).decode()}), {"completed", "failed"})
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertTrue(job.seeding)
+        torrents = self.downloads / "Torrents"
+        staging = torrents / f"{torrent.STAGING}{job.id}"
+        self.assertEqual(Path(job.path), torrents / "partage.bin")
+        self.assertEqual(Path(job.path).read_bytes(), data, "le fichier est à l'utilisateur dès la fin")
+        self.assertEqual(os.stat(job.path).st_nlink, 2, "les mêmes données que celles qu'aria2c lit, sans copie")
+        self.assertTrue(self.engine.has_work(), "le démon reste, le temps du partage")
+        self.assertFalse(self.engine.has_work(sharing=False), "« éteindre quand tout est fini » n'attend pas le partage")
+        self.assertNotIn(job.id, self.engine.runners, "il ne prend plus de place dans la file")
+
+        self.seeder.stop()  # la source d'origine s'en va : le moteur est seul à avoir le contenu
+        directory = Path(tempfile.mkdtemp(dir=self.root))
+        leecher = fx.Leecher(directory, metainfo)
+        self.addCleanup(leecher.stop)
+        self.assertEqual(leecher.proc.wait(timeout=40), 0)
+        self.assertEqual((directory / "partage.bin").read_bytes(), data, "reçu du moteur")
+
+        self.until(lambda: not job.seeding)  # rendu sa taille : ratio 1,0 atteint
+        self.assertGreaterEqual(job.uploaded, len(data))
+        self.assertFalse(staging.exists(), "le partage fini, son dossier caché part")
+        self.assertEqual([p.name for p in torrents.iterdir()], ["partage.bin"])
+        self.assertEqual(Path(job.path).read_bytes(), data)
+        self.assertEqual(os.stat(job.path).st_nlink, 1)
+        shared = [e["job"] for e in self.events if e["type"] == "job" and e["job"].get("seeding")]
+        self.assertTrue(any(j["upload"] > 0 for j in shared), "ce qu'il envoie se voit")
+        self.until(lambda: not self.engine.aria2.running)
+        self.assertFalse(self.engine.has_work())
+
+    def test_sharing_keeps_only_the_chosen_files_and_stops_on_demand(self):
+        self.config.update({"seedRatio": 5.0, "seedTime": 0})
+        metainfo, _, files = self.collection()
+        job = self.engine.add({"torrent": base64.b64encode(metainfo).decode(), "source": "rpc", "selection": [2]})
+        job = self.wait(job, {"completed", "failed"})
+        self.assertEqual((job.status, job.seeding), ("completed", True), job.error)
+        folder = Path(job.path)
+        self.assertEqual(sorted(str(p.relative_to(folder)) for p in folder.rglob("*")), ["sous", "sous/b.bin"],
+                         "chez l'utilisateur, rien que le fichier choisi, même pendant le partage")
+        staging = self.downloads / "Torrents" / f"{torrent.STAGING}{job.id}"
+        self.assertTrue((staging / "coll" / "a.bin").exists(), "les morceaux à cheval restent cachés, pour partager")
+
+        api = rpc.Api(self.engine, self.config)
+        api.secret = "s"
+        g = rpc.gid(job.id)
+        status = api.dispatch("aria2.tellStatus", ["token:s", g, ["status", "seeder", "completedLength"]])
+        self.assertEqual(status, {"status": "active", "seeder": "true", "completedLength": str(job.size)},
+                         "comme chez aria2 : fini, mais encore actif")
+        self.engine.clear_finished()
+        self.assertIn(job.id, self.engine.jobs, "il travaille encore : il reste")
+        self.config.update({"uploadLimit": 64 * 1024})  # vaut aussitôt, même en cours
+        self.until(lambda: self.engine.aria2.call("aria2.getGlobalOption")["max-overall-upload-limit"] == "65536")
+
+        self.assertEqual(api.dispatch("aria2.remove", ["token:s", g]), g)  # chez aria2 : fin du partage
+        self.until(lambda: not job.seeding)
+        self.assertEqual(api.dispatch("aria2.tellStatus", ["token:s", g, ["status"]]), {"status": "complete"})
+        self.assertFalse(staging.exists())
+        self.assertEqual((folder / "sous/b.bin").read_bytes(), files["sous/b.bin"], "ses fichiers restent")
+        with self.assertRaises(ValueError):
+            self.engine.stop_sharing(job.id)  # déjà arrêté
+        self.until(lambda: not self.engine.aria2.running)
+
+    def test_removing_a_sharing_torrent_stops_it_and_keeps_its_file(self):
+        self.config.update({"seedRatio": 1.0})
+        data = os.urandom(600_000)
+        metainfo, _ = self.seed("retire.bin", data)
+        job = self.wait(self.engine.add({"torrent": base64.b64encode(metainfo).decode()}), {"completed", "failed"})
+        self.assertTrue(job.seeding, job.error)
+        path = Path(job.path)
+        self.engine.remove(job.id)
+        self.until(lambda: not self.engine.aria2.running)
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["retire.bin"])
+        self.assertEqual(path.read_bytes(), data)
+
+    def test_without_hard_links_a_torrent_is_put_away_without_sharing(self):
+        self.config.update({"seedRatio": 1.0})
+        data = os.urandom(600_000)
+        metainfo, _ = self.seed("exfat.bin", data)
+        refused = PermissionError(errno.EPERM, "Operation not permitted")  # ce que répond un disque FAT ou exFAT
+        with unittest.mock.patch.object(torrent.os, "link", side_effect=refused):
+            job = self.wait(self.engine.add({"torrent": base64.b64encode(metainfo).decode()}), {"completed", "failed"})
+        self.assertEqual((job.status, job.seeding), ("completed", False), job.error)
+        self.assertEqual(Path(job.path).read_bytes(), data)
+        self.assertEqual([p.name for p in Path(job.path).parent.iterdir()], ["exfat.bin"])
+        self.until(lambda: not self.engine.aria2.running)
+
     def test_aria2c_keeps_its_secret_out_of_sight(self):
         self.engine.aria2.acquire()
         try:
@@ -1844,6 +1974,38 @@ class TorrentFileTest(unittest.TestCase):
                 torrent.magnet_hash(url)
         for name in ("..", "a/b", "a\\b", "", "x\0"):
             self.assertFalse(torrent._safe(name), name)
+
+    def test_sharing_ends_at_the_ratio_or_the_time_of_the_settings(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(root)
+        config = Config(root / "config.json")
+        engine = Engine(config, Tools(config), lambda event: None)
+        job = engine_mod.Job(kind="torrent", size=1000)
+        config.update({"seedRatio": 1.5, "seedTime": 0})
+        self.assertFalse(engine._shared_enough(job, 1499, 10 ** 6), "sans limite de temps")
+        self.assertTrue(engine._shared_enough(job, 1500, 0))
+        config.update({"seedTime": 2})  # minutes
+        self.assertFalse(engine._shared_enough(job, 0, 119))
+        self.assertTrue(engine._shared_enough(job, 0, 120))
+        config.update({"seedRatio": 0})  # plus de partage : ceux en cours s'arrêtent aussi
+        self.assertTrue(engine._shared_enough(job, 0, 0))
+
+    def test_a_share_cut_by_a_restart_leaves_no_hidden_folder(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(root)
+        folder = root / "dl" / "Torrents"
+        hidden = folder / f"{torrent.STAGING}abc"
+        hidden.mkdir(parents=True)
+        (hidden / "f.bin").write_bytes(b"contenu")
+        os.link(hidden / "f.bin", folder / "f.bin")
+        util.write_json_atomic(paths.jobs_path(), [{
+            "id": "abc", "url": "magnet:?xt=urn:btih:" + "ab" * 20, "kind": "torrent", "status": "completed",
+            "filename": "f.bin", "path": str(folder / "f.bin"), "seeding": True, "uploaded": 5}])
+        config = Config(root / "config.json")
+        job = Engine(config, Tools(config), lambda event: None).jobs["abc"]
+        self.assertEqual((job.seeding, job.uploaded), (False, 5))
+        self.assertFalse(hidden.exists(), "son partage s'est arrêté avec le démon")
+        self.assertEqual((folder / "f.bin").read_bytes(), b"contenu", "le fichier, lui, reste")
 
     def test_without_aria2c_a_torrent_is_refused_at_once(self):
         root = Path(tempfile.mkdtemp(dir=TMP))
@@ -1980,6 +2142,17 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             config.update({"windowStart": "06:00"})
         self.assertIn("début et fin sont identiques", str(caught.exception))
+
+    def test_sharing_settings_are_checked(self):
+        config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")
+        self.assertEqual((config["seedRatio"], config["seedTime"], config["uploadLimit"]), (1.0, 1440, 0))
+        changed = config.update({"seedRatio": 2, "seedTime": 0, "uploadLimit": 100 * 1024})
+        self.assertEqual((changed["seedRatio"], changed["seedTime"], changed["uploadLimit"]), (2.0, 0, 102400))
+        for key, bad in (("seedRatio", -0.5), ("seedRatio", 101), ("seedRatio", True), ("seedRatio", "1"),
+                         ("seedTime", -1), ("seedTime", 1.5), ("seedTime", 31 * 24 * 60),
+                         ("uploadLimit", 512), ("uploadLimit", "1M"), ("uploadLimit", True)):
+            with self.subTest(key=key, bad=bad), self.assertRaises(ValueError):
+                config.update({key: bad})
 
     def test_video_quality_is_one_of_the_presets(self):
         config = Config(Path(tempfile.mkdtemp(dir=TMP)) / "config.json")

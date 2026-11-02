@@ -55,6 +55,8 @@ PERSISTED = {
     # Les fichiers d'un torrent : combien il en a, les numéros voulus (None : tous), et s'il attend
     # qu'on les choisisse (None : pas encore demandé ; False : choisi, ou rien à choisir).
     "fileCount": None, "selection": None, "choosing": None,
+    # Un torrent : octets envoyés à ses pairs en tout, et s'il partage encore, fini (voir Engine._share).
+    "uploaded": 0, "seeding": False,
 }
 # Jamais envoyés à l'interface : secrets, ou sans usage pour elle.
 HIDDEN = {"cookies", "headers", "userAgent", "validator", "mirrors", "givenMirrors", "metalink", "startUrl",
@@ -134,6 +136,7 @@ class Engine:
         self.save_lock = threading.Lock()
         self.jobs = {}  # ordre d'insertion = ordre d'ajout
         self.runners = {}
+        self.seeds = {}  # id → TorrentDownload fini qui partage encore (hors de la file : il ne télécharge plus)
         self.reserved = {}  # chemin réservé → id du téléchargement
         self.cancelled = set()  # annulés pendant leur sonde, avant même d'exister
         self.verifying = set()  # fichiers terminés en cours de vérification (« Vérifier… »)
@@ -151,7 +154,8 @@ class Engine:
         self.hosts = Hosts()  # connexions ouvertes chez chaque site, et la limite de chacun
         self.ytdlp_shares = {}  # id → part donnée (octets/s) à un programme à part : yt-dlp, aria2c
         self.ytdlp_reserved = 0  # leur total, lu sans verrou par le seau
-        self.aria2 = torrent.Aria2()  # lancé au premier torrent, arrêté quand aucun ne tourne
+        self.aria2 = torrent.Aria2()  # lancé au premier torrent, arrêté quand aucun ne tourne ni ne partage
+        self.aria2.upload_limit = config["uploadLimit"]
         self.now = time.localtime  # horloge de la plage horaire (remplacée dans les tests)
         self.window_open = None  # état de la plage au dernier coup d'œil
         self._load()
@@ -170,6 +174,13 @@ class Engine:
                 # Interrompu par un arrêt : on reprend, ou on attend l'utilisateur. Un
                 # programmé attend sa plage horaire : ce n'est pas une interruption.
                 job.status = "queued" if self.config["autoResume"] or job.scheduled else "paused"
+            if job.seeding:
+                # Son partage s'est arrêté avec le démon : reste son dossier caché, à côté du
+                # contenu (des liens vers les mêmes données ; le contenu, lui, est chez l'utilisateur).
+                job.seeding = False
+                if job.path:
+                    shutil.rmtree(os.path.join(os.path.dirname(job.path), f"{torrent.STAGING}{job.id}"),
+                                  ignore_errors=True)
             self.jobs[job.id] = job
 
     def start(self):
@@ -259,9 +270,13 @@ class Engine:
         more = len(page) < len(jobs)
         return page, [page[-1]["createdAt"], page[-1]["id"]] if more else None
 
-    def has_work(self):
+    def has_work(self, sharing=True):
+        """Du travail en cours : des téléchargements, leurs fins (extraction, programme), et les torrents qui
+        partagent. Sans ceux-ci pour la veille ou l'extinction « quand tout est fini » : elles attendent les
+        téléchargements, pas une journée de partage."""
         with self.lock:
-            return bool(self.finishing) or any(job.status in ("queued", "downloading") for job in self.jobs.values())
+            return bool(self.finishing or (sharing and self.seeds)) or any(
+                job.status in ("queued", "downloading") for job in self.jobs.values())
 
     # ─── Commandes ─────────────────────────────────────────────────────────
 
@@ -528,11 +543,12 @@ class Engine:
         """Veille (« suspend ») ou extinction (« poweroff ») quand tout sera fini, une fois ; None : rien.
 
         « Tout » : ce qui télécharge, ce qui attend en file (programmés compris : leur plage
-        horaire viendra), et les extractions. Pas ce qui est en pause : ça attend quelqu'un.
+        horaire viendra), et les extractions. Pas ce qui est en pause : ça attend quelqu'un ;
+        ni les torrents qui partagent : ils sont finis.
         """
         if action not in (None, *finish.POWER):
             raise ValueError(f"à la fin : {', '.join(finish.POWER)}, ou rien")
-        if action and not self.has_work() and self.power_at is None:
+        if action and not self.has_work(sharing=False) and self.power_at is None:
             raise ValueError("rien à attendre : aucun téléchargement en cours ni en file")
         with self.lock:
             self.power_action, self.power_at = action, None
@@ -549,7 +565,7 @@ class Engine:
         action = self.power_action
         if action is None:
             return
-        busy = self.has_work()
+        busy = self.has_work(sharing=False)
         with self.lock:
             if busy:  # du travail est revenu (un ajout, une reprise) : on attend encore
                 changed, self.power_at = self.power_at is not None, None
@@ -604,9 +620,9 @@ class Engine:
             job = self.jobs.pop(job_id, None)
             if job is None:
                 return
-            runner = self.runners.get(job_id)
+            runner = self.runners.get(job_id) or self.seeds.get(job_id)
             if runner:
-                runner.stop("canceled")  # le thread nettoiera en voyant le job disparu
+                runner.stop("canceled")  # le thread nettoiera en voyant le job disparu (un partage, son dossier caché)
             else:
                 self._delete_partial(job)
             if delete_file and job.status == "completed" and job.path:
@@ -621,7 +637,9 @@ class Engine:
 
     def clear_finished(self):
         with self.lock:
-            done = [j.id for j in self.jobs.values() if j.status in ("completed", "canceled")]
+            # Un torrent qui partage encore travaille : il reste, comme chez aria2 (purgeDownloadResult).
+            done = [j.id for j in self.jobs.values()
+                    if j.status in ("completed", "canceled") and j.id not in self.seeds]
             for job_id in done:
                 del self.jobs[job_id]
             self.dirty = True
@@ -629,6 +647,15 @@ class Engine:
             torrent.forget(job_id)
             self.emit({"type": "removed", "id": job_id})
         self.save()
+
+    def stop_sharing(self, job_id):
+        """Arrête le partage d'un torrent fini ; ses fichiers restent."""
+        with self.lock:
+            self._get(job_id)
+            runner = self.seeds.get(job_id)
+            if runner is None:
+                raise ValueError("ce torrent ne partage pas")
+        runner.stop("completed")
 
     def verify(self, job_id, text):
         """Compare un fichier terminé à la somme donnée par l'utilisateur. Long : à appeler hors du client.
@@ -725,7 +752,8 @@ class Engine:
             if job.kind == "ytdlp":
                 runner = YtdlpDownload(job, self.config, self.tools)
             else:
-                runner = TorrentDownload(job, self.config, self.aria2, self._torrent_dir(), ask=self._asks(job))
+                runner = TorrentDownload(job, self.config, self.aria2, self._torrent_dir(), ask=self._asks(job),
+                                         share=self.config["seedRatio"] > 0)
             limit = self.config["speedLimit"]
             rates = [job.speedLimit] if job.speedLimit else []  # la sienne, s'il en a une
             if limit:
@@ -782,6 +810,11 @@ class Engine:
             if outcome == "completed":
                 job.completedAt = time.time()
                 job.segments = []
+            # Fini, il partage : hors de la file (sa place va au suivant), mais aria2c le garde.
+            sharing = getattr(runner, "seeding", False) and not removed
+            if sharing:
+                self.seeds[job.id] = runner
+                job.seeding = True
             self.dirty = True
         if not removed:
             log.info("%s %s : %s %s", job.id, job.filename, outcome, error or "")
@@ -791,6 +824,37 @@ class Engine:
                 self._after(job)
         self.save()
         self.schedule()
+        if sharing:
+            self._share(job, runner)
+        elif getattr(runner, "seeding", False):  # retiré à l'instant même où il finissait
+            runner.stop("canceled")
+            runner.share(lambda sent, elapsed: True)
+
+    def _share(self, job, runner):
+        """Le partage d'un torrent fini, dans le fil de son téléchargement, jusqu'à ce qu'il ait assez donné."""
+        log.info("%s %s : partage", job.id, job.filename)
+        try:
+            uploaded = runner.share(lambda sent, elapsed: self._shared_enough(job, sent, elapsed))
+        except Exception:  # bug : journalisé ; le téléchargement, lui, est fini
+            log.exception("partage de %s", job.id)
+            uploaded = job.uploaded
+        with self.lock:
+            self.seeds.pop(job.id, None)
+            job.seeding, job.uploaded = False, uploaded
+            job.upload, job.connections, job.sources = 0.0, 0, 0
+            self.dirty = True
+            removed = job.id not in self.jobs
+        log.info("%s %s : partage fini, %s envoyés", job.id, job.filename, human_size(uploaded))
+        if not removed:
+            self._publish(job)
+        self.save()
+
+    def _shared_enough(self, job, sent, elapsed):
+        """Assez partagé : `seedRatio` fois sa taille envoyée, ou `seedTime` minutes passées (lus à chaque
+        fois : un réglage changé vaut aussi pour les partages en cours ; un ratio de 0 les arrête)."""
+        ratio, minutes = self.config["seedRatio"], self.config["seedTime"]
+        return (not ratio or (job.size and sent >= ratio * job.size)
+                or bool(minutes and elapsed >= minutes * 60))
 
     def _after(self, job):
         """Extraction de l'archive et programme de fin (voir finish.py), à part : ils peuvent être longs."""
@@ -868,6 +932,8 @@ class Engine:
             time.sleep(self.TICK)
             self._check_window()
             self._check_power()
+            if self.config["uploadLimit"] != self.aria2.upload_limit:  # réglage changé
+                self.aria2.limit_upload(self.config["uploadLimit"])
             updates = []
             with self.lock:
                 now = time.monotonic()
@@ -881,6 +947,17 @@ class Engine:
                         job.speed, job.eta = progress["speed"] or 0.0, progress.get("eta")
                     else:
                         self._measure_speed(job, now)
+                    updates.append(job.public())
+                # Finis : seulement ce qu'ils envoient. Sans réécrire la liste pour autant : un partage dure
+                # des heures, et son total est sauvegardé à la fin (voir _share).
+                for job_id, runner in self.seeds.items():
+                    job = self.jobs.get(job_id)
+                    if job is None:
+                        continue
+                    progress = runner.progress()
+                    job.uploaded = progress.get("uploaded", job.uploaded)
+                    job.upload, job.connections = progress.get("upload", 0.0), progress.get("connections", 0)
+                    job.sources = progress.get("sources", 0)
                     updates.append(job.public())
                 if self.runners:
                     self.dirty = True
@@ -914,6 +991,7 @@ class Engine:
         job.sources = progress.get("sources", 0)
         job.stage = progress.get("stage")
         job.upload = progress.get("upload", 0.0)
+        job.uploaded = progress.get("uploaded", job.uploaded)
 
     # ─── Utilitaires ───────────────────────────────────────────────────────
 
@@ -938,7 +1016,7 @@ class Engine:
 
     @staticmethod
     def _reset(job):
-        job.segments, job.bar, job.downloaded = [], None, 0
+        job.segments, job.bar, job.downloaded, job.uploaded = [], None, 0, 0
         job.sha256 = job.verified = None
         if job.kind in ("http", "torrent"):
             job.path = None

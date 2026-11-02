@@ -196,6 +196,9 @@ class Daemon:
             elif kind == "choose":
                 self.engine.choose(message["id"], message.get("files"))
                 reply()
+            elif kind == "stop-sharing":
+                self.engine.stop_sharing(message["id"])
+                reply()
             elif kind == "when-done":
                 self.engine.when_done(message.get("action"))
                 reply(power=self.engine.power_state())

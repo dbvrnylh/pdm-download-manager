@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { detectMedia, totalSize } from '../extension/lib/media.js';
 import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
-import { formatBytes, formatDuration, formatSpeed } from '../extension/lib/format.js';
+import { formatBytes, formatDuration, formatRatio, formatSpeed } from '../extension/lib/format.js';
 import { PRESETS, isStreamUrl, directFilename, httpJob, isTorrent, torrentJob, videoJob } from '../extension/lib/jobs.js';
 import { MAX_LINKS, formatEntry, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
@@ -96,6 +96,9 @@ test('format', () => {
   assert.equal(formatBytes(1021.9 * 1024), '1 Mo');
   assert.equal(formatBytes(-1), '?');
   assert.equal(formatSpeed(2 * 1024 ** 2), '2 Mo/s');
+  assert.equal(formatRatio(420, 1000), '0,42');
+  assert.equal(formatRatio(2000, 1000), '2,00');
+  assert.equal(formatRatio(5, 0), '?');
   assert.equal(formatDuration(42.4), '42 s');
   assert.equal(formatDuration(185), '3 min 05 s');
   assert.equal(formatDuration(3 * 3600 + 120), '3 h 02 min');

@@ -79,6 +79,29 @@
           <label class="check"><input id="notify" type="checkbox" /> Notification du bureau à la fin de chaque téléchargement</label>
           <label class="check"><input id="auto-resume" type="checkbox" /> Reprendre automatiquement les téléchargements interrompus</label>
           <label class="check"><input id="torrent-ask" type="checkbox" /> Demander quels fichiers télécharger, pour un torrent qui en a plusieurs</label>
+          <div class="grid" id="sharing">
+            <label class="field">
+              <span>Partager un torrent fini, jusqu’au ratio</span>
+              <input id="seed-ratio" type="number" min="0" max="100" step="0.1" required />
+              <small>Envoyer aux autres pairs jusqu’à cette fois sa taille (1 : autant que reçu). 0 : ne pas partager.</small>
+            </label>
+            <label class="field">
+              <span>Durée maximale du partage</span>
+              <span class="input-row">
+                <input id="seed-time" type="number" min="0" max="720" step="0.5" placeholder="sans limite" />
+                <span class="unit">h</span>
+              </span>
+              <small>Le partage s’arrête au premier des deux. Vide : seulement au ratio.</small>
+            </label>
+            <label class="field">
+              <span>Vitesse d’envoi des torrents</span>
+              <span class="input-row">
+                <input id="upload-limit" type="number" min="0" step="1" placeholder="illimitée" />
+                <span class="unit">Ko/s</span>
+              </span>
+              <small>Pendant et après leur téléchargement. Vide : pas de limite.</small>
+            </label>
+          </div>
           <label class="check"><input id="extract" type="checkbox" /> Extraire les archives terminées (.zip, .tar.gz, .tar.xz…) dans un dossier à côté</label>
           <label class="field on-complete">
             <span>Programme à lancer à la fin de chaque téléchargement</span>

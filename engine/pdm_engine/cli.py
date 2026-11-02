@@ -238,7 +238,8 @@ def main(args):
         print(f"  yt-dlp : {tools['ytdlp'] or 'absent'}{source} · ffmpeg : {'oui' if tools['ffmpeg'] else 'non'}"
               f" · JavaScript : {tools['jsRuntime'] or 'aucun'}")
         for job in reversed(reply["jobs"][:10]):  # les 10 derniers, le plus récent en bas
-            print(f"  [{job['status']:<11}] {job['filename'] or job['url']}")
+            status = "seeding" if job.get("seeding") else job["status"]  # fini, il partage encore
+            print(f"  [{status:<11}] {job['filename'] or job['url']}")
     elif command == "add":
         url, source, kind, quality, later, expected = _parse_add(args[1:])
         if source is not None:

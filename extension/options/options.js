@@ -50,6 +50,9 @@ const fields = {
   autoResume: document.getElementById('auto-resume'),
   extract: document.getElementById('extract'),
   torrentAsk: document.getElementById('torrent-ask'),
+  seedRatio: document.getElementById('seed-ratio'),
+  seedTime: document.getElementById('seed-time'),
+  uploadLimit: document.getElementById('upload-limit'),
   onComplete: document.getElementById('on-complete'),
   videoQuality: document.getElementById('video-quality'),
   languages: document.getElementById('languages'),
@@ -125,6 +128,11 @@ function fillForm(config) {
   fields.extract.checked = Boolean(config.extract);
   fields.torrentAsk.closest('label').hidden = !('torrentAsk' in config); // moteur plus ancien
   fields.torrentAsk.checked = config.torrentAsk !== false;
+  // Le partage : en heures et en Ko/s ici, en minutes et en octets/s pour le moteur.
+  document.getElementById('sharing').hidden = !('seedRatio' in config); // moteur plus ancien
+  fields.seedRatio.value = config.seedRatio ?? 1;
+  fields.seedTime.value = config.seedTime ? Math.round((config.seedTime / 60) * 100) / 100 : '';
+  fields.uploadLimit.value = config.uploadLimit ? Math.round(config.uploadLimit / 1024) : '';
   fields.onComplete.value = config.onComplete ?? '';
   // Un moteur plus ancien (install.sh pas relancé) ne connaît pas ces réglages :
   // on les cache, sinon il refuserait tout l'enregistrement.
@@ -235,6 +243,11 @@ form.addEventListener('submit', async (event) => {
   };
   if (!fields.videoQuality.closest('label').hidden) changes.videoQuality = fields.videoQuality.value;
   if (!fields.torrentAsk.closest('label').hidden) changes.torrentAsk = fields.torrentAsk.checked;
+  if (!document.getElementById('sharing').hidden) {
+    changes.seedRatio = Number(fields.seedRatio.value) || 0;
+    changes.seedTime = Math.round((Number(fields.seedTime.value) || 0) * 60);
+    changes.uploadLimit = Math.round((Number(fields.uploadLimit.value) || 0) * 1024);
+  }
   if (!fields.extract.closest('label').hidden) {
     changes.extract = fields.extract.checked;
     changes.onComplete = fields.onComplete.value.trim() || null;

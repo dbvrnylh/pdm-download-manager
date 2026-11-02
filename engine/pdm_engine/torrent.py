@@ -13,6 +13,13 @@ démarre, et l'arrête quand aucun ne tourne plus. Il le pilote par son API JSON
 Un torrent s'écrit dans un dossier caché à lui (comme le .pdm d'un fichier), puis
 rejoint le dossier des torrents une fois fini : annuler n'efface que ce dossier, jamais
 un fichier de l'utilisateur qui porterait le même nom que le torrent.
+
+Fini, il est partagé à son tour (voir TorrentDownload.share). aria2c ne sait pas
+déplacer ce qu'il partage : le contenu rejoint le dossier des torrents par des liens
+physiques (les mêmes données, sous deux noms), et aria2c continue de lire son dossier
+caché, qui garde aussi les morceaux à cheval des fichiers non choisis, sans lesquels
+ces pièces-là ne s'envoient pas. Le partage fini, le dossier caché part ; les fichiers
+de l'utilisateur restent.
 """
 
 import base64
@@ -46,8 +53,10 @@ FOLDER = "Torrents"  # dossier des torrents dans celui de PDM, quand il range pa
 STAGING = ".pdm-torrent-"  # préfixe du dossier caché où un torrent s'écrit, jusqu'à sa fin
 # Trouver des pairs sans tracker (DHT), et par ceux déjà trouvés (PEX). Coupés dans les tests.
 DISCOVERY = ["--enable-dht=true", "--enable-peer-exchange=true"]
-KEYS = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "connections",
-        "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files"]
+KEYS = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "uploadLength",
+        "connections", "numSeeders", "followedBy", "errorCode", "errorMessage", "bittorrent", "dir", "files"]
+SHARE_KEYS = ["status", "uploadSpeed", "uploadLength", "connections", "numSeeders"]
+STOP_WAIT = 5  # s pour qu'aria2c lâche un torrent retiré : il écrit encore son fichier de contrôle
 MAGNET = re.compile(r"^magnet:\?(.*&)?xt=urn:btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})(&|$)")
 
 
@@ -221,7 +230,8 @@ class Aria2:
         self.proc = None
         self.port = None
         self.secret = None
-        self.users = 0  # torrents en cours : à zéro, aria2c s'arrête
+        self.users = 0  # torrents en cours ou qui partagent : à zéro, aria2c s'arrête
+        self.upload_limit = 0  # octets/s envoyés par tous les torrents (0 : illimitée), donnés par le moteur
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # jamais par un proxy
 
     @property
@@ -244,6 +254,15 @@ class Aria2:
     def stop(self):
         with self.lock:
             self._stop()
+
+    def limit_upload(self, rate):
+        """Change la vitesse d'envoi de tous les torrents, même en cours (0 : aucune limite)."""
+        self.upload_limit = rate
+        if self.running:
+            try:
+                self.call("aria2.changeGlobalOption", {"max-overall-upload-limit": str(rate)})
+            except Aria2Error:
+                pass  # au pire, au prochain lancement
 
     def call(self, method, *params):
         body = json.dumps({"jsonrpc": "2.0", "id": "pdm", "method": method,
@@ -276,9 +295,12 @@ class Aria2:
             os.fchmod(f.fileno(), 0o600)  # même s'il existait déjà avec d'autres droits
             f.write(f"rpc-secret={self.secret}\n")
         data = paths.data_dir()
+        # --seed-ratio=0.0 : aria2c partage sans fin ce qui est fini ; PDM l'arrête lui-même (voir
+        # TorrentDownload.share), pour que les réglages changés s'appliquent aux partages en cours.
         self.proc = subprocess.Popen(
             [exe, f"--conf-path={conf}", "--enable-rpc", f"--rpc-listen-port={self.port}", "--rpc-listen-all=false",
-             "--rpc-save-upload-metadata=false", "--seed-time=0", "--file-allocation=trunc",
+             "--rpc-save-upload-metadata=false", "--seed-ratio=0.0", "--file-allocation=trunc",
+             f"--max-overall-upload-limit={self.upload_limit}",
              f"--dht-file-path={data / 'dht.dat'}", f"--stop-with-process={os.getpid()}",
              f"--log={data / 'aria2.log'}", "--log-level=warn", "--console-log-level=error", *DISCOVERY],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -326,19 +348,22 @@ def _free_port():
 class TorrentDownload:
     """Un torrent ou un lien magnet, téléchargé par aria2c. Même interface que HttpDownload."""
 
-    def __init__(self, job, config, aria2, directory, ask=False):
+    def __init__(self, job, config, aria2, directory, ask=False, share=False):
         self.job = job
         self.ask = ask  # plusieurs fichiers, et personne n'a encore choisi lesquels : s'arrêter pour demander
+        self.share_after = share  # fini, le partager (sinon aria2c s'arrête de lui-même à la fin)
         self.config = config
         self.aria2 = aria2
         self.directory = Path(directory)  # le dossier des torrents
-        self.staging = self.directory / f"{STAGING}{job.id}"  # où il s'écrit, jusqu'à sa fin
+        self.staging = self.directory / f"{STAGING}{job.id}"  # où il s'écrit, jusqu'à sa fin (et son partage)
         self.limit_rate = None  # octets/s, donnés par le moteur (sa part de la limite, ou la sienne)
         self.stop_event = threading.Event()
         self.stop_reason = None
         self.lock = threading.Lock()
         self.gid = None
-        self.state = {"downloaded": job.downloaded or 0, "size": job.size}
+        self.seeding = False  # fini, et il partage : run() a rendu la main, aria2c le garde (voir share)
+        self.sent = job.uploaded or 0  # octets envoyés aux pairs avant ce téléchargement-ci d'aria2c
+        self.state = {"downloaded": job.downloaded or 0, "size": job.size, "uploaded": self.sent}
 
     # ─── Pilotage par le moteur ────────────────────────────────────────────
 
@@ -380,14 +405,46 @@ class TorrentDownload:
         except OSError as e:  # le disque : dossier impossible à créer, contenu impossible à déplacer
             raise DownloadError(f"écriture impossible : {e.strerror or e}") from None
         finally:
+            if not self.seeding:  # sinon, share() le gardera, puis le rendra
+                self._forget()
+                self.aria2.release()
+
+    def share(self, enough):
+        """Partage ce qui est fini, jusqu'à ce que `enough(octets envoyés, secondes)` le dise, qu'on
+        l'arrête (stop), ou qu'aria2c s'en aille avec le démon. Rend les octets envoyés en tout.
+
+        Appelé après run(), quand il a rendu « completed » avec `seeding` : le contenu est déjà
+        chez l'utilisateur, ceci ne fait plus qu'envoyer. À la fin, le dossier caché part.
+        """
+        started = time.monotonic()
+        try:
+            while not self.stop_event.wait(POLL):
+                status = self.aria2.call("aria2.tellStatus", self.gid, SHARE_KEYS)
+                sent = self.sent + int(status.get("uploadLength") or 0)
+                with self.lock:
+                    self.state = {"uploaded": sent, "upload": float(status.get("uploadSpeed") or 0),
+                                  "connections": int(status.get("connections") or 0),
+                                  "sources": int(status.get("numSeeders") or 0)}
+                if status["status"] != "active" or enough(sent, time.monotonic() - started):
+                    break
+        except Aria2Error:
+            pass  # aria2c parti (le démon s'arrête) : le partage avec lui
+        finally:
             self._forget()
+            shutil.rmtree(self.staging, ignore_errors=True)
+            self.seeding = False
             self.aria2.release()
+        with self.lock:
+            self.state = {"uploaded": self.state["uploaded"]}
+            return self.state["uploaded"]
 
     # ─── Déroulement ───────────────────────────────────────────────────────
 
     def _run(self):
         self.staging.mkdir(parents=True, exist_ok=True)
         options = {"dir": str(self.staging), "max-download-limit": str(self.limit_rate or 0)}
+        if not self.share_after:
+            options["seed-time"] = "0"  # aria2c s'arrête de lui-même à la fin, sans partager
         metainfo = self._metainfo()
         if metainfo is not None:
             files = parse_torrent(metainfo)["files"]
@@ -406,6 +463,7 @@ class TorrentDownload:
             if status.get("followedBy"):  # description reçue : le vrai téléchargement la suit, en pause
                 self._forget()
                 self.gid, metadata = status["followedBy"][0], False
+                self.sent = self.state["uploaded"]  # le nouveau téléchargement d'aria2c compte depuis zéro
                 files = [[os.path.relpath(f["path"], self.staging), int(f["length"])]
                          for f in self.aria2.call("aria2.getFiles", self.gid)]
                 keep_files(self.job.id, files)
@@ -419,7 +477,16 @@ class TorrentDownload:
                 continue
             self._read(status, metadata)
             if status["status"] == "complete":
-                self._deliver(status)
+                self._deliver(status, self._unchosen())
+                return "completed"
+            if self.share_after and status["status"] == "active" and not metadata and self._finished(status):
+                # Fini, et aria2c partage déjà : le contenu rejoint l'utilisateur sans l'interrompre.
+                if self._link(status):
+                    self.seeding = True
+                    return "completed"
+                unchosen = self._unchosen()  # liens impossibles sur ce disque : rangé comme sans partage
+                self._forget()
+                self._deliver(status, unchosen)
                 return "completed"
             if status["status"] == "error":
                 raise DownloadError(status.get("errorMessage") or f"aria2c : erreur {status.get('errorCode')}")
@@ -465,32 +532,86 @@ class TorrentDownload:
                 "speed": speed, "eta": (total - done) / speed if speed > 1 and total else None,
                 "connections": peers, "sources": int(status.get("numSeeders") or 0),
                 "upload": float(status.get("uploadSpeed") or 0), "stage": stage,
+                "uploaded": self.sent + int(status.get("uploadLength") or 0),
             }
 
-    def _deliver(self, status):
-        """Fini : le contenu rejoint le dossier des torrents, sous un nom libre ; son dossier caché part."""
+    @staticmethod
+    def _finished(status):
+        """Tout ce qui est voulu est reçu (et vérifié, pièce par pièce) : aria2c ne télécharge plus."""
+        total = int(status.get("totalLength") or 0)
+        return total > 0 and int(status.get("completedLength") or 0) >= total
+
+    def _content(self, status):
+        """Le contenu fini, dans le dossier caché : un fichier, ou le dossier du torrent."""
         name = ((status.get("bittorrent") or {}).get("info") or {}).get("name") or self.job.filename
         if not name or not _safe(name):
             raise DownloadError(f"nom de torrent refusé : {name!r}")
         source = self.staging / name
         if not source.exists():
             raise DownloadError(f"contenu du torrent introuvable une fois fini ({name})")
-        self._drop_unchosen()
-        target = unique_path(self.directory, name)
+        return source
+
+    def _deliver(self, status, unchosen):
+        """Fini : le contenu rejoint le dossier des torrents, sous un nom libre ; son dossier caché part."""
+        source = self._content(status)
+        self._drop_unchosen(unchosen)
+        target = unique_path(self.directory, source.name)
         os.replace(source, target)
         shutil.rmtree(self.staging, ignore_errors=True)  # reste : le fichier de contrôle .aria2
         self.job.filename, self.job.path = target.name, str(target)
 
-    def _drop_unchosen(self):
-        """Les fichiers non choisis qu'aria2c a quand même créés (des morceaux à cheval) : inutiles, ils partent.
+    def _link(self, status):
+        """Fini, et partagé : le contenu rejoint le dossier des torrents par des liens physiques, sous un nom
+        libre, sans les fichiers non choisis ; aria2c continue de lire le dossier caché.
+
+        False : liens impossibles ici (un disque FAT ou exFAT…), et rien n'est resté de l'essai.
+        """
+        source = self._content(status)
+        unchosen = {os.path.realpath(path) for path in self._unchosen()}
+        target = unique_path(self.directory, source.name)
+        created = False
+        try:
+            if source.is_file():
+                os.link(source, target)
+                created = True
+            else:
+                target.mkdir()
+                created = True
+                root = os.path.realpath(source)
+                for directory, _, names in os.walk(root):
+                    for entry in names:
+                        path = os.path.join(directory, entry)
+                        if path in unchosen or os.path.islink(path) or not os.path.isfile(path):
+                            continue
+                        copy = target / os.path.relpath(path, root)
+                        copy.parent.mkdir(parents=True, exist_ok=True)
+                        os.link(path, copy)
+        except OSError as e:
+            log.info("%s : partage impossible dans %s (%s), rangé sans partager",
+                     self.job.id, self.directory, e.strerror or e)
+            if created and target.is_dir():  # rien que des liens créés ici : les données restent cachées
+                shutil.rmtree(target, ignore_errors=True)
+            elif created:
+                target.unlink(missing_ok=True)
+            return False
+        self.job.filename, self.job.path = target.name, str(target)
+        return True
+
+    def _unchosen(self):
+        """Les fichiers non choisis, d'après aria2c : il en crée quand même (des morceaux à cheval)."""
+        if not self.job.selection or self.gid is None:
+            return []
+        try:
+            return [f["path"] for f in self.aria2.call("aria2.getFiles", self.gid) if f.get("selected") == "false"]
+        except Aria2Error:
+            return []
+
+    def _drop_unchosen(self, unchosen):
+        """Les fichiers non choisis qu'aria2c a quand même créés : inutiles, ils partent.
 
         Seulement dans son dossier caché, avant que le contenu en sorte ; puis les dossiers restés vides.
         """
-        if not self.job.selection:
-            return
-        try:
-            unchosen = [f["path"] for f in self.aria2.call("aria2.getFiles", self.gid) if f.get("selected") == "false"]
-        except Aria2Error:
+        if not unchosen:
             return
         staging = os.path.realpath(self.staging)
         for path in unchosen:
@@ -505,12 +626,28 @@ class TorrentDownload:
                     pass
 
     def _forget(self):
-        """aria2c oublie ce téléchargement (fini, arrêté ou annulé) ; ses fichiers restent."""
+        """aria2c oublie ce téléchargement (fini, arrêté, annulé, ou qui partageait) ; ses fichiers restent.
+
+        Il attend qu'aria2c l'ait lâché : retiré, aria2c écrit encore son fichier de contrôle,
+        qui referait naître le dossier caché effacé juste après.
+        """
         gid, self.gid = self.gid, None
         if gid is None or not self.aria2.running:
             return
-        for method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
+        try:
+            self.aria2.call("aria2.forceRemove", gid)
+        except Aria2Error:
+            pass  # déjà fini
+        deadline = time.monotonic() + STOP_WAIT
+        while time.monotonic() < deadline:
             try:
-                self.aria2.call(method, gid)
+                status = self.aria2.call("aria2.tellStatus", gid, ["status"])["status"]
+                if status not in ("active", "waiting", "paused"):
+                    break
             except Aria2Error:
-                pass  # déjà fini, ou déjà oublié
+                break  # déjà oublié
+            time.sleep(0.05)
+        try:
+            self.aria2.call("aria2.removeDownloadResult", gid)
+        except Aria2Error:
+            pass  # déjà oublié

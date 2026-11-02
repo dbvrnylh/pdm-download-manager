@@ -12,7 +12,7 @@ import { CATEGORIES, OTHER, categoryFor } from '../lib/categories.js';
 import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
 import { basename, filenameFromUrl } from '../lib/filename.js';
-import { formatBytes, formatDuration, formatSpeed } from '../lib/format.js';
+import { formatBytes, formatDuration, formatRatio, formatSpeed } from '../lib/format.js';
 import { PRESETS, httpJob, torrentJob, videoJob } from '../lib/jobs.js';
 import { MAX_LINKS, formatEntry, parseLinkList } from '../lib/linklist.js';
 import { inWindow } from '../lib/schedule.js';
@@ -164,6 +164,9 @@ function fromEngine(job) {
     extracted: job.extracted,
     afterError: job.afterError,
     upload: job.upload ?? 0,
+    // Un torrent fini qui partage encore, et ce qu'il a envoyé à ses pairs en tout.
+    seeding: Boolean(job.seeding),
+    uploaded: job.uploaded ?? 0,
     // Les fichiers d'un torrent : combien, combien voulus, et s'il attend qu'on choisisse.
     fileCount: job.fileCount ?? 0,
     chosenCount: job.chosenCount ?? job.fileCount ?? 0,
@@ -398,7 +401,7 @@ function describe(entry) {
       const parts = ['Terminé', formatBytes(entry.total ?? entry.done), from];
       // « Vérification… 42 % » ou « Extraction… 42 % », puis leur résultat.
       const extracted = entry.extracted ? `extrait dans « ${basename(entry.extracted)} »` : '';
-      const after = entry.stage ? [entry.stage] : [integrity(entry), extracted, entry.afterError ?? ''];
+      const after = entry.stage ? [entry.stage] : [integrity(entry), extracted, entry.afterError ?? '', sharing(entry)];
       return [...parts, ...after.filter(Boolean)].join(' · ');
     }
     case 'missing':
@@ -408,6 +411,15 @@ function describe(entry) {
     default:
       return `Échec : ${entry.error ?? 'erreur inconnue'}`;
   }
+}
+
+// Un torrent fini : ce qu'il envoie encore, à combien de pairs, et son ratio (envoyé / reçu) ; ou ''.
+function sharing(entry) {
+  if (entry.kind !== 'torrent' || (!entry.seeding && !entry.uploaded)) return '';
+  const ratio = `ratio ${formatRatio(entry.uploaded, entry.total)}`;
+  if (!entry.seeding) return `partagé, ${ratio}`;
+  const peers = entry.connections ? plural(entry.connections, 'pair') : 'en attente de pairs';
+  return ['partage', ...(entry.upload > 0 ? [`↑ ${formatSpeed(entry.upload)}`] : []), peers, ratio].join(', ');
 }
 
 // Résultat de la dernière comparaison du fichier aux sommes attendues, ou ''.
@@ -528,6 +540,7 @@ function engineActions(entry) {
         button('Dossier', send('show')),
         // Un torrent est vérifié morceau par morceau pendant qu'il arrive (SHA-1 de chaque pièce).
         ...(entry.kind === 'torrent' ? [] : [button('Vérifier…', () => openVerify(id))]),
+        ...(entry.seeding ? [button('Arrêter le partage', send('stop-sharing'))] : []),
         remove,
       ];
     case 'canceled':

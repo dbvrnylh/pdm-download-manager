@@ -224,8 +224,14 @@ sudo apt install aria2
 - PDM starts `aria2c` itself, only while a torrent runs, and stops it after. It listens on `127.0.0.1` only,
   with a random secret given through a file only you can read, never on the command line (`ps` shows that to
   every account).
-- **Sharing:** while it downloads, a torrent sends pieces to other peers, as BitTorrent works. Once complete,
-  PDM stops sharing it.
+- **Sharing:** while it downloads, a torrent sends pieces to other peers, as BitTorrent works. Once complete, it
+  is yours at once, and PDM keeps sharing it until it has sent as much as it received (ratio 1), for one day at
+  most; the manager shows what it sends, to how many peers, and its ratio, with **Arrêter le partage**. Set the
+  ratio (0: no sharing), the time limit and the upload speed in **Réglages**; a changed setting also applies to
+  torrents already sharing. aria2 cannot move what it shares: the files reach `Torrents/` as hard links (the same
+  data under two names, no copy), and aria2 keeps reading its hidden folder, which also holds the pieces of
+  unchosen files needed to send pieces that straddle two files. When sharing ends, that folder goes. On a disk
+  without hard links (FAT, exFAT), a torrent is put away without sharing. A restart of the engine ends sharing.
 - Through the [JSON-RPC API](#the-aria2-compatible-api): `addUri` with a magnet link, `addTorrent`, `select-file`
   (in both, and in `changeOption`) and `getFiles`, as in aria2.
 
@@ -256,18 +262,20 @@ curl -s http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":1,"method":"aria
   (several `--allow` for several, `--allow none` for none again).
 - While it is on, the engine stays running even with nothing to do, like aria2: the tools expect to find it.
 - Over WebSocket (`ws://127.0.0.1:6800/jsonrpc`), the same calls, plus aria2's notifications: `onDownloadStart`,
-  `onDownloadPause`, `onDownloadStop`, `onDownloadComplete` and `onDownloadError`, sent the moment a download
-  changes state, so a tool no longer asks for the state of every download each second.
+  `onDownloadPause`, `onDownloadStop`, `onDownloadComplete`, `onDownloadError` and `onBtDownloadComplete`, sent
+  the moment a download changes state, so a tool no longer asks for the state of every download each second.
+- A complete torrent that still shares is `active` with `seeder` `true`, as in aria2; `remove` ends its sharing.
 - What works: adding (`addUri`, with `out`, `header`, `referer`, `user-agent`, `checksum`, `pause`, `split`,
   `max-connection-per-server`, `max-download-limit`, and a place in the queue; several addresses are mirrors of
   the same file, used when a checksum can verify it), following (`tellStatus`, `tellActive`, `tellWaiting` in
   queue order, `tellStopped`, `getGlobalStat`, `getFiles`, `getUris`, `getOption`), pausing, resuming and
   removing, one by one or all at once, the queue order (`changePosition`), one download's connections and speed
   (`changeOption`, even while it runs), the global settings (`changeGlobalOption`: simultaneous downloads,
-  connections, speed limit, folder), `system.multicall` and batches.
+  connections, speed limit, folder, and for torrents `seed-ratio`, `seed-time`, `max-overall-upload-limit`),
+  `system.multicall` and batches.
 - Files always go to PDM's folder, sorted by category: `dir` is only accepted when it names that folder. Other
   options about how to download (`min-split-size`, `max-tries`…) are accepted and left to PDM. Not offered:
-  torrents and Metalink files (`addTorrent`, `addMetalink`), `changeUri`.
+  Metalink files (`addMetalink`), `changeUri`.
 
 ## How it works
 
@@ -465,8 +473,9 @@ Engine status: `~/.local/share/pdm/app/pdm-host status` · Log: `~/.local/share/
 - **The program run at the end is yours only:** it is set in the settings page or `config.json`, never through
   the JSON-RPC API, and is started without a shell, with its arguments as a list.
 - **BitTorrent shows your IP address to the other peers** of a torrent, and you share pieces while you download:
-  that is how the protocol works, in PDM as in any client. Where sharing a work without its owner's permission
-  is illegal, downloading it with BitTorrent is sharing it.
+  that is how the protocol works, in PDM as in any client. Once complete, PDM keeps sharing (ratio 1, one day at
+  most) unless you set the ratio to 0 in **Réglages**. Where sharing a work without its owner's permission is
+  illegal, downloading it with BitTorrent is sharing it.
 - **Private browsing** downloads are never taken over.
 - **Link checksums stay in the extension:** on a click on a file's link, only the text of its row and the page
   lines that name it are read, kept in memory for a minute, and never sent anywhere but to the engine.

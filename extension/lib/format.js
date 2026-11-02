@@ -19,6 +19,12 @@ export function formatSpeed(bytesPerSecond) {
   return `${formatBytes(bytesPerSecond)}/s`;
 }
 
+// Ratio de partage d'un torrent : envoyé / reçu, « 0,42 ». Sans taille connue : « ? ».
+export function formatRatio(sent, size) {
+  if (!size || !Number.isFinite(sent)) return '?';
+  return (sent / size).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 export function formatDuration(seconds) {
   const s = Math.round(seconds);
   if (s < 60) return `${s} s`;

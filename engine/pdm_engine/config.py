@@ -31,9 +31,16 @@ DEFAULTS = {
     "extract": False,  # extraire les archives .zip et .tar terminées, dans un dossier à côté (voir finish.py)
     "onComplete": None,  # programme lancé à la fin de chaque téléchargement, comme --on-download-complete d'aria2
     "torrentAsk": True,  # un torrent de plusieurs fichiers attend qu'on choisisse lesquels (voir Engine.choose)
+    # Un torrent fini est partagé à son tour (voir Engine._share), jusqu'à avoir envoyé `seedRatio`
+    # fois sa taille (0 : pas de partage), ou pendant `seedTime` minutes au plus (0 : sans limite de
+    # temps) ; le ratio d'aria2 par défaut, borné à une journée. `uploadLimit` : octets/s envoyés
+    # par tous les torrents, pendant et après leur téléchargement ; 0 : illimitée.
+    "seedRatio": 1.0, "seedTime": 24 * 60, "uploadLimit": 0,
 }
 
-LIMITS = {"connections": (1, 32), "maxParallel": (1, 10), "rpcPort": (1024, 65535)}
+LIMITS = {"connections": (1, 32), "maxParallel": (1, 10), "rpcPort": (1024, 65535), "seedTime": (0, 30 * 24 * 60)}
+MAX_RATIO = 100.0
+MIN_UPLOAD = 1024  # octets/s : en dessous, les pairs ne recevraient presque rien
 # Mêmes clés que ytdlp.PRESETS : hauteur maximale de l'image, ou l'audio seul.
 QUALITIES = ("best", "1080", "720", "480", "audio")
 LANG_CODE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")  # fr, es-419, pt-br…
@@ -131,6 +138,15 @@ class Config:
                         value == 0 or MIN_SPEED <= value <= MAX_SPEED):
                     raise ValueError("vitesse maximale : 0 (illimitée) ou au moins 16 Ko/s")
                 value = int(value)
+            elif key == "uploadLimit":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+                        value == 0 or MIN_UPLOAD <= value <= MAX_SPEED):
+                    raise ValueError("vitesse d'envoi : 0 (illimitée) ou au moins 1 Ko/s")
+                value = int(value)
+            elif key == "seedRatio":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= MAX_RATIO:
+                    raise ValueError(f"ratio de partage : de 0 (ne pas partager) à {MAX_RATIO:g}")
+                value = round(float(value), 2)
             elif key in ("windowStart", "windowEnd"):
                 if not isinstance(value, str) or not CLOCK.match(value):
                     raise ValueError(f"heure « {value} » refusée (format HH:MM, par exemple 23:00)")

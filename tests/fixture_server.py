@@ -30,7 +30,8 @@ Routes :
   /mirror/SORTE/NOM un miroir : good (le fichier), stale (une autre version, plus longue), corrupt (même
                     taille, un octet faux tous les 4 Ko), down (404)
   /page/NOM         page HTML simple (titre NOM) avec liens, pour les tests navigateur
-  /announce         un tracker BitTorrent : il donne pour pairs les Seeder lancés (voir plus bas)
+  /announce         un tracker BitTorrent : il donne pour pairs les Seeder lancés (voir plus bas), et
+                    ceux qui se sont annoncés pour le même torrent (le moteur, qui partage à son tour)
 Tout autre chemin : servi depuis --static si fourni (fichiers statiques).
 
 En HTTPS (start(tls=…), certificat de tls_files) : les mêmes routes, et les adresses
@@ -49,6 +50,7 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote_to_bytes
 
 RATE = 2 * 1024 * 1024  # octets/s par connexion
 PIECE = 256 * 1024  # morceaux des documents Metalink, comme chez LibreOffice
@@ -62,6 +64,7 @@ UNSTABLE = [0]
 LIMITED = {"active": 0, "peak": 0, "refused": 0}  # connexions de /limited/ (serveur entier)
 LIMITED_LOCK = threading.Lock()
 SEEDERS = []  # ports des aria2c qui partagent (Seeder), donnés par /announce
+ANNOUNCED = {}  # empreinte (octets) → ports des pairs qui se sont annoncés à /announce
 
 
 def make_file(name, size, seed=None):
@@ -107,12 +110,22 @@ class Handler(SimpleHTTPRequestHandler):
         HOSTS.append((self.headers.get("Host"), path, self.headers.get("Cookie")))
         route, _, rest = path.lstrip("/").partition("/")
         if route == "announce":  # tracker : les pairs, en liste compacte (BEP 23)
-            peers = b"".join(socket.inet_aton("127.0.0.1") + port.to_bytes(2, "big") for port in SEEDERS)
+            query = dict(part.partition("=")[::2] for part in self.path.partition("?")[2].split("&"))
+            infohash, port = unquote_to_bytes(query.get("info_hash", "")), int(query.get("port") or 0)
+            others = [p for p in ANNOUNCED.get(infohash, []) if p != port and p not in SEEDERS]
+            if port and query.get("event") == "stopped":
+                ANNOUNCED.get(infohash, set()).discard(port)
+            elif port:
+                ANNOUNCED.setdefault(infohash, set()).add(port)
+            peers = b"".join(socket.inet_aton("127.0.0.1") + p.to_bytes(2, "big") for p in SEEDERS + others)
             body = bencode({"interval": 60, "peers": peers})
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            return self.wfile.write(body)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return None  # un aria2c qui s'en va annonce son départ sans attendre la réponse
         if route == "range":
             return self._file(rest, ranges=True)
         if route == "norange":
@@ -427,7 +440,25 @@ class Seeder:
         SEEDERS.append(self.port)
 
     def stop(self):
-        SEEDERS.remove(self.port)
+        if self.port in SEEDERS:  # une seconde fois : déjà arrêté
+            SEEDERS.remove(self.port)
+        self.proc.kill()
+        self.proc.wait()
+
+
+class Leecher:
+    """Un aria2c qui télécharge un torrent dans `directory` (sans le partager ensuite), puis s'en va."""
+
+    def __init__(self, directory, torrent):
+        path = Path(directory) / "leech.torrent"
+        path.write_bytes(torrent)
+        self.proc = subprocess.Popen(
+            ["aria2c", "--no-conf", "-q", "--enable-dht=false", "--enable-dht6=false", "--bt-enable-lpd=false",
+             "--enable-peer-exchange=false", "--seed-time=0", f"--dir={directory}", str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def stop(self):
         self.proc.kill()
         self.proc.wait()
 

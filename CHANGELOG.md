@@ -6,6 +6,18 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Sharing a torrent once complete. It is yours at once, and PDM keeps sending it to other peers until it has
+  sent as much as it received (ratio 1), for one day at most: **Réglages** sets the ratio (0: no sharing), the
+  time limit and the upload speed of torrents (during and after their download); a changed setting applies at
+  once, to torrents already sharing too. The manager shows what it sends, to how many peers and its ratio, with
+  **Arrêter le partage**; the total sent stays after. aria2 cannot move what it shares, so the files reach
+  `Torrents/` as hard links (the same data, no copy) while aria2 reads its hidden folder, which also keeps the
+  pieces of unchosen files without which pieces straddling two files cannot be sent; the folder goes when
+  sharing ends, also after a restart that cut it. On a disk without hard links (FAT, exFAT), the torrent is put
+  away without sharing. A torrent that shares keeps the engine running, and stays when finished downloads are
+  cleared. API: a sharing torrent is `active` with `seeder` `true` and its `uploadLength`, as in aria2, `remove`
+  ends its sharing, `onBtDownloadComplete` is sent, and `changeGlobalOption` / `getGlobalOption` take
+  `seed-ratio`, `seed-time` and `max-overall-upload-limit`.
 - Choosing the files of a torrent. One of several files waits for the choice (setting **Demander quels fichiers
   télécharger**, on by default; never for the API or the terminal): a `.torrent` waits as soon as it is added,
   without even starting aria2c; a magnet link first gets the description from its peers (aria2's
