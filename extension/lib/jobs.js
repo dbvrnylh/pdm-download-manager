@@ -57,11 +57,24 @@ export async function httpJob(
 }
 
 // Torrent : un lien magnet, ou l'adresse d'un .torrent, que le moteur lit avec
-// les cookies du site (un tracker privé ne le donne qu'à ses membres).
+// les cookies du site (un tracker privé ne le donne qu'à ses membres). Un
+// .torrent du disque (file://, glissé dans un onglet) : le moteur l'ouvre lui-même.
 export async function torrentJob(url, { referer, source, headers, filename } = {}) {
   const job = { id: newJobId(), kind: 'torrent', url, referer, source, filename };
-  if (/^magnet:/i.test(url)) return job;
+  if (/^(magnet|file):/i.test(url)) return job;
   return { ...job, ...(headers ? { headers } : { cookies: await cookieHeader(url) }), userAgent: navigator.userAgent };
+}
+
+// Octets d'un fichier .torrent, comme torrent.MAX_TORRENT dans le moteur.
+export const MAX_TORRENT = 10 * 1024 * 1024;
+
+// Un .torrent choisi ou déposé dans le gestionnaire : ses octets, en base64
+// comme addTorrent d'aria2. Le moteur n'a rien à demander à aucun site.
+export function torrentFileJob(bytes, { source } = {}) {
+  let binary = '';
+  // Par tranches : String.fromCharCode(...tout) ferait déborder la pile dès 1 Mo.
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return { id: newJobId(), kind: 'torrent', torrent: btoa(binary), source };
 }
 
 export function isTorrent(name, mime) {

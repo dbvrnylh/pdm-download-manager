@@ -5,7 +5,7 @@ import { detectMedia, totalSize } from '../extension/lib/media.js';
 import { categoryFor, extensionOf } from '../extension/lib/categories.js';
 import { sanitizeFilename, filenameFromDisposition, filenameFromUrl, mediaFilename, basename } from '../extension/lib/filename.js';
 import { formatBytes, formatDuration, formatRatio, formatSpeed } from '../extension/lib/format.js';
-import { PRESETS, isStreamUrl, directFilename, httpJob, isTorrent, torrentJob, videoJob } from '../extension/lib/jobs.js';
+import { MAX_TORRENT, PRESETS, isStreamUrl, directFilename, httpJob, isTorrent, torrentFileJob, torrentJob, videoJob } from '../extension/lib/jobs.js';
 import { MAX_LINKS, formatEntry, parseLinkList } from '../extension/lib/linklist.js';
 import { isKnownVariant, masterVariants, playlistKey } from '../extension/lib/hls.js';
 import { addMedia, getMedia } from '../extension/lib/store.js';
@@ -344,8 +344,19 @@ test('jobs : un torrent, lien magnet ou .torrent lu avec les cookies du site', a
   assert.equal(magnet.kind, 'torrent');
   assert.equal('cookies' in magnet, false, 'un lien magnet ne va à aucun site');
   assert.equal((await torrentJob('https://tracker.example/t/1.torrent')).cookies, 'membre=42');
+  const local = await torrentJob('file:///home/moi/T%C3%A9l%C3%A9chargements/a.torrent', { source: 'intercept' });
+  assert.equal('cookies' in local, false, 'un .torrent du disque ne va à aucun site');
   delete globalThis.chrome;
   assert.equal(isTorrent('Debian.TORRENT'), true);
   assert.equal(isTorrent('fichier.bin', 'application/x-bittorrent'), true);
   assert.equal(isTorrent('torrent.zip', 'application/zip'), false);
+});
+
+test('jobs : un .torrent du disque part en base64, même gros', () => {
+  const small = torrentFileJob(new TextEncoder().encode('d4:infod4:name1:aee'), { source: 'manual' });
+  assert.deepEqual({ ...small, id: undefined }, { id: undefined, kind: 'torrent', torrent: 'ZDQ6aW5mb2Q0Om5hbWUxOmFlZQ==', source: 'manual' });
+  // Plus gros qu'une tranche, et que la pile ne supporterait d'un coup : identique à Buffer.
+  const big = new Uint8Array(MAX_TORRENT / 10).map((_, i) => (i * 7919) % 256);
+  assert.throws(() => String.fromCharCode(...big), RangeError, 'sans tranches, la pile déborde');
+  assert.equal(torrentFileJob(big).torrent, Buffer.from(big).toString('base64'));
 });

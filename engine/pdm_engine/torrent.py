@@ -33,6 +33,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -180,6 +181,28 @@ def fetch(job):
         parse_torrent(data)
     except ValueError as e:
         raise DownloadError(f"ce lien ne donne pas un fichier .torrent ({e})") from None
+    return data
+
+
+def read_local(path):
+    """Un .torrent du disque (pdm-host add, un fichier glissé dans le navigateur) → ses octets ; ValueError sinon.
+
+    Ouvert sans attendre (un tube nommé bloquerait la lecture), et lu seulement si c'est un vrai fichier.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("ce n'est pas un fichier")
+            with os.fdopen(fd, "rb", closefd=False) as f:
+                data = f.read(MAX_TORRENT + 1)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise ValueError(f"impossible de le lire ({e.strerror})") from None
+    if len(data) > MAX_TORRENT:
+        raise ValueError("fichier .torrent de plus de 10 Mo")
+    parse_torrent(data)
     return data
 
 

@@ -94,6 +94,7 @@ Laisse le dépôt à sa place : le navigateur charge l'extension depuis ce dossi
 | Télécharger une liste de liens | Gestionnaire → **Importer une liste…**, ou `pdm-host add --file liens.txt`. Voir [ci-dessous](#télécharger-une-liste-de-liens). |
 | Télécharger plus tard (la nuit) | Gestionnaire → **Plus tard** sur un téléchargement, ou la case **Plus tard** à l'import d'une liste, ou `pdm-host add --later URL`. Il n'avance que pendant la plage horaire des **Réglages** ; le reste part tout de suite. |
 | Vérifier un fichier | Rien à faire quand la page affiche sa somme à côté du lien : PDM la relève au clic et vérifie le fichier. Sinon, gestionnaire → **Vérifier…** sur un téléchargement terminé → colle la somme du site (SHA-256, SHA-512, SHA-1 ou MD5). Pas celle que PDM affiche : comparé à lui-même, un fichier correspond toujours, et PDM la refuse. |
+| Télécharger un torrent | Clique son lien magnet ou son lien `.torrent`, comme d'habitude ; ou colle le lien magnet dans le gestionnaire. Un fichier `.torrent` déjà sur ton disque : gestionnaire → **Ouvrir un .torrent…**, ou glisse-le sur le gestionnaire ou dans un onglet du navigateur, ou `pdm-host add fichier.torrent`. Il faut aria2 (`sudo apt install aria2`). |
 | Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp, `--quality 720` pour la qualité, `--checksum sha-256=…` pour une somme attendue, comme aria2). |
 
 Si un site très protégé refuse le moteur, **Avec Chrome** relance le téléchargement dans le navigateur,

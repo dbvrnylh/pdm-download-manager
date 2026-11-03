@@ -421,6 +421,44 @@ esac
             time.sleep(0.2)
         self.assertEqual(aria2c(), [], "aria2c part avec le démon")
 
+    @unittest.skipUnless(shutil.which("aria2c"), "aria2c absent : sudo apt install aria2")
+    def test_a_torrent_file_from_the_disk(self):
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+        folder = self.downloads.parent / "mes torrents"
+        folder.mkdir(parents=True)
+        dropped, dropped_hash = fx.make_torrent(self.base + "/announce", "glissé.bin", os.urandom(1000))
+        typed, typed_hash = fx.make_torrent(self.base + "/announce", "tapé.bin", os.urandom(1000))
+        (folder / "glissé là.torrent").write_bytes(dropped)
+        (folder / "tapé.torrent").write_bytes(typed)
+
+        # Glissé dans un onglet : la prise de contrôle le donne en file://, le démon le lit.
+        added = chrome.request({"type": "add", "probe": True, "job": {
+            "kind": "torrent", "url": (folder / "glissé là.torrent").as_uri(), "source": "intercept",
+            "filename": "glissé là.torrent"}})
+        self.assertTrue(added["ok"], added)
+        self.assertEqual((added["job"]["filename"], added["job"]["infoHash"]), ("glissé.bin", dropped_hash))
+        other = chrome.request({"type": "add", "probe": True, "job": {"kind": "torrent", "url": "file:///etc/passwd"}})
+        self.assertFalse(other["ok"])  # Chrome le garde
+        self.assertIn("fichier .torrent illisible", other["error"])
+
+        # Au terminal : son chemin, ici relatif au dossier courant.
+        def cli(*args):
+            return subprocess.run([str(HOST), "add", *args], capture_output=True, text=True, env=self.env,
+                                  cwd=folder, timeout=30)
+
+        done = cli("tapé.torrent")
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "Ajouté."), done.stderr)
+        jobs = {j["infoHash"]: j for j in chrome.request({"type": "list"})["jobs"]}
+        self.assertEqual((jobs[typed_hash]["kind"], jobs[typed_hash]["source"], jobs[typed_hash]["filename"]),
+                         ("torrent", "cli", "tapé.bin"))
+        missing = cli("absent.torrent")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("absent.torrent : impossible de le lire", missing.stderr)
+        self.assertIn("ni --video", cli("--video", "tapé.torrent").stderr)
+        for job in jobs.values():
+            chrome.request({"type": "cancel", "id": job["id"]})
+
     def test_the_managers_commands_reach_the_engine(self):
         chrome = self.connect()
         chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})

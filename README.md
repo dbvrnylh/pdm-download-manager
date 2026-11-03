@@ -48,8 +48,9 @@ in the spirit of Internet Download Manager — for Chrome, Chromium, Brave, Edge
 - **Your queue, your way.** Drag waiting downloads into the order they should start, give one download its own
   number of connections or speed limit (even while it runs), have finished archives extracted next to them, run
   your own program after each download, and put the computer to sleep or shut it down once everything is done.
-- **Torrents and magnet links.** Click a magnet link or a `.torrent` link and PDM downloads what it describes,
-  with [aria2](https://aria2.github.io/) doing the BitTorrent work in the background (`sudo apt install aria2`).
+- **Torrents and magnet links.** Click a magnet link or a `.torrent` link, or open a `.torrent` file you already
+  have, and PDM downloads what it describes, with [aria2](https://aria2.github.io/) doing the BitTorrent work in
+  the background (`sudo apt install aria2`).
 - **Watch while it downloads.** **Lire** on a video or a song that is still downloading, from a link or a
   torrent, opens it in your player (VLC, mpv…): the beginning plays at once, a jump ahead sends a connection
   there, and the connections take turns in front of the playback when one alone is slower than the video.
@@ -111,7 +112,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Limit one download, or give it more connections | Manager → **Options…** on it: connections and maximum speed for this file only, applied at once while it runs (a video: from its next start). |
 | Sleep or shut down when everything is done | Manager → **À la fin : veille** or **éteindre** (or `pdm-host when-done suspend\|poweroff`). Once nothing downloads or waits in the queue, a 60 s countdown with **Annuler** appears, then systemd puts the computer to sleep or shuts it down. Once only: the choice goes back to "rien". |
 | Watch a video while it downloads | Manager → **Lire** on it. See [below](#watch-while-it-downloads). |
-| Download a torrent | Click its magnet link or its `.torrent` link, as usual; or paste the magnet link in the manager, or `pdm-host add "magnet:?xt=…"`. Needs aria2 (`sudo apt install aria2`). See [below](#torrents-and-magnet-links). |
+| Download a torrent | Click its magnet link or its `.torrent` link, as usual; or paste the magnet link in the manager, or `pdm-host add "magnet:?xt=…"`. A `.torrent` file already on your disk: Manager → **Ouvrir un .torrent…**, or drop it on the manager or in a browser tab, or `pdm-host add file.torrent`. Needs aria2 (`sudo apt install aria2`). See [below](#torrents-and-magnet-links). |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 | Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
@@ -216,6 +217,10 @@ sudo apt install aria2
 - **Click a magnet link** in the browser, or a **`.torrent` link**: PDM takes it like any download. A `.torrent`
   is read at once, with the site's cookies (private trackers); if it is not one, the browser keeps the file.
   Without aria2, or with **Prendre le contrôle des téléchargements** off, links go to your system as before.
+- **A `.torrent` file already on your disk:** **Ouvrir un .torrent…** in the manager (several at once), or drop
+  it on the manager's window, or in any browser tab (taken like a download; the file stays where it is), or
+  `pdm-host add file.torrent` (its path, relative or not). The engine reads it itself and asks no site. The JSON-RPC
+  API opens no file of the computer: a script sends the torrent itself (`addTorrent`).
 - Files go to `Torrents/` in PDM's folder (a whole folder for a multi-file torrent). Until it is complete, a
   torrent is written in a hidden folder of its own (`.pdm-torrent-…`): cancel it and only that folder goes.
 - **Choose its files.** A torrent of several files waits for your choice: the **Fichiers du torrent** window

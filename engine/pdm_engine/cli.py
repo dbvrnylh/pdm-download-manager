@@ -1,6 +1,8 @@
 """Aiguillage des sous-commandes de pdm-host."""
 
+import base64
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -48,7 +50,7 @@ def _all_jobs(connection):
 
 
 ADD_USAGE = ("Usage : pdm-host add [--video] [--quality best|1080|720|480|audio] [--later] "
-             "(ADRESSE [--checksum sha-256=SOMME] | --file liens.txt)")
+             "(ADRESSE [--checksum sha-256=SOMME] | FICHIER.torrent | --file liens.txt)")
 
 
 def _parse_add(args):
@@ -94,6 +96,18 @@ def _parse_add(args):
     if expected and (source is not None or video):
         sys.exit("--checksum vaut pour un seul fichier : ni --file, ni --video.")
     return url, source, "ytdlp" if video else "http", quality, later, [expected] if expected else []
+
+
+def _torrent_file(arg):
+    """Le chemin d'un .torrent du disque → ses octets en base64, comme addTorrent ; None : une adresse."""
+    from .torrent import read_local
+
+    if re.match(r"^[a-z][a-z0-9+.-]*:", arg, re.I) or not arg.lower().endswith(".torrent"):
+        return None
+    try:
+        return base64.b64encode(read_local(arg)).decode()
+    except ValueError as e:
+        sys.exit(f"{arg} : {e}")
 
 
 def _add_list(source, kind, quality, later):
@@ -245,8 +259,15 @@ def main(args):
         if source is not None:
             _add_list(source, kind, quality, later)
             return
-        reply = _request({"type": "add", "job": {"url": url, "kind": kind, "preset": quality, "source": "cli",
-                                                 "scheduled": later, "checksums": expected}})
+        data = _torrent_file(url)
+        if data is None:
+            job = {"url": url, "kind": kind, "preset": quality, "source": "cli", "scheduled": later,
+                   "checksums": expected}
+        elif kind != "http" or expected:
+            sys.exit("Un fichier .torrent : ni --video, ni --quality, ni --checksum.")
+        else:
+            job = {"kind": "torrent", "torrent": data, "source": "cli", "scheduled": later}
+        reply = _request({"type": "add", "job": job})
         print("Ajouté." if reply["ok"] else f"Erreur : {reply['error']}")
     elif command == "rpc":
         _rpc(args[1:])

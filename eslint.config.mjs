@@ -24,6 +24,7 @@ export default [
         URL: 'readonly',
         fetch: 'readonly',
         AbortSignal: 'readonly',
+        btoa: 'readonly',
       },
     },
     rules: {

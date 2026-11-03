@@ -175,17 +175,20 @@ async function decide(item) {
 // Chrome ; sinon Chrome continue normalement : rien n'est jamais perdu.
 async function handOverToEngine(item, requested) {
   const url = item.finalUrl || item.url;
-  if (item.incognito || item.state !== 'in_progress' || !/^https?:/i.test(url)) return false;
+  const filename = requested ?? basename(item.filename);
+  const torrent = isTorrent(filename, item.mime);
+  // Un .torrent du disque glissé dans un onglet arrive en file:// : le moteur l'ouvre lui-même.
+  const local = torrent && /^file:/i.test(url);
+  if (item.incognito || item.state !== 'in_progress' || !(local || /^https?:/i.test(url))) return false;
   if (await takeBypass(item.url)) return false;
   const client = await getEngine();
   if (!client) return false;
 
-  const filename = requested ?? basename(item.filename);
   // Rejouée par le moteur ; s'il ne l'a pas vue, cookies reconstitués comme avant.
   const headers = takeHeaders(recentRequests, [item.finalUrl, item.url]);
   // Un .torrent : le moteur le lit tout de suite, et télécharge ce qu'il décrit (aria2c).
   // Sans aria2c, il refuse : Chrome garde le fichier .torrent, comme sans PDM.
-  const job = isTorrent(filename, item.mime)
+  const job = torrent
     ? await torrentJob(url, { referer: item.referrer || undefined, source: 'intercept', headers, filename })
     : await httpJob(url, {
         filename,

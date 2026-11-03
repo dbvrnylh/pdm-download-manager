@@ -6,6 +6,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Opening a `.torrent` file already on the disk. **Ouvrir un .torrent…** in the manager picks one or several; one
+  can also be dropped on the manager's window, or in any browser tab, where the browser turns it into a `file://`
+  download that PDM takes over (the file stays where it is); and `pdm-host add file.torrent` takes its path,
+  relative or not. Until now only magnet links and `.torrent` links of a website were accepted: a file dropped in
+  the browser stayed with the browser. The engine reads the file itself (a regular file only, 10 MB at most, opened
+  without waiting so a named pipe cannot block it); this way is open to the extension and the terminal only, not
+  to the JSON-RPC API, which receives the torrent itself (`addTorrent`).
 - Watching a video from a torrent while it downloads: **Lire** on a torrent plays its video or song (the biggest of
   the chosen files). What is readable comes from aria2's bitfield, a piece being marked once checked and written.
   aria2 picks pieces at random and cannot fetch a given byte, but can put the beginning and end of a file first

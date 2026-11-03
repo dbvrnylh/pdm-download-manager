@@ -2205,6 +2205,37 @@ class TorrentFileTest(unittest.TestCase):
         for name in ("..", "a/b", "a\\b", "", "x\0"):
             self.assertFalse(torrent._safe(name), name)
 
+    def test_a_torrent_file_on_the_disk_is_read_with_care(self):
+        folder = Path(tempfile.mkdtemp(dir=TMP)) / "Téléchargements à moi"
+        folder.mkdir()
+        single, _ = fx.make_torrent("http://t.example/announce", "f.bin", b"x" * 1000)
+        path = folder / "f.torrent"
+        path.write_bytes(single)
+        self.assertEqual(torrent.read_local(path), single)
+        fifo = folder / "tube.torrent"
+        os.mkfifo(fifo)  # sans personne pour y écrire : une lecture ordinaire attendrait pour toujours
+        big = folder / "gros.torrent"
+        with open(big, "wb") as f:
+            f.truncate(torrent.MAX_TORRENT + 1)
+        fake = folder / "faux.torrent"
+        fake.write_text("pas un torrent")
+        for bad, error in ((folder / "absent.torrent", "impossible de le lire"), (folder, "pas un fichier"),
+                           (fifo, "pas un fichier"), (big, "plus de 10 Mo"), (fake, "illisible")):
+            with self.subTest(bad=bad.name), self.assertRaises(ValueError) as caught:
+                torrent.read_local(bad)
+            self.assertIn(error, str(caught.exception))
+
+        # Glissé dans un onglet, il arrive en file:// : le démon le lit, et le nom du .torrent ne compte plus.
+        given = base64.b64encode(single).decode()
+        spec = daemon._from_disk({"kind": "torrent", "url": path.as_uri(), "filename": "f.torrent", "source": "x"})
+        self.assertEqual(spec, {"kind": "torrent", "url": None, "filename": None, "source": "x", "torrent": given})
+        local = daemon._from_disk({"kind": "torrent", "url": "file://localhost" + quote(str(path))})
+        self.assertEqual(local["torrent"], given)
+        with self.assertRaises(ValueError):
+            daemon._from_disk({"kind": "torrent", "url": "file://serveur/partage/f.torrent"})
+        plain = {"kind": "http", "url": path.as_uri()}
+        self.assertIs(daemon._from_disk(plain), plain, "un fichier ordinaire : refusé ensuite (http ou https)")
+
     def test_what_of_a_torrent_plays_while_it_downloads(self):
         pieces = (int("f0", 16), 8, 100)  # pièces de 100 octets : les 4 premières reçues
         self.assertEqual([torrent.covered(pieces, start, 800) for start in (0, 150, 399, 400, 750)],

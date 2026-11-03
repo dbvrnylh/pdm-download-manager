@@ -13,7 +13,7 @@ import { el } from '../lib/dom.js';
 import { EngineClient } from '../lib/engine.js';
 import { basename, filenameFromUrl } from '../lib/filename.js';
 import { formatBytes, formatDuration, formatRatio, formatSpeed } from '../lib/format.js';
-import { PRESETS, httpJob, torrentJob, videoJob } from '../lib/jobs.js';
+import { MAX_TORRENT, PRESETS, httpJob, isTorrent, torrentFileJob, torrentJob, videoJob } from '../lib/jobs.js';
 import { MAX_LINKS, formatEntry, parseLinkList } from '../lib/linklist.js';
 import { inWindow } from '../lib/schedule.js';
 import { markBypass } from '../lib/store.js';
@@ -859,6 +859,46 @@ document.getElementById('clear-complete').addEventListener('click', async () => 
 });
 
 document.getElementById('open-options').addEventListener('click', () => chrome.runtime.openOptionsPage());
+
+// ─── Un .torrent du disque ─────────────────────────────────────────────────
+
+const torrentFile = document.getElementById('torrent-file');
+
+async function openTorrents(files) {
+  for (const file of files) {
+    try {
+      if (!isTorrent(file.name, file.type)) throw new Error('seuls les fichiers .torrent s’ouvrent ici');
+      if (file.size > MAX_TORRENT) throw new Error('fichier .torrent de plus de 10 Mo');
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await engine.request({ type: 'add', job: torrentFileJob(bytes, { source: 'manual' }) });
+    } catch (err) {
+      showError(`${file.name} : ${err.message}`);
+    }
+  }
+}
+
+document.getElementById('open-torrent').addEventListener('click', () => torrentFile.click());
+
+torrentFile.addEventListener('change', () => {
+  const files = [...torrentFile.files];
+  torrentFile.value = ''; // pour pouvoir rouvrir le même fichier
+  openTorrents(files);
+});
+
+// Glissé depuis le gestionnaire de fichiers, n'importe où sur la fenêtre : sans
+// ça, le navigateur ouvrirait le fichier à la place du gestionnaire. Un
+// déplacement dans la file (plus haut) ne porte pas de fichiers.
+document.addEventListener('dragover', (event) => {
+  if (!event.dataTransfer.types.includes('Files')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+
+document.addEventListener('drop', (event) => {
+  if (!event.dataTransfer.types.includes('Files')) return;
+  event.preventDefault();
+  openTorrents([...event.dataTransfer.files]);
+});
 
 // ─── Import d'une liste de liens ───────────────────────────────────────────
 

@@ -6,6 +6,7 @@ continuent même navigateur fermé. Les ponts (host.py) lancés par Chrome
 relaient les messages, une ligne JSON par message.
 """
 
+import base64
 import fcntl
 import json
 import logging
@@ -15,8 +16,10 @@ import signal
 import socket
 import threading
 import time
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
-from . import VERSION, paths
+from . import VERSION, paths, torrent
 from .config import Config
 from .engine import Engine
 from .httpdl import DownloadError
@@ -287,13 +290,30 @@ class Daemon:
 
     def _add(self, message, reply):
         try:
-            job = self.engine.add(message.get("job") or {}, probe=bool(message.get("probe")))
+            job = self.engine.add(_from_disk(message.get("job") or {}), probe=bool(message.get("probe")))
             reply(job=job.public())
         except (ValueError, DownloadError) as e:
             reply(False, error=str(e))
         except Exception as e:
             log.exception("ajout")
             reply(False, error=f"erreur interne : {e}")
+
+
+def _from_disk(spec):
+    """Un .torrent du disque (file:// : un fichier glissé dans un onglet) : lu ici, et donné comme addTorrent.
+
+    Par ce canal seulement, celui de l'extension et du terminal (socket réservé à
+    l'utilisateur) : l'API JSON-RPC n'ouvre pas les fichiers de l'ordinateur.
+    """
+    url = spec.get("url")
+    if spec.get("kind") != "torrent" or not isinstance(url, str) or not url.lower().startswith("file:"):
+        return spec
+    parts = urlsplit(url)
+    if parts.netloc not in ("", "localhost"):
+        raise ValueError("fichier .torrent d'un autre ordinateur")
+    data = torrent.read_local(url2pathname(parts.path))
+    # Son nom est celui du .torrent : le téléchargement prend celui du torrent.
+    return dict(spec, url=None, filename=None, torrent=base64.b64encode(data).decode())
 
 
 def _take_lock(lock_file, sock_path):
