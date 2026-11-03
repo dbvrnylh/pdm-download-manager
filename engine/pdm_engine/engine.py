@@ -1146,9 +1146,14 @@ class Engine:
             self._publish(job)
 
     def _notify(self, job):
+        name = job.filename or job.url
+        if job.choosing and job.status == "paused" and job.source == "desktop":
+            # Un lien magnet ouvert depuis le bureau : sa liste de fichiers reçue, il attend qu'on choisisse,
+            # et personne ne regarde peut-être le gestionnaire. Une question, pas une fin : même sans « notify ».
+            self._desktop("Torrent en attente", f"{name}\nChoisis ses fichiers dans le gestionnaire PDM.")
+            return
         if not self.config["notify"] or job.status not in ("completed", "failed"):
             return
-        name = job.filename or job.url
         if job.status == "completed":
             title, body = "Téléchargement terminé", f"{name} ({human_size(job.size)})"
         else:
@@ -1157,10 +1162,7 @@ class Engine:
 
     @staticmethod
     def _desktop(title, body):
-        """Une notification du bureau, si notify-send existe."""
-        exe = shutil.which("notify-send")
-        if exe:
-            _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
+        desktop_notice(title, body)
 
 
 def _selection(indexes, count):
@@ -1204,6 +1206,13 @@ def in_window(now, start, end):
     minutes = now.tm_hour * 60 + now.tm_min
     first, last = (int(h) * 60 + int(m) for h, m in (start.split(":"), end.split(":")))
     return first <= minutes < last if first < last else minutes >= first or minutes < last
+
+
+def desktop_notice(title, body):
+    """Une notification du bureau, si notify-send existe."""
+    exe = shutil.which("notify-send")
+    if exe:
+        _detached([exe, "-a", "PDM", "-i", "folder-download", title, body])
 
 
 def _detached(command):

@@ -459,6 +459,47 @@ esac
         for job in jobs.values():
             chrome.request({"type": "cancel", "id": job["id"]})
 
+    @unittest.skipUnless(shutil.which("aria2c"), "aria2c absent : sudo apt install aria2")
+    def test_the_desktop_opens_torrents_and_magnet_links(self):
+        # Un faux notify-send, devant le vrai : il note les notifications au lieu de les montrer.
+        bin_dir = self.downloads.parent / "bin"
+        bin_dir.mkdir(parents=True)
+        notes = self.downloads.parent / "notifications"
+        fake = bin_dir / "notify-send"
+        fake.write_text('#!/bin/sh\nshift 4\nprintf \'%s|%s\\n\' "$1" "$(printf %s "$2" | tr \'\\n\' /)" >>"$PDM_NOTES"\n')
+        fake.chmod(0o755)
+        self.env.update(PATH=f"{bin_dir}:{self.env['PATH']}", PDM_NOTES=str(notes))
+        chrome = self.connect()
+        chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})
+        folder = self.downloads.parent / "Téléchargements à moi"
+        folder.mkdir()
+        single, single_hash = fx.make_torrent(self.base + "/announce", "seul.bin", os.urandom(1000))
+        season, season_hash = fx.make_torrent(self.base + "/announce", "Saison 1", {"e1.mkv": b"1" * 10, "e2.mkv": b"2" * 5})
+        (folder / "seul.torrent").write_bytes(single)
+        (folder / "saison 1.torrent").write_bytes(season)
+
+        def open_(target):
+            return subprocess.run([str(HOST), "open", target], capture_output=True, text=True, env=self.env, timeout=30)
+
+        # Le bureau donne un chemin, ou une adresse file:// (%u du fichier .desktop).
+        done = [open_(str(folder / "seul.torrent")), open_((folder / "saison 1.torrent").as_uri()),
+                open_("magnet:?xt=urn:btih:" + "cd" * 20 + "&dn=Film")]
+        self.assertEqual([r.returncode for r in done], [0, 0, 0], [r.stderr for r in done])
+        refused = [open_("https://exemple.org/a.torrent"), open_(str(folder / "absent.torrent"))]
+        self.assertEqual([r.returncode != 0 for r in refused], [True, True])
+        lines = notes.read_text().splitlines()
+        self.assertEqual(lines[:3], ["Torrent ajouté|seul.bin", "Torrent ajouté|Saison 1/Choisis ses fichiers dans le "
+                                     "gestionnaire PDM.", "Torrent ajouté|Film"])
+        self.assertTrue(lines[3].startswith("PDM n'a pas pu ouvrir ce torrent|https://exemple.org/a.torrent/"), lines)
+        self.assertIn("impossible de le lire", lines[4])
+        jobs = {j["infoHash"]: j for j in chrome.request({"type": "list"})["jobs"]}
+        self.assertEqual((len(jobs), {j["source"] for j in jobs.values()}), (3, {"desktop"}))
+        self.assertEqual((jobs[season_hash]["status"], jobs[season_hash]["choosing"]), ("paused", True),
+                         "un humain l'a ouvert : il choisit ses fichiers, comme au navigateur")
+        self.assertFalse(jobs[single_hash]["choosing"])
+        for job in jobs.values():
+            chrome.request({"type": "cancel", "id": job["id"]})
+
     def test_the_managers_commands_reach_the_engine(self):
         chrome = self.connect()
         chrome.request({"type": "config", "set": {"downloadDir": str(self.downloads), "notify": False}})

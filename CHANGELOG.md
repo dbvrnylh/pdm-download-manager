@@ -6,6 +6,14 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Opening torrents from the desktop. `install.sh` asks whether PDM should open `.torrent` files and magnet links,
+  naming the application that opens them today; on yes, a double-click on a `.torrent` in the file manager, or a
+  magnet link clicked in another application, goes to the new `pdm-host open` (a file path, a `file://` address or
+  a magnet link), which answers with a desktop notification. A torrent of several files waits for its files to be
+  chosen in the manager, as from the browser; a magnet link opened this way says so by a notification once its
+  description has arrived. On no, nothing is put in place: a `pdm.desktop` in the home folder would already take
+  precedence over the system's applications. The application that had them before is noted, and `uninstall.sh`
+  gives them back to it.
 - Opening a `.torrent` file already on the disk. **Ouvrir un .torrent…** in the manager picks one or several; one
   can also be dropped on the manager's window, or in any browser tab, where the browser turns it into a `file://`
   download that PDM takes over (the file stays where it is); and `pdm-host add file.torrent` takes its path,

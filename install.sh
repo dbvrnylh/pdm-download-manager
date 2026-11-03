@@ -154,7 +154,59 @@ else
 fi
 command -v notify-send >/dev/null || warn "notify-send absent : pas de notification de fin (sudo apt install libnotify-bin)"
 
-# ─── 5. Fin ─────────────────────────────────────────────────────────────────
+# ─── 5. Torrents et liens magnet hors du navigateur ─────────────────────────
+# Si tu le veux, PDM les ouvre : double-clic sur un .torrent, lien magnet
+# cliqué dans une autre application. Sinon, rien n'est posé : un pdm.desktop
+# dans ton dossier passerait déjà avant les applications du système. Celle
+# d'avant est notée, pour que uninstall.sh la remette.
+say "Torrents et liens magnet hors du navigateur"
+APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP="pdm.desktop"
+TYPES=(application/x-bittorrent x-scheme-handler/magnet)
+current=""
+if command -v xdg-mime >/dev/null; then
+  current="$(xdg-mime query default application/x-bittorrent 2>/dev/null || true)"
+fi
+owner="${current%.desktop}"
+if ! command -v xdg-mime >/dev/null; then
+  warn "xdg-mime absent : les .torrent restent à ton système (sudo apt install xdg-utils)"
+elif [ "$current" = "$DESKTOP" ] || ask "Ouvrir les .torrent et les liens magnet avec PDM${owner:+, à la place de $owner} ?"; then
+  previous=""
+  for type in "${TYPES[@]}"; do
+    before="$(xdg-mime query default "$type" 2>/dev/null || true)"
+    if [ -n "$before" ] && [ "$before" != "$DESKTOP" ]; then
+      previous+="$type=$before"$'\n'
+    fi
+  done
+  mkdir -p "$APPS"
+  cp "$SRC/extension/icons/icon128.png" "$APP/pdm.png"
+  cat >"$APPS/$DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=PDM
+GenericName=Gestionnaire de téléchargements
+Comment=Télécharger un torrent ou un lien magnet avec PDM
+Exec="$APP/pdm-host" open %u
+Icon=$APP/pdm.png
+Terminal=false
+NoDisplay=true
+MimeType=application/x-bittorrent;x-scheme-handler/magnet;
+EOF
+  if command -v update-desktop-database >/dev/null; then
+    update-desktop-database -q "$APPS" 2>/dev/null || true
+  fi
+  for type in "${TYPES[@]}"; do
+    xdg-mime default "$DESKTOP" "$type"
+  done
+  if [ "$current" != "$DESKTOP" ]; then
+    printf '%s' "$previous" >"$DATA/previous-handlers" # pas à la réinstallation : ce serait PDM
+  fi
+  ok "PDM ouvre les .torrent et les liens magnet"
+else
+  ok "les .torrent et les liens magnet restent à ${owner:-ton système}"
+fi
+
+# ─── 6. Fin ─────────────────────────────────────────────────────────────────
 cat <<EOF
 
 $(printf '\033[1;32m')PDM est installé.$(printf '\033[0m')

@@ -2303,6 +2303,20 @@ class TorrentFileTest(unittest.TestCase):
                 if case != "fichier supprimé":
                     self.assertEqual(Path(job.path).read_bytes(), b"contenu", "le fichier, lui, reste")
 
+    def test_a_torrent_opened_from_the_desktop_says_when_it_waits(self):
+        root = Path(tempfile.mkdtemp(dir=TMP))
+        os.environ["PDM_DATA_DIR"] = str(root)
+        config = Config(root / "config.json")
+        config.update({"notify": False})  # les fins se taisent ; une question, elle, se pose
+        engine = Engine(config, Tools(config), lambda event: None)
+        notes = []
+        engine._desktop = lambda title, body: notes.append((title, body))
+        for source in ("desktop", "intercept", "cli"):
+            engine._notify(engine_mod.Job(kind="torrent", url="magnet:?xt=urn:btih:" + "ab" * 20, filename="Saison 1",
+                                          source=source, status="paused", choosing=True))
+        self.assertEqual(notes, [("Torrent en attente", "Saison 1\nChoisis ses fichiers dans le gestionnaire PDM.")],
+                         "depuis le navigateur, le gestionnaire s'ouvre ; un script ne choisit pas")
+
     def test_without_aria2c_a_torrent_is_refused_at_once(self):
         root = Path(tempfile.mkdtemp(dir=TMP))
         os.environ["PDM_DATA_DIR"] = str(root)  # une liste vide, pas celle du test d'avant

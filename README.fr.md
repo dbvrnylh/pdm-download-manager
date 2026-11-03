@@ -110,7 +110,7 @@ Laisse le dépôt à sa place : le navigateur charge l'extension depuis ce dossi
 | Limiter un téléchargement, ou lui donner plus de connexions | Gestionnaire → **Options…** dessus : connexions et vitesse maximale pour ce fichier seulement, appliquées tout de suite s'il est en cours (une vidéo : à son prochain démarrage). |
 | Mettre en veille ou éteindre quand tout est fini | Gestionnaire → **À la fin : veille** ou **éteindre** (ou `pdm-host when-done suspend\|poweroff`). Quand plus rien ne se télécharge ni n'attend dans la file, un compte à rebours de 60 s apparaît avec **Annuler**, puis systemd met le PC en veille ou l'éteint. Une seule fois : le choix revient ensuite à « rien ». |
 | Regarder une vidéo pendant son téléchargement | Gestionnaire → **Lire** dessus. Voir [ci-dessous](#lire-pendant-le-téléchargement). |
-| Télécharger un torrent | Clique son lien magnet ou son lien `.torrent`, comme d'habitude ; ou colle le lien magnet dans le gestionnaire, ou `pdm-host add "magnet:?xt=…"`. Un fichier `.torrent` déjà sur ton disque : gestionnaire → **Ouvrir un .torrent…**, ou glisse-le sur le gestionnaire ou dans un onglet du navigateur, ou `pdm-host add fichier.torrent`. Il faut aria2 (`sudo apt install aria2`). Voir [ci-dessous](#torrents-et-liens-magnet). |
+| Télécharger un torrent | Clique son lien magnet ou son lien `.torrent`, comme d'habitude ; ou colle le lien magnet dans le gestionnaire, ou `pdm-host add "magnet:?xt=…"`. Un fichier `.torrent` déjà sur ton disque : gestionnaire → **Ouvrir un .torrent…**, ou glisse-le sur le gestionnaire ou dans un onglet du navigateur, ou `pdm-host add fichier.torrent`. Ou double-clique-le dans ton gestionnaire de fichiers, si PDM les ouvre (question posée à l'installation). Il faut aria2 (`sudo apt install aria2`). Voir [ci-dessous](#torrents-et-liens-magnet). |
 | Depuis le terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` pour passer par yt-dlp, `--quality 720` pour la qualité, `--checksum sha-256=…` pour une somme attendue, comme aria2). |
 | Piloter PDM depuis d'autres outils | Réglages → *Piloter PDM depuis d'autres outils*, ou `pdm-host rpc on` : l'API JSON-RPC compatible aria2, pour AriaNg et les scripts aria2. Voir [ci-dessous](#lapi-compatible-aria2). |
 
@@ -222,6 +222,13 @@ sudo apt install aria2
   téléchargement ; le fichier reste où il est), ou `pdm-host add fichier.torrent` (son chemin, relatif ou non). Le
   moteur le lit lui-même et ne demande rien à aucun site. L'API JSON-RPC n'ouvre aucun fichier de l'ordinateur : un
   script lui envoie le torrent lui-même (`addTorrent`).
+- **Depuis le bureau :** `install.sh` demande si PDM doit ouvrir les fichiers `.torrent` et les liens magnet, en
+  nommant l'application qui les ouvre aujourd'hui (qBittorrent, Transmission…). Si tu dis oui, un double-clic sur
+  un `.torrent` dans le gestionnaire de fichiers, ou un lien magnet cliqué dans une autre application (une
+  messagerie, un mail), va à PDM (`pdm-host open`) : une notification dit ce qui a été ajouté, et un torrent de
+  plusieurs fichiers attend ton choix dans le gestionnaire, comme depuis le navigateur. Si tu dis non, rien ne
+  change : aucun fichier n'est posé, car un fichier dans ton dossier personnel passerait déjà avant les
+  applications du système. `uninstall.sh` les rend à l'application qui les avait avant.
 - Les fichiers arrivent dans `Torrents/`, dans le dossier de PDM (tout un dossier pour un torrent de plusieurs
   fichiers). Tant qu'il n'est pas fini, un torrent s'écrit dans un dossier caché à lui (`.pdm-torrent-…`) : si tu
   l'annules, seul ce dossier part.

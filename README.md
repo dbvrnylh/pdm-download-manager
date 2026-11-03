@@ -112,7 +112,7 @@ Keep the repository where it is: the browser loads the extension from it.
 | Limit one download, or give it more connections | Manager → **Options…** on it: connections and maximum speed for this file only, applied at once while it runs (a video: from its next start). |
 | Sleep or shut down when everything is done | Manager → **À la fin : veille** or **éteindre** (or `pdm-host when-done suspend\|poweroff`). Once nothing downloads or waits in the queue, a 60 s countdown with **Annuler** appears, then systemd puts the computer to sleep or shuts it down. Once only: the choice goes back to "rien". |
 | Watch a video while it downloads | Manager → **Lire** on it. See [below](#watch-while-it-downloads). |
-| Download a torrent | Click its magnet link or its `.torrent` link, as usual; or paste the magnet link in the manager, or `pdm-host add "magnet:?xt=…"`. A `.torrent` file already on your disk: Manager → **Ouvrir un .torrent…**, or drop it on the manager or in a browser tab, or `pdm-host add file.torrent`. Needs aria2 (`sudo apt install aria2`). See [below](#torrents-and-magnet-links). |
+| Download a torrent | Click its magnet link or its `.torrent` link, as usual; or paste the magnet link in the manager, or `pdm-host add "magnet:?xt=…"`. A `.torrent` file already on your disk: Manager → **Ouvrir un .torrent…**, or drop it on the manager or in a browser tab, or `pdm-host add file.torrent`. Or double-click it in your file manager, if PDM opens them (asked at install). Needs aria2 (`sudo apt install aria2`). See [below](#torrents-and-magnet-links). |
 | Use the terminal | `~/.local/share/pdm/app/pdm-host add URL` (`--video` to go through yt-dlp, `--quality 720` to pick the quality, `--checksum sha-256=…` for an expected checksum, as in aria2). |
 | Drive PDM from other tools | Settings → *Piloter PDM depuis d'autres outils*, or `pdm-host rpc on`: the aria2-compatible JSON-RPC API, for AriaNg and aria2 scripts. See [below](#the-aria2-compatible-api). |
 
@@ -221,6 +221,13 @@ sudo apt install aria2
   it on the manager's window, or in any browser tab (taken like a download; the file stays where it is), or
   `pdm-host add file.torrent` (its path, relative or not). The engine reads it itself and asks no site. The JSON-RPC
   API opens no file of the computer: a script sends the torrent itself (`addTorrent`).
+- **From the desktop:** `install.sh` asks whether PDM should open `.torrent` files and magnet links, naming the
+  application that opens them today (qBittorrent, Transmission…). Say yes, and a double-click on a `.torrent` in
+  the file manager, or a magnet link clicked in another application (a chat, an email), goes to PDM
+  (`pdm-host open`): a notification says what was added, and a torrent of several files waits for your choice in
+  the manager, like one from the browser. Say no and nothing changes: no file is put in place, since one in your
+  home folder would already take precedence over the system's applications. `uninstall.sh` gives them back to
+  the application that had them before.
 - Files go to `Torrents/` in PDM's folder (a whole folder for a multi-file torrent). Until it is complete, a
   torrent is written in a hidden folder of its own (`.pdm-torrent-…`): cancel it and only that folder goes.
 - **Choose its files.** A torrent of several files waits for your choice: the **Fichiers du torrent** window

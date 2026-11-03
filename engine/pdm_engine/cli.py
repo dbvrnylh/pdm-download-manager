@@ -165,6 +165,40 @@ def _add_list(source, kind, quality, later):
         sys.exit(1)
 
 
+OPEN_USAGE = "Usage : pdm-host open (FICHIER.torrent | file://… | magnet:?…)"
+
+
+def _open(args):
+    """Ce que le bureau confie à PDM (pdm.desktop, voir install.sh) : un .torrent ouvert d'un double-clic, un
+    lien magnet cliqué hors du navigateur. Personne ne lit le terminal : la réponse est aussi une notification.
+
+    Le fichier, chemin ou adresse file://, est lu par le démon (daemon._from_disk). Comme depuis
+    l'extension, un torrent de plusieurs fichiers attend qu'on les choisisse (réglage torrentAsk).
+    """
+    from .engine import desktop_notice
+
+    if len(args) != 1:
+        sys.exit(OPEN_USAGE)
+    target = args[0]
+    if target.lower().startswith(("magnet:", "file:")):
+        url = target
+    elif re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):
+        url = None
+    else:
+        url = Path(target).absolute().as_uri()
+    reply = (_request({"type": "add", "job": {"url": url, "kind": "torrent", "source": "desktop"}}) if url else
+             {"ok": False, "error": "PDM n'ouvre d'ici que les fichiers .torrent et les liens magnet"})
+    if not reply["ok"]:
+        desktop_notice("PDM n'a pas pu ouvrir ce torrent", f"{target}\n{reply['error']}")
+        sys.exit(f"Erreur : {reply['error']}")
+    job = reply["job"]
+    body = job["filename"] or "lien magnet"
+    if job.get("choosing"):
+        body += "\nChoisis ses fichiers dans le gestionnaire PDM."
+    desktop_notice("Torrent ajouté", body)
+    print(f"Ajouté : {body}")
+
+
 RPC_USAGE = "Usage : pdm-host rpc [on [--port N] [--allow ORIGINE|none]... | off | new-secret]"
 
 
@@ -269,6 +303,8 @@ def main(args):
             job = {"kind": "torrent", "torrent": data, "source": "cli", "scheduled": later}
         reply = _request({"type": "add", "job": job})
         print("Ajouté." if reply["ok"] else f"Erreur : {reply['error']}")
+    elif command == "open":
+        _open(args[1:])
     elif command == "rpc":
         _rpc(args[1:])
     elif command == "when-done":
