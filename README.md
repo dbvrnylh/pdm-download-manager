@@ -263,7 +263,7 @@ pieces it needs, and jumps where you want.
   stretch, a little further, and so on while it waits (one more per second at most): they take turns in front
   of the playback, like the sequential download of a BitTorrent client. The rest of the file still downloads.
 - The address works only on this computer, and only with its random secret part: a web page cannot guess it.
-  Any player that reads a network address can use it (copy it from VLC's *Média → Ouvrir un flux réseau*).
+  Any player that reads a network address can use it (in VLC: *Média → Ouvrir un flux réseau*).
 - **A torrent** plays its video or song (the biggest of the chosen files). aria2 picks pieces at random, the
   rarest first, and cannot fetch a given byte; it can put the beginning and the end of a file first. So the
   file's end (the MP4 index) and a window in front of the playback go first (about 8 s of download, 4 to
@@ -549,7 +549,7 @@ install.sh · uninstall.sh
 Run the tests:
 
 ```bash
-python3 -m unittest discover -s tests -v   # engine, daemon, bridge, yt-dlp, torrents (≈ 8 min)
+python3 -m unittest discover -s tests -v   # engine, daemon, bridge, yt-dlp, torrents (≈ 9 min)
 node --test tests/lib.test.mjs             # extension modules
 npx eslint extension                       # lint
 ```
@@ -560,8 +560,9 @@ cross-host redirects and announced checksums (right or wrong), then checks the
 SHA-256 of every downloaded file. The tests where the transport matters (connections cut, paused or moved,
 mirrors, piece repair, the browser path) run again over HTTPS, with a test certificate authority made by
 `openssl`: a bug that only shows over TLS, such as encrypted bytes written into the file, does not pass unseen.
-The yt-dlp tests generate their own HLS stream with ffmpeg. Tests are skipped when the tool they need (yt-dlp,
-ffmpeg, openssl) is missing. CI runs everything on every push.
+The yt-dlp tests generate their own HLS stream with ffmpeg, and the torrent tests set up a local swarm (a tracker,
+an aria2c that shares). Tests are skipped when the tool they need (yt-dlp, ffmpeg, openssl, aria2c) is missing. CI
+runs everything on every push.
 
 Design choices worth knowing:
 
